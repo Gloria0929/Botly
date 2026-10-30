@@ -113,7 +113,8 @@ export default function MemoryPage() {
         <div className="mx-auto max-w-3xl px-6 py-8">
           <h1 className="text-[20px] font-semibold tracking-tight">记忆</h1>
           <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
-            共享记忆对所有 Bot 可见；私有记忆只注入到对应 Bot。第一版只有你能编辑，Bot 不能自行写入。
+            共享记忆对所有 Bot 可见；私有记忆只注入到对应 Bot。执行结束后会自动提取记忆候选，
+            确认后才写入；Bot 不会直接改记忆。
           </p>
 
           <div className="mt-5 flex flex-wrap gap-1.5">
