@@ -195,11 +195,19 @@ export const api = {
       query: string;
     }>(`/chats/${chatId}/messages/search?${s.toString()}`);
   },
-  send: (chatId: string, content: string, mention_bot_id?: string) =>
+  send: (chatId: string, content: string, mention_bot_id?: string, thread_id?: string) =>
     req<{ message: import("./types").Message; run: import("./types").Run }>(
       `/chats/${chatId}/messages`,
-      { method: "POST", body: JSON.stringify({ content, mention_bot_id }) }
+      { method: "POST", body: JSON.stringify({ content, mention_bot_id, thread_id }) }
     ),
+  /** CHT-07：从主线程的某条消息拉出分支 */
+  branches: (chatId: string) =>
+    req<import("./types").Branch[]>(`/chats/${chatId}/branches`),
+  createBranch: (chatId: string, message_id: string, title?: string) =>
+    req<import("./types").Branch>(`/chats/${chatId}/branches`, {
+      method: "POST",
+      body: JSON.stringify({ message_id, title }),
+    }),
   /** RUN-13：执行中补充，不新建执行 */
   interject: (chatId: string, content: string) =>
     req<{ message: import("./types").Message; run: import("./types").Run; interjection: boolean }>(

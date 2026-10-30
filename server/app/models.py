@@ -154,6 +154,8 @@ class Thread(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String(20), default="main")  # main | task | branch
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # CHT-07：分支从哪条消息拉出（用于回到锚点 / 展示来源）
+    anchor_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # MEM-05：主线程长对话的自动摘要与覆盖到的 seq，避免上下文无限增长。
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary_upto_seq: Mapped[int] = mapped_column(Integer, default=0)
@@ -187,6 +189,9 @@ class Run(Base, TimestampMixin):
     # RUN-13：总指挥已读到的最新插话 seq。子 Bot 用它判断是否有「尚未处理」
     # 的新插话，有则提前结束子任务交回总指挥，避免插话要等整个子任务跑完才生效。
     last_interjection_seq: Mapped[int] = mapped_column(Integer, default=0)
+    # CHT-07：分支线程里的执行。为空表示跑在主线程；否则 supervisor 的上下文
+    # 与回复都落在该分支线程，不打断主线程。
+    thread_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class Task(Base, TimestampMixin):

@@ -1,7 +1,7 @@
 "use client";
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { FileText } from "lucide-react";
+import { FileText, GitBranch } from "lucide-react";
 import type { Bot, ChatFile, Message, PlanStep, Task } from "@/lib/types";
 import Avatar from "@/components/ui/Avatar";
 import { bytes, clock } from "@/lib/fmt";
@@ -45,6 +45,7 @@ export default function MessageStream({
   focusMessageId,
   onOpenTaskDetail,
   allMessages,
+  onBranch,
 }: {
   messages: Message[];
   members: Bot[];
@@ -61,6 +62,8 @@ export default function MessageStream({
   onOpenTaskDetail?: (taskId: string, threadId: string) => void;
   /** 交给内联详情统计工具调用次数；未传时用当前消息列表 */
   allMessages?: Message[];
+  /** CHT-07：从某条消息拉出分支；分支视图里不传 */
+  onBranch?: (msg: Message) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -188,6 +191,7 @@ export default function MessageStream({
             detailOpen={!!openDetails[m.id]}
             onToggleDetail={() => toggleDetail(m.id)}
             onOpenTaskDetail={onOpenTaskDetail}
+            onBranch={onBranch}
           />
           </div>
         ))}
@@ -211,6 +215,7 @@ function MessageItem({
   detailOpen,
   onToggleDetail,
   onOpenTaskDetail,
+  onBranch,
 }: {
   msg: Message;
   bot?: Bot;
@@ -225,6 +230,7 @@ function MessageItem({
   detailOpen: boolean;
   onToggleDetail: () => void;
   onOpenTaskDetail?: (taskId: string, threadId: string) => void;
+  onBranch?: (msg: Message) => void;
 }) {
   const streaming = msg.status === "streaming";
 
@@ -307,7 +313,7 @@ function MessageItem({
   if (msg.sender_type === "user") {
     const interjection = msg.meta?.kind === "interjection";
     return (
-      <div className="flex justify-end gap-2.5">
+      <div className="group flex justify-end gap-2.5">
         <div className="max-w-[85%]">
           <div className="rounded-2xl rounded-br-md bg-accent px-3.5 py-2 text-[13.5px] leading-relaxed text-accentink">
             {interjection && (
@@ -317,7 +323,18 @@ function MessageItem({
             )}
             <div className="whitespace-pre-wrap">{msg.content}</div>
           </div>
-          <div className="mt-1 text-right text-[10.5px] text-faint">{clock(msg.created_at)}</div>
+          <div className="mt-1 flex items-center justify-end gap-1.5 text-[10.5px] text-faint">
+            {onBranch && (
+              <button
+                onClick={() => onBranch(msg)}
+                title="从这里拉出分支"
+                className="rounded p-0.5 opacity-0 transition-opacity hover:text-accent group-hover:opacity-100"
+              >
+                <GitBranch size={12} />
+              </button>
+            )}
+            {clock(msg.created_at)}
+          </div>
         </div>
       </div>
     );
@@ -343,7 +360,7 @@ function MessageItem({
   };
 
   return (
-    <div className="flex gap-2.5">
+    <div className="group flex gap-2.5">
       <Avatar value={botAvatar} size={32} alt={botName} className="mt-0.5" />
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-2">
@@ -351,6 +368,15 @@ function MessageItem({
           {botRole && <span className="text-[10.5px] text-faint">{botRole}</span>}
           <span className="text-[10.5px] text-faint">{clock(msg.created_at)}</span>
           {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
+          {onBranch && (
+            <button
+              onClick={() => onBranch(msg)}
+              title="从这里拉出分支"
+              className="ml-auto rounded p-0.5 text-faint opacity-0 transition-opacity hover:text-accent group-hover:opacity-100"
+            >
+              <GitBranch size={12} />
+            </button>
+          )}
         </div>
         {streaming && !hasContent ? (
           // 模型还没吐字：不显示空气泡和光标，只显示三点跳动

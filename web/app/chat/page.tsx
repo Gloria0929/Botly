@@ -3,10 +3,12 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  ArrowLeft,
   Bell,
   BellOff,
   Columns2,
   Download,
+  GitBranch,
   Loader2,
   Menu as MenuIcon,
   Pencil,
@@ -32,7 +34,7 @@ import ActionMenu from "@/components/ui/Menu";
 import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api } from "@/lib/api";
-import type { Chat, ChatFile, ChatSummary, Message, PlanStep, Run, Task } from "@/lib/types";
+import type { Chat, ChatFile, ChatSummary, Message, PlanStep, Run, Task, Branch } from "@/lib/types";
 import { num } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
 
@@ -48,6 +50,14 @@ function ChatContent() {
   const [chatsLoading, setChatsLoading] = useState(true);
   const [chatId, setChatId] = useState<string | null>(null);
   const [chat, setChat] = useState<Chat | null>(null);
+  // CHT-07：当前查看的分支线程；为空表示主线程
+  const [branch, setBranch] = useState<Branch | null>(null);
+  const branchRef = useRef<Branch | null>(null);
+  const [branchesOpen, setBranchesOpen] = useState(false);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  useEffect(() => {
+    branchRef.current = branch;
+  }, [branch]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [eventStart, setEventStart] = useState<{ chatId: string; threadId: string; after: number } | null>(null);
   const [me, setMe] = useState<any>(null);
@@ -266,7 +276,7 @@ function ChatContent() {
   const reloadMessages = useCallback((id: string) => {
     const anchor = focusRef.current;
     api
-      .messages(id, { limit: 80, around: anchor || undefined })
+      .messages(id, { limit: 80, around: anchor || undefined, thread_id: branchRef.current?.id })
       .then((d) => {
         if (chatIdRef.current !== id || anchor !== focusRef.current) return;
         if (anchor) setMessages(d.messages);
@@ -296,6 +306,8 @@ function ChatContent() {
     localStorage.setItem("botly-chat", chatId);
     setChat(null);
     setMessages([]);
+    branchRef.current = null;
+    setBranch(null);
     setMessagesLoading(true);
     navigationVersion.current += 1;
     focusRef.current = null;
@@ -573,9 +585,10 @@ function ChatContent() {
 
   const send = async (content: string) => {
     if (!chatId) return;
+    const threadId = branchRef.current?.id;
     const temp: Message = {
       id: `tmp-${Date.now()}`,
-      thread_id: chat?.main_thread_id || "",
+      thread_id: threadId || chat?.main_thread_id || "",
       run_id: null,
       seq: 1e9,
       sender_type: "user",
@@ -588,7 +601,7 @@ function ChatContent() {
     };
     setMessages((p) => [...p, temp]);
     try {
-      const r = await api.send(chatId, content);
+      const r = await api.send(chatId, content, undefined, threadId);
       if (chatIdRef.current !== chatId) return;
       // SSE 可能已经先推送了这条消息，替换临时消息时要去重，否则会出现重复 key
       setMessages((prev) => {
@@ -603,12 +616,62 @@ function ChatContent() {
     }
   };
 
+  /** CHT-07：从某条消息拉出分支线程 */
+  const branchFrom = async (msg: Message) => {
+    if (!chatId || branchRef.current) return;
+    try {
+      const b = await api.createBranch(chatId, msg.id);
+      branchRef.current = b;
+      setBranch(b);
+      const d = await api.messages(chatId, { limit: 80, thread_id: b.id });
+      setMessages(d.messages);
+      setHasEarlier(false);
+      setFocusMessage(null);
+      toast(`已拉出分支「${b.title}」`, "ok");
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
+
+  /** 从分支返回主线程 */
+  const backToMain = async () => {
+    if (!chatId) return;
+    branchRef.current = null;
+    setBranch(null);
+    const d = await api.messages(chatId, { limit: 80 });
+    setMessages(d.messages);
+    setHasEarlier(false);
+    setFocusMessage(null);
+  };
+
+  const openBranches = async () => {
+    if (!chatId) return;
+    try {
+      const list = await api.branches(chatId);
+      setBranches(list);
+      setBranchesOpen(true);
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
+
+  const enterBranch = async (b: Branch) => {
+    if (!chatId) return;
+    branchRef.current = b;
+    setBranch(b);
+    setBranchesOpen(false);
+    const d = await api.messages(chatId, { limit: 80, thread_id: b.id });
+    setMessages(d.messages);
+    setHasEarlier(false);
+    setFocusMessage(null);
+  };
+
   /** RUN-13：执行中补充，不新建执行 */
   const interject = async (content: string) => {
     if (!chatId || !run) return;
     const temp: Message = {
       id: `tmp-i-${Date.now()}`,
-      thread_id: chat?.main_thread_id || "",
+      thread_id: branchRef.current?.id || chat?.main_thread_id || "",
       run_id: run.id,
       seq: 1e9,
       sender_type: "user",
@@ -764,7 +827,7 @@ function ChatContent() {
     const id = chatId;
     setLoadingEarlier(true);
     try {
-      const history = await api.messages(id, { before: messages[0].seq, limit: 50 });
+      const history = await api.messages(id, { before: messages[0].seq, limit: 50, thread_id: branchRef.current?.id });
       if (chatIdRef.current !== id) return;
       setMessages((prev) => [...history.messages.filter((m) => !prev.some((old) => old.id === m.id)), ...prev]);
       setHasEarlier(history.has_more);
@@ -778,7 +841,7 @@ function ChatContent() {
     focusRef.current = null;
     setFocusMessage(null);
     try {
-      const history = await api.messages(id, { limit: 80 });
+      const history = await api.messages(id, { limit: 80, thread_id: branchRef.current?.id });
       if (chatIdRef.current !== id) return;
       setMessages(history.messages);
       setHasEarlier(history.has_more);
@@ -838,7 +901,23 @@ function ChatContent() {
               <MenuIcon size={17} />
             </button>
             <div className="min-w-0">
-              <div className="truncate text-[13px] font-medium">{chat?.name || "…"}</div>
+              {branch ? (
+                <div className="flex min-w-0 items-center gap-2">
+                  <button
+                    onClick={backToMain}
+                    className="flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-[11px] text-accent hover:bg-accent/10"
+                    title="返回主线程"
+                  >
+                    <ArrowLeft size={13} /> 主线程
+                  </button>
+                  <span className="flex min-w-0 items-center gap-1 text-[13px] font-medium">
+                    <GitBranch size={13} className="shrink-0 text-accent" />
+                    <span className="truncate">{branch.title}</span>
+                  </span>
+                </div>
+              ) : (
+                <div className="truncate text-[13px] font-medium">{chat?.name || "…"}</div>
+              )}
             </div>
 
             <button
@@ -919,6 +998,7 @@ function ChatContent() {
                         setRenameOpen(true);
                       },
                     },
+                    { label: "分支讨论", icon: GitBranch, onClick: openBranches },
                     { label: "导出聊天记录", icon: Download, onClick: exportChat },
                     { label: "解散群聊", icon: Trash2, danger: true, onClick: dissolve },
                   ]}
@@ -983,6 +1063,7 @@ function ChatContent() {
             onLoadEarlier={loadEarlier}
             focusMessageId={focusMessage}
             me={me}
+            onBranch={branch ? undefined : branchFrom}
             handlers={{
               onPlanApprove,
               onPlanCancel,
@@ -1113,6 +1194,37 @@ function ChatContent() {
           onKeyDown={(e) => e.key === "Enter" && doRename()}
           placeholder="群聊名称"
         />
+      </Modal>
+
+      <Modal
+        open={branchesOpen}
+        onClose={() => setBranchesOpen(false)}
+        title="分支讨论"
+        subtitle="从主线程任意消息拉出的分支，不打断主线程"
+        width="max-w-md"
+      >
+        {branches.length ? (
+          <div className="space-y-1.5">
+            {branches.map((b) => (
+              <button
+                key={b.id}
+                onClick={() => enterBranch(b)}
+                className="flex w-full items-center gap-2 rounded-lg border border-line px-3 py-2 text-left transition-colors hover:border-accent/40"
+              >
+                <GitBranch size={13} className="shrink-0 text-accent" />
+                <span className="min-w-0 flex-1 truncate text-[12.5px]">{b.title}</span>
+                <span className="shrink-0 text-[10.5px] text-faint">{b.message_count || 0} 条</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="py-8 text-center text-[12px] leading-relaxed text-faint">
+            还没有分支。
+            <br />
+            把鼠标移到任意消息上，点消息右上角的{" "}
+            <GitBranch size={12} className="inline text-accent" /> 图标即可拉出分支。
+          </div>
+        )}
       </Modal>
 
       <MembersModal

@@ -186,9 +186,17 @@ def _light_migrate() -> None:
         "providers": {"vendor_id": "VARCHAR(40)", "logo": "VARCHAR(500)"},
         "messages": {"reasoning_content": "TEXT"},
         "tasks": {"step_key": "VARCHAR(200)"},
-        "runs": {"last_turn_message_id": "VARCHAR(32)", "last_interjection_seq": "INTEGER DEFAULT 0"},
+        "runs": {
+            "last_turn_message_id": "VARCHAR(32)",
+            "last_interjection_seq": "INTEGER DEFAULT 0",
+            "thread_id": "VARCHAR(32)",
+        },
         "users": {"deleted_at": "TIMESTAMP", "purge_after": "TIMESTAMP"},
-        "threads": {"summary": "TEXT", "summary_upto_seq": "INTEGER DEFAULT 0"},
+        "threads": {
+            "summary": "TEXT",
+            "summary_upto_seq": "INTEGER DEFAULT 0",
+            "anchor_message_id": "VARCHAR(32)",
+        },
     }
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())

@@ -156,6 +156,16 @@ export type Run = {
 
 export type ChatFile = { id: string; path: string; size: number; updated_at: string | null };
 
+/** CHT-07：从主线程某条消息拉出的分支线程 */
+export type Branch = {
+  id: string;
+  title: string;
+  anchor_message_id: string | null;
+  parent_thread_id?: string;
+  message_count?: number;
+  created_at: string | null;
+};
+
 export type Chat = {
   id: string;
   name: string;

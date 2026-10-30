@@ -52,6 +52,13 @@ class MessageIn(BaseModel):
     mention_bot_id: str | None = None
     # 执行中补充（RUN-13）：为 True 时不新建执行，只把消息交给正在跑的执行
     interject: bool = False
+    # CHT-07：分支线程里的消息，为空表示主线程
+    thread_id: str | None = None
+
+
+class BranchIn(BaseModel):
+    message_id: str
+    title: str | None = None
 
 
 class MembersIn(BaseModel):
@@ -518,6 +525,104 @@ async def delete_chat(chat_id: str, user: User = Depends(current_user), db: Sess
     return {"ok": True}
 
 
+@router.get("/{chat_id}/branches")
+def list_branches(
+    chat_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """CHT-07：列出从主线程拉出的分支。"""
+    chat = owned_or_404(db, Chat, chat_id, user.id)
+    rows = db.scalars(
+        select(Thread)
+        .where(Thread.chat_id == chat.id, Thread.type == "branch")
+        .order_by(Thread.created_at.desc())
+    ).all()
+    out = []
+    for t in rows:
+        count = db.scalar(
+            select(func.count(Message.id)).where(Message.thread_id == t.id)
+        ) or 0
+        out.append(
+            {
+                "id": t.id,
+                "title": t.title or "分支",
+                "anchor_message_id": t.anchor_message_id,
+                "message_count": int(count),
+                "created_at": iso(t.created_at),
+            }
+        )
+    return out
+
+
+@router.post("/{chat_id}/branches", status_code=201)
+def create_branch(
+    chat_id: str,
+    payload: BranchIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """CHT-07：从任意一条主线程消息拉出分支线程，不打断主线程。
+
+    分支创建时把「锚点及之前的纯文本消息」复制一份作为快照，之后分支独立演进；
+    只复制文本，不带工具调用，避免出现 assistant(tool_calls) 缺 tool 结果的非法历史。
+    """
+    chat = owned_or_404(db, Chat, chat_id, user.id)
+    main = db.scalar(
+        select(Thread).where(Thread.chat_id == chat.id, Thread.type == "main")
+    )
+    if not main:
+        raise HTTPException(404, "群聊没有主线程")
+    anchor = owned_or_404(db, Message, payload.message_id, user.id)
+    if anchor.thread_id != main.id:
+        raise HTTPException(400, "只能从主线程的消息拉分支")
+    title = (payload.title or "").strip()[:120]
+    if not title:
+        title = " ".join((anchor.content or "分支").split())[:40] or "分支"
+    thread = Thread(
+        user_id=user.id,
+        chat_id=chat.id,
+        parent_thread_id=main.id,
+        type="branch",
+        title=title,
+        anchor_message_id=anchor.id,
+    )
+    db.add(thread)
+    db.flush()
+    src = db.scalars(
+        select(Message)
+        .where(
+            Message.thread_id == main.id,
+            Message.seq <= anchor.seq,
+            Message.type == "text",
+            Message.status != "streaming",
+        )
+        .order_by(Message.seq)
+    ).all()
+    for i, m in enumerate(src, 1):
+        db.add(
+            Message(
+                user_id=user.id,
+                thread_id=thread.id,
+                run_id=None,
+                seq=i,
+                sender_type=m.sender_type,
+                sender_bot_id=m.sender_bot_id,
+                type="text",
+                content=m.content,
+                meta={"branch_copy": True, "source_message_id": m.id},
+                status="done",
+            )
+        )
+    db.flush()
+    return {
+        "id": thread.id,
+        "title": title,
+        "anchor_message_id": anchor.id,
+        "parent_thread_id": main.id,
+        "message_count": len(src),
+        "created_at": iso(thread.created_at),
+    }
+
+
 @router.get("/{chat_id}/messages")
 def list_messages(
         chat_id: str,
@@ -855,15 +960,64 @@ def post_message(
         raise HTTPException(400, "消息不能为空")
 
     active = _active_run(db, chat.id)
+    # CHT-07：分支线程里的消息单独触发执行，上下文与回复都落在分支，不打断主线程
+    if payload.thread_id:
+        if active:
+            raise HTTPException(409, "当前群聊已有执行正在进行，请先停止或等待完成")
+        branch = owned_or_404(db, Thread, payload.thread_id, user.id)
+        if branch.chat_id != chat.id or branch.type != "branch":
+            raise HTTPException(404, "分支不存在")
+        sup = db.get(Bot, chat.supervisor_bot_id) if chat.supervisor_bot_id else None
+        if not sup:
+            raise HTTPException(400, "该群聊没有配置总指挥 Bot")
+        if not sup.provider_id:
+            raise HTTPException(
+                409, f"Bot「{sup.name}」尚未绑定模型接入，请先到设置页配置模型接入"
+            )
+        msg = add_message(
+            db, thread=branch, run_id=None, sender_type="user", type_="text", content=content
+        )
+        chat.last_active_at = now()
+        run = Run(
+            user_id=user.id,
+            chat_id=chat.id,
+            trigger_message_id=msg.id,
+            status="queued",
+            mode=chat.run_mode,
+            thread_id=branch.id,
+            config_snapshot={
+                "run_mode": chat.run_mode,
+                "supervisor": {"id": sup.id, "name": sup.name},
+                "members": [{"id": m.id, "name": m.name} for m in _members(db, chat.id)],
+                "bot_configs": capture_bots(db, _members(db, chat.id)),
+                "limits": chat.limits_override or {},
+                "branch": {"id": branch.id, "title": branch.title},
+            },
+        )
+        db.add(run)
+        db.flush()
+        msg.run_id = run.id
+        db.flush()
+        emit(
+            db,
+            user.id,
+            chat.id,
+            "run.status",
+            {"run_id": run.id, "chat_id": chat.id, "status": "queued", "steps_used": 0, "tokens_used": 0},
+        )
+        db.commit()
+        enqueue(run.id)
+        return {"message": message_out(msg), "run": run_out(run)}
+
     if active:
         if not payload.interject:
             raise HTTPException(409, "当前群聊已有执行正在进行，请先停止或等待完成")
-        # RUN-13：不新建执行，消息作为「执行中补充」进入主线程。
-        # 总指挥在下一个模型调用前读到它（见 orchestrator._build_messages）。
-        main = _main_thread(db, chat)
+        # RUN-13：不新建执行，消息作为「执行中补充」进入当前执行的线程。
+        # 分支执行时写分支线程，主线程执行时才写主线程。
+        thread = db.get(Thread, active.thread_id) if active.thread_id else _main_thread(db, chat)
         msg = add_message(
             db,
-            thread=main,
+            thread=thread,
             run_id=active.id,
             sender_type="user",
             type_="text",

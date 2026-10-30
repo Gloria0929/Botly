@@ -416,6 +416,10 @@ class RunExecutor:
 
     def _initial_state(self, db: Session, run: Run, chat: Chat) -> dict:
         main = self._main_thread(db, chat)
+        # CHT-07：分支线程里的执行把上下文与回复都落在分支，不碰主线程
+        thread = db.get(Thread, run.thread_id) if run.thread_id else main
+        if not thread or thread.chat_id != chat.id:
+            thread = main
         sup_id = supervisor_id(run, chat)
         if run.target_bot_id and run.target_bot_id != sup_id:
             role, bot_id = "worker", run.target_bot_id
@@ -427,7 +431,7 @@ class RunExecutor:
         return {
             "role": role,
             "bot_id": bot_id,
-            "thread_id": main.id,
+            "thread_id": thread.id,
             "task_id": None,
             "last": "",
             "has_calls": False,
@@ -526,6 +530,11 @@ class RunExecutor:
             provider_id = provider.id
             members = self._member_bots(db, chat, run)
             tool_list = toolmod.tools_for_bot(bot.tools or [], is_supervisor)
+            # CHT-07：分支是「深入讨论」，不派活、不出计划，避免打断主线程
+            if thread.type == "branch":
+                tool_list = [
+                    t for t in tool_list if t.name not in ("delegate", "propose_plan")
+                ]
             # MEM-05：主线程历史过长时，先把更早的消息压成摘要再构造上下文。
             # 摘要失败只告警、不影响本轮执行，仍会退回硬截断。
             if is_supervisor and thread.type == "main":
