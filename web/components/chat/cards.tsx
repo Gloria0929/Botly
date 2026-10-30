@@ -340,9 +340,16 @@ export function TaskInlineDetail({
 }) {
   const [now, setNow] = useState(() => Date.now());
   const threadId = live?.thread_id || msg.meta?.thread_id || msg.meta?.task_id;
+  const taskId = live?.id || msg.meta?.task_id;
   const mine = useMemo(
-    () => messages.filter((m) => threadId && m.thread_id === threadId),
-    [messages, threadId]
+    () =>
+      messages.filter(
+        (m) =>
+          (threadId && m.thread_id === threadId) ||
+          // 群聊里的工具调用是镜像消息，thread_id 仍是主线程，靠 meta.task_id 关联
+          (taskId && m.meta?.task_id === taskId)
+      ),
+    [messages, threadId, taskId]
   );
   const toolCount = mine.filter((m) => m.type === "tool_call").length;
   const instruction = live?.instruction || msg.meta?.delegation_instruction || "";
@@ -367,7 +374,7 @@ export function TaskInlineDetail({
         {open ? "收起详情" : "查看详情"}
       </button>
       {open && (
-        <div className="mt-1.5 space-y-2 rounded-lg border border-line bg-panel2/50 px-3 py-2.5 text-[11.5px] leading-relaxed text-muted">
+        <div className="mt-1.5 max-w-[85%] space-y-2 rounded-lg border border-line bg-panel2/50 px-3 py-2.5 text-[11.5px] leading-relaxed text-muted">
           {instruction && (
             <div className="flex gap-1.5">
               <ListChecks size={12} className="mt-0.5 shrink-0 text-faint" />

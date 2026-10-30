@@ -333,14 +333,8 @@ function MessageItem({
   const botAvatar = bot?.avatar || msg.sender_bot_avatar || "🤖";
   const botRole = msg.sender_bot_deleted ? undefined : bot?.role || msg.sender_bot_role;
   const hasContent = !!msg.content?.trim();
-  // 运行中的 token 数按执行（run）累计，几个子任务可能同时在跑，这里只显示本任务
-  const tokensSoFar = live
-    ? (live.tokens_used || 0) > 0
-      ? live.tokens_used
-      : detailMessages
-          .filter((m) => (m.thread_id === live.thread_id || m.meta?.task_id === live.id) && m.meta?.tokens_seen)
-          .sort((a, b) => b.seq - a.seq)[0]?.meta?.tokens_seen || 0
-    : 0;
+  // 运行中的 token 数：task.status 事件会实时刷新 chat.tasks 里的 tokens_used
+  const tokensSoFar = live?.tokens_used || 0;
   const summaryFallback = {
     status: taskStatus,
     attempt: msg.meta?.attempt,

@@ -460,6 +460,19 @@ function ChatContent() {
         setMessages((prev) => prev.map((m) => m.meta?.task_id === p.task_id
           ? { ...m, meta: { ...m.meta, task_status: p.status } } : m));
         setActiveTask((t) => t && t.id === p.task_id ? { ...t, ...p, id: t.id } : t);
+        // 群聊里挂着的任务详情直接读 chat.tasks，这里原地更新，token/状态不用等重拉
+        setChat((prev) => prev ? {
+          ...prev,
+          tasks: prev.tasks.map((t) => t.id === p.task_id ? {
+            ...t,
+            status: p.status,
+            tokens_used: p.tokens_used,
+            attempt: p.attempt,
+            started_at: p.started_at,
+            ended_at: p.ended_at,
+            result: p.result,
+          } : t),
+        } : prev);
       });
       es.addEventListener("approval.resolved", (ev) => {
         if (closed || chatIdRef.current !== chatId) return;
