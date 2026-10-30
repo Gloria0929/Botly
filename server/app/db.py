@@ -48,9 +48,19 @@ def session_scope() -> Session:
         db.close()
 
 
-def get_db():
-    """FastAPI 依赖：请求正常结束即提交，异常则回滚。"""
+from fastapi import Request
+
+
+def get_db(request: Request):
+    """FastAPI 依赖：请求正常结束即提交，异常则回滚。
+
+    注意：本依赖的提交发生在响应发出之后（yield 依赖的清理时机），不能
+    单独依靠它保证“下一个请求能读到本次写入”；即时可见性由
+    CommitBeforeResponseMiddleware 在响应发出前提交来保证。会话记在
+    request.state 上，供该中间件取用。
+    """
     db = SessionLocal()
+    request.state.db_session = db
     try:
         yield db
         db.commit()

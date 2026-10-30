@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from . import redis_bus
+from .commit_middleware import CommitBeforeResponseMiddleware
 from .http_logging import RequestLogMiddleware, unhandled_error
 from .logging_setup import LOG_DIR, get_logger, setup_logging
 from .api import (
@@ -52,6 +53,10 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# 最后加入即最外层：提交发生在响应字节离开之前，且在日志中间件
+# 的读取之后，不影响日志统计与流式响应。
+app.add_middleware(CommitBeforeResponseMiddleware)
 
 for r in (
         auth.router,
