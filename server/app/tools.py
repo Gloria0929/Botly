@@ -125,6 +125,20 @@ async def _web_search(ctx, query: str, max_results: int = 5) -> str:
 # 网页读取（含 SSRF 防护）
 # --------------------------------------------------------------------------- #
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata"}
+# 本地代理（Clash/Surge 等）的 fake-ip 段，属于 benchmarking 保留段；
+# 域名被解析到这里说明走了代理分流，不应误判成内网。
+_FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _banned_ip(ip) -> bool:
+    """IP 字面量的严格判定：私网/回环/链路本地/保留/组播都拒绝。"""
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+    )
 
 
 def _check_url(url: str) -> None:
@@ -132,23 +146,34 @@ def _check_url(url: str) -> None:
     if p.scheme not in ("http", "https"):
         raise ToolError("只支持 http/https")
     host = (p.hostname or "").lower()
-    if not host or host in _BLOCKED_HOSTS:
+    if not host or host in _BLOCKED_HOSTS or host.endswith(".local") or host.endswith(".internal"):
         raise ToolError("禁止访问该地址")
+    # IP 字面量：直接按地址判断，是最可靠的 SSRF 信号。
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _banned_ip(literal):
+            raise ToolError("禁止访问内网或本机地址")
+        return
+    # 域名：解析后只拦「明确内网」的地址。reserved 段（如 198.18.0.0/15 的
+    # 代理 fake-ip）放行，否则本机开代理/分流时所有公网域名都会被误杀成内网。
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
         raise ToolError("域名解析失败")
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or str(ip).startswith("169.254.")
-        ):
+        try:
+            resolved = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if resolved.is_loopback or resolved.is_link_local:
             raise ToolError("禁止访问内网或本机地址")
+        if resolved.is_private:
+            fake_ip = resolved.version == 4 and resolved in _FAKE_IP_NET
+            if not fake_ip:
+                raise ToolError("禁止访问内网或本机地址")
 
 
 def _html_to_text(html: str) -> str:

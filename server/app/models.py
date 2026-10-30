@@ -184,6 +184,9 @@ class Run(Base, TimestampMixin):
     # 最近一轮模型输出对应的消息 id：DB 已提交、检查点未写入时崩溃，重放
     # model 节点据此复用这一轮结果，避免重复调用、重复计步与重复消息（8.3）
     last_turn_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # RUN-13：总指挥已读到的最新插话 seq。子 Bot 用它判断是否有「尚未处理」
+    # 的新插话，有则提前结束子任务交回总指挥，避免插话要等整个子任务跑完才生效。
+    last_interjection_seq: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Task(Base, TimestampMixin):

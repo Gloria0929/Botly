@@ -186,7 +186,7 @@ def _light_migrate() -> None:
         "providers": {"vendor_id": "VARCHAR(40)", "logo": "VARCHAR(500)"},
         "messages": {"reasoning_content": "TEXT"},
         "tasks": {"step_key": "VARCHAR(200)"},
-        "runs": {"last_turn_message_id": "VARCHAR(32)"},
+        "runs": {"last_turn_message_id": "VARCHAR(32)", "last_interjection_seq": "INTEGER DEFAULT 0"},
         "users": {"deleted_at": "TIMESTAMP", "purge_after": "TIMESTAMP"},
         "threads": {"summary": "TEXT", "summary_upto_seq": "INTEGER DEFAULT 0"},
     }

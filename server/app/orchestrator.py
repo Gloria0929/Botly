@@ -443,6 +443,15 @@ class RunExecutor:
             replayed = self._replayed_turn(db, run, thread_id)
             if replayed is not None:
                 return replayed
+            # RUN-13：子 Bot 执行中收到新插话时，提前结束当前子任务交回总指挥，
+            # 让总指挥下一轮读到插话并调整，而不是等子任务整个跑完才接上。
+            if not is_supervisor and thread.type == "task" and task_id:
+                main_thread = self._main_thread(db, chat)
+                if self._pending_interjection_seq(db, run, main_thread):
+                    self._answer_open_calls(
+                        db, thread, run.id, "用户在执行中补充了新要求，本工具调用已中止。"
+                    )
+                    return (False, "用户在执行过程中补充了新要求，已中止当前子任务并交回总指挥处理。")
             # 上一轮流式写到一半进程就没了：草稿永远不会再被写完。空的直接删，
             # 有内容的标成「已中断」，避免前端留着永久“正在输入”的气泡。
             # 不限定线程：子 Bot 那轮可能在主线程还留了一条镜像草稿。
@@ -485,6 +494,9 @@ class RunExecutor:
             if is_supervisor and thread.type == "main":
                 await self._maybe_summarize(db, run, thread, kind, base_url, api_key, model)
             messages = self._build_messages(db, run, chat, thread, bot, is_supervisor, members)
+            # 总指挥本轮已经读到这些插话，标记已读，避免子 Bot 反复当作新插话中止。
+            if is_supervisor and thread.type == "main":
+                self._mark_interjections_read(db, run, thread)
             temperature = bot.temperature if bot.temperature is not None else 0.4
             plan_approved = self._plan_already(db, thread_id)
             task = db.get(Task, task_id) if task_id else None
@@ -1538,6 +1550,32 @@ class RunExecutor:
             .order_by(Bot.created_at)
         ).scalars().all()
         return [execution_bot(db, run, b.id) if run else b for b in rows if not b.deleted_at]
+
+    def _pending_interjection_seq(self, db: Session, run: Run, thread: Thread) -> int:
+        """主线程里「总指挥还没读到的插话」的最大 seq；没有则 0。"""
+        base = run.last_interjection_seq or 0
+        rows = db.scalars(
+            select(Message).where(
+                Message.thread_id == thread.id,
+                Message.run_id == run.id,
+                Message.type == "text",
+                Message.sender_type == "user",
+            )
+        ).all()
+        return max(
+            (
+                m.seq
+                for m in rows
+                if (m.meta or {}).get("kind") == "interjection" and m.seq > base
+            ),
+            default=0,
+        )
+
+    def _mark_interjections_read(self, db: Session, run: Run, thread: Thread) -> None:
+        seq = self._pending_interjection_seq(db, run, thread)
+        if seq:
+            run.last_interjection_seq = seq
+            db.flush()
 
     def _plan_already(self, db: Session, thread_id: str) -> bool:
         return bool(
