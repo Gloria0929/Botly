@@ -309,8 +309,10 @@ RUN-13 没有新建执行：`POST /chats/{id}/messages` 带 `interject=true` 时
    不会再把“用户未在规定时间内处理”作为工具结果交回总指挥。
 5. **未配置搜索 Key 时网页搜索仍可用**（TOL-01）。此时回退到 DuckDuckGo 公共搜索，结果不稳定；
    生产环境建议在设置页填 Tavily Key。
-6. **可观测性与备份尚未落地**（8.6 / M5）。当前没有 Prometheus 指标、队列积压告警和自动备份脚本，
-   部署时请自行配 `pg_dump` 与日志采集。
+6. **可观测性与备份部分落地**（8.6 / M5）。已提供 `/api/metrics`（Prometheus 文本格式：执行状态、
+   队列深度、待处理审批/提问、token/调用/失败计数）与 `scripts/backup_db.py`（Postgres `pg_dump` /
+   SQLite `.backup`，保留最近 N 份）。仍缺：执行完成率/失败原因看板、队列积压与超时告警、
+   50 用户 20 并发压测与 Alembic 版本化迁移。
 7. **Postgres 下事件序号可能“后插入先提交”**（9.3）。events 的自增 id 在插入时分配、提交时可见，
    并发事务可能让较小编号晚于较大编号出现，单条事件可能被 SSE 跳过；前端重连/快照刷新可兜底。
    彻底修复需要按群聊单独分配序号或提交后排序，暂未改动。
@@ -334,15 +336,18 @@ server/
     redis_bus.py       队列、事件广播、SSE 唤醒
     models.py          数据模型（第 10 节）
     accounts.py        账号停用、保留期与彻底清除（ACC-07）
-    api/               各模块路由（含 usage.py 用量聚合）
+    api/               各模块路由（含 usage.py 用量聚合、metrics.py 指标）
   scripts/
     make_invite.py     生成邀请码
     purge_accounts.py  已删除账号的恢复与清理
+    backup_db.py       数据库备份（Postgres pg_dump / SQLite .backup）
     migrate_sqlite_to_postgres.py  把业务表从 SQLite 复制到 Postgres
     smoke.py           对运行中的服务做端到端冒烟
   tests/
     test_flow.py       20 项验收测试（进程内驱动，无需常驻 Worker）
     test_account_export.py  账号删除与群聊导出回归
+    test_metrics.py    Prometheus 指标鉴权与输出
+    test_backup.py     备份与保留策略
 web/
   app/                 登录、注册、聊天、Bot、记忆、通知、设置、用量、运行日志
   components/chat/     消息流、计划/任务/审批/提问卡片、群聊设置、侧栏、输入栏
@@ -362,6 +367,7 @@ web/
 | `DATABASE_URL` | Postgres 连接串；不设置时用 `server/data/botly.db` | 未设置 |
 | `BOTLY_ENCRYPTION_KEY` | 独立的 Fernet 主密钥（可选） | 由 SECRET_KEY 派生 |
 | `BOTLY_COOKIE_SECURE` | 设为 `1` 时强制会话 Cookie 带 Secure（HTTPS 部署） | 关闭 |
+| `BOTLY_METRICS_TOKEN` | `/api/metrics` 的抓取令牌（`Authorization: Bearer <token>`）；未设置时仅回环地址可访问 | 未设置 |
 
 限额、重试、超时等默认值集中在 `server/app/config.py`，对应文档附录 A。
 运行时长与步数已不作为停止条件，只保留统计。
@@ -378,6 +384,14 @@ cd server
 
 迁移前确认没有排队/运行中/等待用户的执行；LangGraph 检查点不迁移（只对进行中的执行有意义）。
 目标库已有数据时脚本会拒绝执行，确认覆盖再加 `--force`。
+
+**监控指标**：`GET /api/metrics` 输出 Prometheus 文本格式（执行状态、队列深度、待处理审批/提问、
+token/调用/失败计数）。未配置 `BOTLY_METRICS_TOKEN` 时仅回环地址可访问；远程抓取请设置该令牌，
+Prometheus 用 `bearer_token` 或自定义 header 携带。
+
+**备份**：`cd server && ./venv/bin/python -m scripts.backup_db` 备份到 `server/data/backups/`
+（Postgres `pg_dump -Fc` / SQLite `.backup`），默认保留最近 7 份；`--list` 查看、`--restore <名字>`
+打印恢复命令。建议配 cron 每日执行一次。
 
 ## 常见问题
 
