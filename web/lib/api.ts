@@ -208,6 +208,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message_id, title }),
     }),
+  deleteBranch: (chatId: string, threadId: string) =>
+    req(`/chats/${chatId}/branches/${threadId}`, { method: "DELETE" }),
   /** RUN-13：执行中补充，不新建执行 */
   interject: (chatId: string, content: string) =>
     req<{ message: import("./types").Message; run: import("./types").Run; interjection: boolean }>(

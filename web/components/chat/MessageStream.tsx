@@ -327,10 +327,11 @@ function MessageItem({
             {onBranch && (
               <button
                 onClick={() => onBranch(msg)}
-                title="从这里拉出分支"
-                className="rounded p-0.5 opacity-0 transition-opacity hover:text-accent group-hover:opacity-100"
+                title="从此消息拉出分支"
+                className="flex items-center gap-1 rounded px-1 py-0.5 opacity-0 transition-opacity hover:text-accent group-hover:opacity-100"
               >
                 <GitBranch size={12} />
+                分支
               </button>
             )}
             {clock(msg.created_at)}
@@ -368,15 +369,6 @@ function MessageItem({
           {botRole && <span className="text-[10.5px] text-faint">{botRole}</span>}
           <span className="text-[10.5px] text-faint">{clock(msg.created_at)}</span>
           {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
-          {onBranch && (
-            <button
-              onClick={() => onBranch(msg)}
-              title="从这里拉出分支"
-              className="ml-auto rounded p-0.5 text-faint opacity-0 transition-opacity hover:text-accent group-hover:opacity-100"
-            >
-              <GitBranch size={12} />
-            </button>
-          )}
         </div>
         {streaming && !hasContent ? (
           // 模型还没吐字：不显示空气泡和光标，只显示三点跳动
@@ -390,10 +382,23 @@ function MessageItem({
             ))}
           </div>
         ) : hasContent ? (
-          <div className="max-w-[85%] rounded-2xl rounded-tl-md border border-line bg-panel px-3.5 py-2.5">
-            <Markdown text={msg.content} mention={mentionName} />
-            {streaming && (
-              <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulseSoft bg-accent align-middle" />
+          <div className="flex items-start gap-1.5">
+            <div className="max-w-[85%] rounded-2xl rounded-tl-md border border-line bg-panel px-3.5 py-2.5">
+              <Markdown text={msg.content} mention={mentionName} />
+              {streaming && (
+                <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulseSoft bg-accent align-middle" />
+              )}
+            </div>
+            {/* 分支入口贴在气泡右侧，避免飘到整行最右边、看不出属于哪条消息 */}
+            {onBranch && (
+              <button
+                onClick={() => onBranch(msg)}
+                title="从此消息拉出分支"
+                className="mt-2 flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] text-faint opacity-0 transition-opacity hover:bg-accent/10 hover:text-accent group-hover:opacity-100"
+              >
+                <GitBranch size={12} />
+                分支
+              </button>
             )}
           </div>
         ) : null}

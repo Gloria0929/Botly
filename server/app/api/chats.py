@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .. import sandbox
@@ -621,6 +621,63 @@ def create_branch(
         "message_count": len(src),
         "created_at": iso(thread.created_at),
     }
+
+
+@router.delete("/{chat_id}/branches/{thread_id}")
+def delete_branch(
+    chat_id: str,
+    thread_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """CHT-07：删除分支线程，连同分支里的消息、执行与审批提问。
+
+    主线程完全不受影响；分支正在执行时先请求停止并返回 409，
+    避免执行器把消息写进已删除的线程（外键冲突）。
+    """
+    chat = owned_or_404(db, Chat, chat_id, user.id)
+    thread = owned_or_404(db, Thread, thread_id, user.id)
+    if thread.chat_id != chat.id or thread.type != "branch":
+        raise HTTPException(404, "分支不存在")
+
+    run_ids = list(
+        db.scalars(select(Run.id).where(Run.user_id == user.id, Run.thread_id == thread.id)).all()
+    )
+    if run_ids:
+        active = list(
+            db.scalars(
+                select(Run).where(Run.id.in_(run_ids), Run.status.in_(ACTIVE))
+            ).all()
+        )
+        if active:
+            for run in active:
+                run.stop_requested = True
+            # 异常会让 get_db 回滚，所以先提交停止标记，再返回 409
+            db.commit()
+            raise HTTPException(409, "分支正在执行，已请求停止；请稍后再删除")
+
+    counts: dict[str, int] = {}
+    if run_ids:
+        counts["approvals"] = int(
+            db.execute(delete(Approval).where(Approval.run_id.in_(run_ids))).rowcount or 0
+        )
+        counts["questions"] = int(
+            db.execute(delete(Question).where(Question.run_id.in_(run_ids))).rowcount or 0
+        )
+    task_cond = Task.thread_id == thread.id
+    if run_ids:
+        task_cond = or_(task_cond, Task.run_id.in_(run_ids))
+    counts["tasks"] = int(
+        db.execute(delete(Task).where(Task.user_id == user.id, task_cond)).rowcount or 0
+    )
+    counts["messages"] = int(
+        db.execute(delete(Message).where(Message.thread_id == thread.id)).rowcount or 0
+    )
+    if run_ids:
+        counts["runs"] = int(db.execute(delete(Run).where(Run.id.in_(run_ids))).rowcount or 0)
+    db.delete(thread)
+    db.flush()
+    return {"ok": True, **counts}
 
 
 @router.get("/{chat_id}/messages")

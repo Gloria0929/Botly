@@ -666,6 +666,33 @@ function ChatContent() {
     setFocusMessage(null);
   };
 
+  /** 删除分支（消息与执行一起删，主线程不受影响） */
+  const removeBranch = async (b: Branch) => {
+    if (!chatId) return;
+    const ok = await confirm({
+      title: `删除分支「${b.title}」？`,
+      description: "分支里的消息和执行记录都会被删除，主线程不受影响。",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteBranch(chatId, b.id);
+      setBranches((list) => list.filter((x) => x.id !== b.id));
+      if (branchRef.current?.id === b.id) {
+        branchRef.current = null;
+        setBranch(null);
+        const d = await api.messages(chatId, { limit: 80 });
+        setMessages(d.messages);
+        setHasEarlier(false);
+        setFocusMessage(null);
+      }
+      toast("分支已删除", "ok");
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
+
   /** RUN-13：执行中补充，不新建执行 */
   const interject = async (content: string) => {
     if (!chatId || !run) return;
@@ -914,6 +941,13 @@ function ChatContent() {
                     <GitBranch size={13} className="shrink-0 text-accent" />
                     <span className="truncate">{branch.title}</span>
                   </span>
+                  <button
+                    onClick={() => removeBranch(branch)}
+                    title="删除该分支"
+                    className="shrink-0 rounded-md p-1 text-faint transition-colors hover:bg-danger/10 hover:text-danger"
+                  >
+                    <Trash2 size={13} />
+                  </button>
                 </div>
               ) : (
                 <div className="truncate text-[13px] font-medium">{chat?.name || "…"}</div>
@@ -1206,23 +1240,34 @@ function ChatContent() {
         {branches.length ? (
           <div className="space-y-1.5">
             {branches.map((b) => (
-              <button
+              <div
                 key={b.id}
-                onClick={() => enterBranch(b)}
-                className="flex w-full items-center gap-2 rounded-lg border border-line px-3 py-2 text-left transition-colors hover:border-accent/40"
+                className="group flex w-full items-center gap-1 rounded-lg border border-line px-2 py-1.5 transition-colors hover:border-accent/40"
               >
-                <GitBranch size={13} className="shrink-0 text-accent" />
-                <span className="min-w-0 flex-1 truncate text-[12.5px]">{b.title}</span>
-                <span className="shrink-0 text-[10.5px] text-faint">{b.message_count || 0} 条</span>
-              </button>
+                <button
+                  onClick={() => enterBranch(b)}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-1 py-0.5 text-left"
+                >
+                  <GitBranch size={13} className="shrink-0 text-accent" />
+                  <span className="min-w-0 flex-1 truncate text-[12.5px]">{b.title}</span>
+                  <span className="shrink-0 text-[10.5px] text-faint">{b.message_count || 0} 条</span>
+                </button>
+                <button
+                  onClick={() => removeBranch(b)}
+                  title="删除分支"
+                  className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-opacity hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
             ))}
           </div>
         ) : (
           <div className="py-8 text-center text-[12px] leading-relaxed text-faint">
             还没有分支。
             <br />
-            把鼠标移到任意消息上，点消息右上角的{" "}
-            <GitBranch size={12} className="inline text-accent" /> 图标即可拉出分支。
+            把鼠标移到任意消息上，点气泡右侧的{" "}
+            <GitBranch size={12} className="inline text-accent" /> 分支按钮即可拉出分支。
           </div>
         )}
       </Modal>
