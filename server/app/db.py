@@ -200,11 +200,17 @@ def _light_migrate() -> None:
     }
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
-    with engine.begin() as conn:
-        for table, columns in wanted.items():
-            if table not in existing_tables:
+    for table, columns in wanted.items():
+        if table not in existing_tables:
+            continue
+        have = {c["name"] for c in insp.get_columns(table)}
+        for col, ddl in columns.items():
+            if col in have:
                 continue
-            have = {c["name"] for c in insp.get_columns(table)}
-            for col, ddl in columns.items():
-                if col not in have:
+            try:
+                # 每个加列独立事务：API 与 Worker 同时启动时可能并发 ALTER，
+                # 后到的一方会报 DuplicateColumn，忽略即可（列已存在）。
+                with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+            except Exception:  # noqa: BLE001
+                pass
