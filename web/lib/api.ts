@@ -292,6 +292,13 @@ export const api = {
   patchMemory: (id: string, body: any) =>
     req<import("./types").Memory>(`/memories/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteMemory: (id: string) => req(`/memories/${id}`, { method: "DELETE" }),
+  /** MEM-04：执行结束后自动生成的记忆候选 */
+  memoryCandidates: () =>
+    req<{ candidates: import("./types").MemoryCandidate[] }>("/memories/candidates"),
+  acceptMemoryCandidate: (id: string) =>
+    req<import("./types").Memory>(`/memories/candidates/${id}/accept`, { method: "POST" }),
+  rejectMemoryCandidate: (id: string) =>
+    req(`/memories/candidates/${id}/reject`, { method: "POST" }),
 
   // 通知
   notifications: () => req<{ items: import("./types").Notification[]; unread_count: number }>("/notifications"),

@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from langgraph.types import interrupt
 
 from . import graph as graphmod
+from . import llm
 from . import sandbox, tools as toolmod
 from .config import (
     APPROVAL_TTL_HOURS,
@@ -49,6 +50,7 @@ from .models import (
     ChatMember,
     FileRec,
     Memory,
+    MemoryCandidate,
     Message,
     Provider,
     Question,
@@ -179,6 +181,39 @@ def _parse_json(raw: str) -> dict:
         return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _parse_memory_candidates(raw: str) -> list[dict]:
+    """解析模型返回的记忆候选 JSON，容忍 ``` 包裹与前后解释文字。"""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("["), text.rfind("]")
+        if start < 0 or end <= start:
+            return []
+        try:
+            data = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data[:3]:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()[:500]
+        if not content:
+            continue
+        out.append(
+            {"title": str(item.get("title") or "").strip()[:120], "content": content}
+        )
+    return out
 
 
 EMPTY_OUTPUT = "（无输出）"
@@ -312,6 +347,8 @@ class RunExecutor:
         self.run_id = run_id
         self._last_stop_check = 0.0
         self._last_flush = 0.0
+        # MEM-04：候选生成是后台任务，保留引用避免被回收
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ---------------- 入口 ----------------
     async def execute(self) -> None:
@@ -1094,6 +1131,14 @@ class RunExecutor:
 
     def finish_run(self, content: str) -> None:
         self._finish_completed(content)
+        # MEM-04：执行成功后异步提取记忆候选，不阻塞收尾；失败只记日志。
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._generate_memory_candidates(content))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     # ---------------- 工具分发 ----------------
     async def _handle_tool_call(
@@ -1652,9 +1697,13 @@ class RunExecutor:
         messages: list[dict],
         temperature: float = 0.3,
     ) -> str:
-        """消费一次模型输出，只取正文（用于摘要等维护性调用，不落业务消息）。"""
+        """消费一次模型输出，只取正文（用于摘要等维护性调用，不落业务消息）。
+
+        走 `llm.stream_chat` 而不是模块级 `stream_chat`：维护性调用不应被业务流
+        的 monkeypatch/包装拦截，也不会混进「本轮模型调用」的统计。
+        """
         text = ""
-        async for chunk in stream_chat(
+        async for chunk in llm.stream_chat(
             kind=kind,
             base_url=base_url,
             api_key=api_key or "",
@@ -1746,6 +1795,111 @@ class RunExecutor:
         thread.summary_upto_seq = max(m.seq for m in pending)
         db.flush()
         log.info("已更新主线程摘要 seq=%s 长度=%d", thread.summary_upto_seq, len(summary))
+
+    async def _generate_memory_candidates(self, summary: str) -> None:
+        """MEM-04：从本次执行里提取 1–3 条记忆候选，等用户确认后写入。
+
+        只采信用户原话与总指挥汇总，不读网页/工具返回，避免网页噪声或提示词
+        注入污染长期记忆；失败只记日志，不影响执行结果。
+        """
+        try:
+            with session_scope() as db:
+                run = db.get(Run, self.run_id)
+                if not run or run.status != "completed":
+                    return
+                chat = db.get(Chat, run.chat_id)
+                sup_id = supervisor_id(run, chat)
+                bot = execution_bot(db, run, sup_id) if sup_id else None
+                provider = execution_provider(db, run, bot) if bot else None
+                if not provider or not bot:
+                    return
+                model = bot.model or (provider.models[0]["name"] if provider.models else "")
+                if not model:
+                    return
+                kind, base_url = provider.kind, provider.base_url
+                api_key = decrypt_secret(provider.api_key_encrypted)
+                user_id, chat_id = run.user_id, chat.id
+                pending = db.scalar(
+                    select(func.count(MemoryCandidate.id)).where(
+                        MemoryCandidate.user_id == user_id,
+                        MemoryCandidate.status == "pending",
+                    )
+                ) or 0
+                if pending >= 10:
+                    return
+                trigger = (
+                    db.get(Message, run.trigger_message_id) if run.trigger_message_id else None
+                )
+                request = (trigger.content or "").strip() if trigger else ""
+                extra = [
+                    (m.content or "").strip()
+                    for m in db.scalars(
+                        select(Message)
+                        .where(
+                            Message.run_id == run.id,
+                            Message.type == "text",
+                            Message.sender_type == "user",
+                        )
+                        .order_by(Message.seq)
+                    ).all()
+                    if (m.content or "").strip()
+                ]
+                existing = {
+                    (m.content or "").strip()
+                    for m in db.scalars(select(Memory).where(Memory.user_id == user_id)).all()
+                }
+            if not request:
+                return
+
+            extra_text = "\n".join(extra[1:4]) if len(extra) > 1 else ""
+            raw = await self._complete_text(
+                kind=kind,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是记忆整理助手，只输出 JSON 数组，不要解释。"},
+                    {
+                        "role": "user",
+                        "content": (
+                            "从下面这次任务执行中，提取值得长期记住的用户信息。\n"
+                            "只提取用户明确表达的事实、偏好、约定、项目背景；"
+                            "不要提取网页内容、工具返回、模型推测或一次性任务细节。\n"
+                            "没有值得记住的内容就返回 []。最多 3 条，每条 20–80 字。\n"
+                            '只输出 JSON：[{"title":"短标题","content":"具体内容"}]\n\n'
+                            f"任务请求：{request}\n"
+                            + (f"执行中的补充：{extra_text}\n" if extra_text else "")
+                            + f"执行结果摘要：{(summary or '')[:2000]}"
+                        ),
+                    },
+                ],
+                temperature=0.2,
+            )
+            candidates = _parse_memory_candidates(raw)
+            if not candidates:
+                return
+            with session_scope() as db:
+                added = 0
+                for c in candidates:
+                    if c["content"] in existing:
+                        continue
+                    db.add(
+                        MemoryCandidate(
+                            user_id=user_id,
+                            run_id=self.run_id,
+                            chat_id=chat_id,
+                            scope="shared",
+                            title=c["title"],
+                            content=c["content"],
+                            status="pending",
+                        )
+                    )
+                    added += 1
+                if added:
+                    db.flush()
+                    log.info("生成记忆候选 %d 条 run=%s", added, self.run_id)
+        except Exception as exc:  # noqa: BLE001 - 候选失败不影响执行
+            log.warning("生成记忆候选失败：%s", exc)
 
     def _build_messages(
         self,

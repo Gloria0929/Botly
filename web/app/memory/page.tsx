@@ -1,17 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Brain, Check, Loader2, Plus, Trash2, X } from "lucide-react";
+import { Brain, Check, Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api } from "@/lib/api";
-import type { Bot, Memory } from "@/lib/types";
+import type { Bot, Memory, MemoryCandidate } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
 export default function MemoryPage() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [tab, setTab] = useState<string>("shared");
   const [items, setItems] = useState<Memory[]>([]);
+  const [candidates, setCandidates] = useState<MemoryCandidate[]>([]);
   const [limit, setLimit] = useState(4000);
   const [injected, setInjected] = useState(0);
   const [totalLength, setTotalLength] = useState(0);
@@ -26,7 +27,25 @@ export default function MemoryPage() {
   useEffect(() => {
     api.bots().then((b) => setBots(b.filter((x) => !x.deleted))).catch(() => {});
     api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
+    api.memoryCandidates().then((d) => setCandidates(d.candidates)).catch(() => {});
   }, []);
+
+  const acceptCandidate = async (id: string) => {
+    try {
+      await api.acceptMemoryCandidate(id);
+      setCandidates((prev) => prev.filter((c) => c.id !== id));
+      toast("已保存到记忆", "ok");
+      load();
+      api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
+
+  const rejectCandidate = async (id: string) => {
+    await api.rejectMemoryCandidate(id).catch(() => {});
+    setCandidates((prev) => prev.filter((c) => c.id !== id));
+  };
 
   const load = () => {
     setLoading(true);
@@ -124,6 +143,46 @@ export default function MemoryPage() {
             <p className="mt-1.5 text-[11px] text-danger">
               已保存 {totalLength.toLocaleString()} 字，超过注入上限。共享与私有记忆合计按更新时间选取最近内容，原始记忆仍会保留。
             </p>
+          )}
+
+          {candidates.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <Sparkles size={13} className="text-accent" />
+                <h2 className="text-[13px] font-medium">待确认的记忆候选</h2>
+                <span className="text-[10.5px] text-faint">
+                  {candidates.length} 条 · 执行结束后自动提取，确认后才写入
+                </span>
+              </div>
+              <div className="space-y-2">
+                {candidates.map((c) => (
+                  <div key={c.id} className="rounded-xl border border-accent/25 bg-accent/[0.04] p-3.5">
+                    <div className="flex flex-wrap items-start gap-3">
+                      <div className="min-w-0 flex-1">
+                        {c.title && <div className="text-[12.5px] font-medium">{c.title}</div>}
+                        <div className="mt-0.5 whitespace-pre-wrap text-[12.5px] leading-relaxed text-muted">
+                          {c.content}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 gap-1.5">
+                        <button
+                          className="btn-primary px-2.5 py-1 text-[11.5px]"
+                          onClick={() => acceptCandidate(c.id)}
+                        >
+                          <Check size={12} /> 保存
+                        </button>
+                        <button
+                          className="btn-ghost px-2.5 py-1 text-[11.5px]"
+                          onClick={() => rejectCandidate(c.id)}
+                        >
+                          <X size={12} /> 忽略
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           <div className="card mt-4 p-3.5">

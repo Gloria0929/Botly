@@ -1,7 +1,7 @@
 """记忆：共享记忆（用户级）与 Bot 私有记忆。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import MEMORY_INJECT_LIMIT
 from ..db import get_db
 from ..deps import current_user, owned_or_404
-from ..models import Bot, Memory, User
+from ..models import Bot, Memory, MemoryCandidate, User, now
 from ..memory_context import memory_context
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -36,6 +36,67 @@ def _out(m: Memory) -> dict:
         "content": m.content,
         "updated_at": m.updated_at.isoformat() if m.updated_at else None,
     }
+
+
+def _candidate_out(c: MemoryCandidate) -> dict:
+    return {
+        "id": c.id,
+        "run_id": c.run_id,
+        "chat_id": c.chat_id,
+        "scope": c.scope,
+        "bot_id": c.bot_id,
+        "title": c.title,
+        "content": c.content,
+        "status": c.status,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+@router.get("/candidates")
+def list_candidates(
+    status: str = Query(default="pending"),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """MEM-04：执行结束后生成的记忆候选，默认只看待确认的。"""
+    q = select(MemoryCandidate).where(MemoryCandidate.user_id == user.id)
+    if status:
+        q = q.where(MemoryCandidate.status == status)
+    rows = db.scalars(q.order_by(MemoryCandidate.created_at.desc()).limit(50)).all()
+    return {"candidates": [_candidate_out(c) for c in rows]}
+
+
+@router.post("/candidates/{candidate_id}/accept", status_code=201)
+def accept_candidate(
+    candidate_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    c = owned_or_404(db, MemoryCandidate, candidate_id, user.id)
+    if c.status != "pending":
+        raise HTTPException(400, "该候选已处理")
+    m = Memory(
+        user_id=user.id,
+        scope=c.scope,
+        bot_id=c.bot_id,
+        title=c.title,
+        content=c.content,
+    )
+    db.add(m)
+    c.status = "accepted"
+    c.resolved_at = now()
+    db.flush()
+    return _out(m)
+
+
+@router.post("/candidates/{candidate_id}/reject")
+def reject_candidate(
+    candidate_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    c = owned_or_404(db, MemoryCandidate, candidate_id, user.id)
+    if c.status == "pending":
+        c.status = "rejected"
+        c.resolved_at = now()
+        db.flush()
+    return {"ok": True}
 
 
 @router.get("")

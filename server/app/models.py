@@ -273,6 +273,27 @@ class Memory(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, default="")
 
 
+class MemoryCandidate(Base, TimestampMixin):
+    """MEM-04：执行结束后自动提取的记忆候选，用户确认后才写入 memories。
+
+    只从用户请求与总指挥汇总里提取，不采信网页/工具返回的内容，避免提示词注入
+    或网页噪声污染长期记忆。
+    """
+
+    __tablename__ = "memory_candidates"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    chat_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scope: Mapped[str] = mapped_column(String(12), default="shared")
+    bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    title: Mapped[str] = mapped_column(String(120), default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
+    # pending | accepted | rejected
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class FileRec(Base, TimestampMixin):
     __tablename__ = "files"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)

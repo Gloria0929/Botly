@@ -207,6 +207,19 @@ export type Memory = {
   updated_at: string | null;
 };
 
+/** MEM-04：执行结束后自动提取、等待用户确认的记忆候选 */
+export type MemoryCandidate = {
+  id: string;
+  run_id: string | null;
+  chat_id: string | null;
+  scope: "shared" | "bot";
+  bot_id: string | null;
+  title: string;
+  content: string;
+  status: "pending" | "accepted" | "rejected";
+  created_at: string | null;
+};
+
 export type Me = {
   id: string;
   email: string;
