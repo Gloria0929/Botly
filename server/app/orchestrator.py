@@ -405,6 +405,14 @@ class RunExecutor:
                 run = db.get(Run, run_id)
                 if run.status in ("completed", "failed", "stopped"):
                     return
+                if run.status == "queued":
+                    # 竞态防护：暂停点产生后、这里落盘前，用户可能已经处理了
+                    # 审批 / 计划 / 提问，处理方把状态置为 queued 等待恢复。
+                    # 此时绝不能再写回 waiting，否则那次处理会被静默丢弃，
+                    # 执行永久卡在等待态（且无待处理审批单可再处理）。
+                    # 恢复方写好的 resume_payload 就是重放需要的，留给它。
+                    log.info("暂停落盘跳过 run=%s：状态已是 queued，保留恢复方的决定", run_id)
+                    return
                 run.status = "waiting"
                 run.resume_payload = paused
                 task = db.get(Task, paused.get("task_id")) if paused.get("task_id") else None

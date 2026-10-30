@@ -23,7 +23,7 @@ from .config import (
 from .db import IS_SQLITE, init_db, session_scope
 from .maintenance import expire_overdue, prune_expired
 from .logging_setup import get_logger, run_id_var, setup_logging
-from .models import LoginAttempt, Run, now
+from .models import Approval, LoginAttempt, Run, now
 from .orchestrator import RunExecutor, execute_run
 
 log = get_logger("worker")
@@ -59,6 +59,25 @@ def _recover_and_collect() -> list[str]:
             ).values(status="queued", lease_until=None))
             if recovered.rowcount:
                 log.info("回收僵尸执行 run=%s", r.id)
+
+        # 自愈：审批竞态残留。正常路径下批准会把执行原子地置为 queued，
+        # 因此“waiting + 对应审批已批准且未被消费”只可能是暂停落盘覆盖了
+        # 批准的残留（或批准后进程崩溃）。先于 queued 扫描前处理，让本轮
+        # 就能直接认领；不会误伤正常等待（那时审批还是 pending）。
+        stuck = db.scalars(
+            select(Run).where(Run.status == "waiting").order_by(Run.created_at).limit(50)
+        ).all()
+        for r in stuck:
+            payload = r.resume_payload or {}
+            if payload.get("kind") != "approval" or not payload.get("approval_id"):
+                continue
+            ap = db.get(Approval, payload["approval_id"])
+            if ap and ap.status == "approved" and ap.consumed_at is None:
+                healed = db.execute(update(Run).where(
+                    Run.id == r.id, Run.status == "waiting",
+                ).values(status="queued"))
+                if healed.rowcount:
+                    log.info("自愈卡住的审批执行 run=%s approval=%s", r.id, ap.id)
 
         queued = db.scalars(
             select(Run).where(Run.status == "queued").order_by(Run.created_at).limit(50)
