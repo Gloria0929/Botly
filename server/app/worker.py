@@ -12,7 +12,14 @@ from datetime import timedelta
 
 from sqlalchemy import delete, func, select, text, update
 from . import redis_bus
-from .config import MAX_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS_PER_USER, WORKER_CONCURRENCY, WORKER_LEASE_SECONDS
+from .alerts import check_alerts
+from .config import (
+    ALERT_CHECK_INTERVAL,
+    MAX_CONCURRENT_RUNS,
+    MAX_CONCURRENT_RUNS_PER_USER,
+    WORKER_CONCURRENCY,
+    WORKER_LEASE_SECONDS,
+)
 from .db import IS_SQLITE, init_db, session_scope
 from .maintenance import expire_overdue, prune_expired
 from .logging_setup import get_logger, run_id_var, setup_logging
@@ -25,6 +32,7 @@ RECONCILE_INTERVAL = 5.0
 PRUNE_INTERVAL = 3600.0
 _stop = False
 _last_prune = 0.0
+_last_alert_check = 0.0
 
 
 def _handle_stop(*_args):
@@ -129,7 +137,7 @@ async def process_one(run_id: str) -> None:
 
 
 async def main(once: bool = False) -> None:
-    global _last_prune
+    global _last_prune, _last_alert_check
     setup_logging("worker")
     init_db()
     signal.signal(signal.SIGTERM, _handle_stop)
@@ -167,6 +175,11 @@ async def main(once: bool = False) -> None:
                     _last_prune = time.time()
                     with session_scope() as db:
                         prune_expired(db)
+                # 8.6 告警：队列积压 / 执行卡死 / 失败率，默认每分钟一次
+                if time.time() - _last_alert_check > ALERT_CHECK_INTERVAL:
+                    _last_alert_check = time.time()
+                    with session_scope() as db:
+                        check_alerts(db)
                 # 直接认领数据库里的 queued 执行，而不是往 Redis 再塞一份。
                 # 之前每 5 秒重复 LPUSH 会让队列无限膨胀，Redis 断开时
                 # 还依赖出队失败才走数据库路径；_claim 本身是原子的，直接跑更稳。

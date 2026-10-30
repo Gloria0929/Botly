@@ -346,6 +346,22 @@ class Event(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Alert(Base):
+    """8.6：系统级告警（队列积压、执行卡死、失败率），供运行状况看板读取。
+
+    不挂 user_id：告警描述的是整个部署的健康度，body 里也不写具体用户/群聊内容。
+    """
+
+    __tablename__ = "alerts"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    kind: Mapped[str] = mapped_column(String(40), index=True)  # queue_backlog | run_stuck | fail_rate
+    level: Mapped[str] = mapped_column(String(12), default="warning")  # warning | critical
+    title: Mapped[str] = mapped_column(String(200), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class UsageLog(Base, TimestampMixin):
     __tablename__ = "usage_logs"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)

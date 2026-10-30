@@ -156,6 +156,9 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
 - **CHT-07 分支线程**：任意消息上点分支图标即可拉出独立线程（复制锚点及之前的文本快照）；
   分支里的提问单独触发执行、回复落在分支，不打断主线程；分支是「深入讨论」，不派活、不出计划。
   群聊菜单「分支讨论」可回到任意分支。
+- **8.6 运行状况看板与告警**：侧栏「运行状况」展示完成率、每日执行（完成/失败/停止堆叠）、
+  失败原因 Top、最近失败与系统告警；Worker 每分钟检查队列积压（≥10）、执行卡死（>20 分钟）、
+  失败率（近 60 分钟 ≥30%），同类告警 30 分钟内不重复。
 - **用量页每日趋势**：带 Y 轴刻度、网格、日均虚线与选中日期读数条（日期 / token / 调用次数 / 费用），
   支持近 7 / 30 / 90 天；接口的 `daily` 增加每日调用次数。
 
@@ -319,10 +322,10 @@ RUN-13 没有新建执行：`POST /chats/{id}/messages` 带 `interject=true` 时
    不会再把“用户未在规定时间内处理”作为工具结果交回总指挥。
 5. **未配置搜索 Key 时网页搜索仍可用**（TOL-01）。此时回退到 DuckDuckGo 公共搜索，结果不稳定；
    生产环境建议在设置页填 Tavily Key。
-6. **可观测性与备份部分落地**（8.6 / M5）。已提供 `/api/metrics`（Prometheus 文本格式：执行状态、
-   队列深度、待处理审批/提问、token/调用/失败计数）与 `scripts/backup_db.py`（Postgres `pg_dump` /
-   SQLite `.backup`，保留最近 N 份）。仍缺：执行完成率/失败原因看板、队列积压与超时告警、
-   50 用户 20 并发压测与 Alembic 版本化迁移。
+6. **可观测性与备份已落地**（8.6 / M5）。提供 `/api/metrics`（Prometheus 文本格式）、
+   `/api/stats/overview` 运行状况看板（完成率、失败原因分布、最近失败、告警、队列）、
+   Worker 每分钟告警（队列积压 / 执行卡死 / 失败率）与 `scripts/backup_db.py`。
+   仍缺：Alembic 版本化迁移、50 用户 20 并发压测。
 7. **Postgres 下事件序号可能“后插入先提交”**（9.3）。events 的自增 id 在插入时分配、提交时可见，
    并发事务可能让较小编号晚于较大编号出现，单条事件可能被 SSE 跳过；前端重连/快照刷新可兜底。
    彻底修复需要按群聊单独分配序号或提交后排序，暂未改动。
@@ -346,7 +349,8 @@ server/
     redis_bus.py       队列、事件广播、SSE 唤醒
     models.py          数据模型（第 10 节）
     accounts.py        账号停用、保留期与彻底清除（ACC-07）
-    api/               各模块路由（含 usage.py 用量聚合、metrics.py 指标）
+    alerts.py          队列积压 / 执行卡死 / 失败率告警
+    api/               各模块路由（含 usage.py 用量、metrics.py 指标、stats.py 看板）
   scripts/
     make_invite.py     生成邀请码
     purge_accounts.py  已删除账号的恢复与清理
@@ -360,8 +364,10 @@ server/
     test_backup.py     备份与保留策略
     test_mem04.py      记忆候选生成、确认与忽略
     test_branch.py     分支线程创建、隔离执行与越权
+    test_alerts.py     告警触发与冷却
+    test_stats.py      运行状况看板统计
 web/
-  app/                 登录、注册、聊天、Bot、记忆、通知、设置、用量、运行日志
+  app/                 登录、注册、聊天、Bot、记忆、运行状况、通知、设置、用量、运行日志
   components/chat/     消息流、计划/任务/审批/提问卡片、群聊设置、侧栏、输入栏
   components/ui/       Select 下拉、Modal、Confirm 确认弹窗、Avatar、AvatarPicker
   lib/                 API 客户端、类型、格式化
@@ -382,6 +388,10 @@ web/
 | `BOTLY_METRICS_TOKEN` | `/api/metrics` 的抓取令牌（`Authorization: Bearer <token>`）；未设置时仅回环地址可访问 | 未设置 |
 | `BOTLY_SUMMARY_THRESHOLD_TOKENS` | 主线程历史超过该 token 估算值时触发长对话摘要 | 8000 |
 | `BOTLY_SUMMARY_MAX_ITEMS` | 单次摘要最多处理的历史消息条数 | 80 |
+| `BOTLY_ALERT_QUEUE_BACKLOG` | 队列积压告警阈值（排队执行数） | 10 |
+| `BOTLY_ALERT_RUN_STUCK_MINUTES` | 执行运行超过多少分钟触发卡死告警 | 20 |
+| `BOTLY_ALERT_FAIL_RATE` | 窗口内失败率告警阈值 | 0.3 |
+| `BOTLY_ALERT_COOLDOWN_MINUTES` | 同类告警冷却时间 | 30 |
 
 限额、重试、超时等默认值集中在 `server/app/config.py`，对应文档附录 A。
 运行时长与步数已不作为停止条件，只保留统计。

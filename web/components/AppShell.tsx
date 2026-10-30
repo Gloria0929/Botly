@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import React, { useEffect, useState } from "react";
 import {
+  Activity,
   BarChart3,
   Bell,
   Blocks,
@@ -23,6 +24,7 @@ const NAV = [
   { href: "/chat", label: "群聊", icon: MessagesSquare },
   { href: "/bots", label: "Bot", icon: Blocks },
   { href: "/memory", label: "记忆", icon: Brain },
+  { href: "/status", label: "运行状况", icon: Activity },
   { href: "/usage", label: "用量", icon: BarChart3 },
   { href: "/logs", label: "日志", icon: ScrollText },
   { href: "/notifications", label: "通知", icon: Bell },

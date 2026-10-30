@@ -244,6 +244,42 @@ export type Me = {
   };
 };
 
+/** 8.6 运行状况看板 */
+export type StatsOverview = {
+  days: number;
+  totals: {
+    runs: number;
+    completed: number;
+    failed: number;
+    stopped: number;
+    running: number;
+    queued: number;
+    success_rate: number;
+    avg_duration_sec: number;
+    avg_steps: number;
+    avg_tokens: number;
+  };
+  daily: { date: string; completed: number; failed: number; stopped: number; other: number }[];
+  failures: { reason: string; count: number }[];
+  recent_failures: {
+    run_id: string;
+    chat_id: string;
+    chat_name: string;
+    reason: string;
+    ended_at: string | null;
+  }[];
+  queue: { depth: number; queued: number };
+  alerts: {
+    id: string;
+    kind: string;
+    level: "warning" | "critical";
+    title: string;
+    body: string;
+    created_at: string | null;
+    acknowledged: boolean;
+  }[];
+};
+
 /* ---------------- 用量与费用（LIM-05 / MOD-05） ---------------- */
 export type UsageSummary = {
   days: number;

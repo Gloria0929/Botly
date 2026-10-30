@@ -253,6 +253,10 @@ export const api = {
   },
   logModules: () => req<import("./types").LogModule[]>("/logs/modules"),
 
+  // 运行状况看板（8.6）
+  statsOverview: (days = 7) =>
+    req<import("./types").StatsOverview>(`/stats/overview?days=${days}`),
+
   // 执行
   run: (id: string) => req<import("./types").Run>(`/runs/${id}`),
   stop: (id: string) => req<import("./types").Run>(`/runs/${id}/stop`, { method: "POST" }),

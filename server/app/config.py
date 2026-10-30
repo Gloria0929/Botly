@@ -81,6 +81,15 @@ LOG_FILE_MAX_MB = max(1, int(os.getenv("BOTLY_LOG_FILE_MAX_MB", "20")))
 LOG_BODY = os.getenv("BOTLY_LOG_BODY", "1").lower() in ("1", "true", "yes")
 DELEGATION_DEPTH = 1
 
+# 8.6 告警阈值：Worker 每分钟检查一次，冷却期内同一类告警不重复写
+ALERT_QUEUE_BACKLOG = max(1, int(os.getenv("BOTLY_ALERT_QUEUE_BACKLOG", "10")))
+ALERT_RUN_STUCK_MINUTES = max(1, int(os.getenv("BOTLY_ALERT_RUN_STUCK_MINUTES", "20")))
+ALERT_FAIL_WINDOW_MINUTES = max(5, int(os.getenv("BOTLY_ALERT_FAIL_WINDOW_MINUTES", "60")))
+ALERT_FAIL_MIN_RUNS = max(1, int(os.getenv("BOTLY_ALERT_FAIL_MIN_RUNS", "5")))
+ALERT_FAIL_RATE = float(os.getenv("BOTLY_ALERT_FAIL_RATE", "0.3"))
+ALERT_COOLDOWN_MINUTES = max(1, int(os.getenv("BOTLY_ALERT_COOLDOWN_MINUTES", "30")))
+ALERT_CHECK_INTERVAL = max(10, int(os.getenv("BOTLY_ALERT_CHECK_INTERVAL", "60")))
+
 # Worker
 WORKER_POLL_INTERVAL = 0.5
 WORKER_LEASE_SECONDS = 180
