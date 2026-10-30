@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.pytest_cache/
+
+# 数据与密钥
+server/data/
+server/.env
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# 系统
+.DS_Store
+*.log
+
+# 本地验证产物与 IDE/工作区数据
+output/
+.idea/
+.workbuddy/

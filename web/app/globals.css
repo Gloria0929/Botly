@@ -1,0 +1,255 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+    --canvas: #0b0d11;
+    --panel: #111419;
+    --panel-2: #161a21;
+    --line: #232a34;
+    --ink: #e7ebf2;
+    --muted: #8d97a8;
+    --faint: #5d6675;
+    --accent: #7c8cff;
+    --accent-ink: #ffffff;
+    --ok: #34d399;
+    --warn: #f5a524;
+    --danger: #f2555a;
+
+    /* 同一组颜色的 RGB 分量：供 Tailwind 生成 bg-accent/15 这类透明度类 */
+    --canvas-rgb: 11 13 17;
+    --panel-rgb: 17 20 25;
+    --panel-2-rgb: 22 26 33;
+    --line-rgb: 35 42 52;
+    --ink-rgb: 231 235 242;
+    --muted-rgb: 141 151 168;
+    --faint-rgb: 93 102 117;
+    --accent-rgb: 124 140 255;
+    --accent-ink-rgb: 255 255 255;
+    --ok-rgb: 52 211 153;
+    --warn-rgb: 245 165 36;
+    --danger-rgb: 242 85 90;
+    color-scheme: dark;
+}
+
+html.light {
+    --canvas: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f2f4f7;
+    --line: #e3e7ee;
+    --ink: #101828;
+    --muted: #667085;
+    --faint: #98a2b3;
+    --accent: #4f5bd5;
+    --accent-ink: #ffffff;
+    --ok: #0f9f6e;
+    --warn: #b45309;
+    --danger: #d92d20;
+
+    --canvas-rgb: 246 247 249;
+    --panel-rgb: 255 255 255;
+    --panel-2-rgb: 242 244 247;
+    --line-rgb: 227 231 238;
+    --ink-rgb: 16 24 40;
+    --muted-rgb: 102 112 133;
+    --faint-rgb: 152 162 179;
+    --accent-rgb: 79 91 213;
+    --accent-ink-rgb: 255 255 255;
+    --ok-rgb: 15 159 110;
+    --warn-rgb: 180 83 9;
+    --danger-rgb: 217 45 32;
+    color-scheme: light;
+}
+
+* {
+    border-color: var(--line);
+}
+
+html,
+body {
+    height: 100%;
+}
+
+body {
+    background: var(--canvas);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 32%, transparent);
+    border-radius: 99px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+@layer components {
+    .btn {
+        @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+    }
+
+    .btn-primary {
+        @apply btn bg-accent text-accentink hover:opacity-90;
+    }
+
+    .btn-ghost {
+        @apply btn border border-line bg-transparent text-muted hover:bg-panel2 hover:text-ink;
+    }
+
+    .btn-soft {
+        @apply btn bg-panel2 text-ink hover:opacity-80;
+    }
+
+    .btn-danger {
+        @apply btn bg-danger text-white hover:opacity-90;
+    }
+
+    .field {
+        @apply w-full rounded-lg border border-line bg-panel2 px-3 py-2 text-[13px] text-ink outline-none placeholder:text-faint focus:border-accent;
+    }
+
+    .label {
+        @apply mb-1.5 block text-[12px] font-medium text-muted;
+    }
+
+    .chip {
+        @apply inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted;
+    }
+
+    .card {
+        @apply rounded-xl border border-line bg-panel;
+    }
+}
+
+.mention {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-radius: 4px;
+    padding: 0 3px;
+    font-weight: 500;
+}
+
+/* LobeHub 单色厂商图标（OpenAI / xAI / Groq）在深色主题下反色 */
+html:not(.light) img.lobe-mono {
+    filter: invert(1);
+}
+
+.prose-msg p {
+    margin: 0 0 0.6em;
+}
+
+.prose-msg p:last-child {
+    margin-bottom: 0;
+}
+
+.prose-msg code {
+    background: var(--panel-2);
+    /*padding: 0.1em 0.35em;*/
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: var(--font-mono, monospace);
+}
+
+.prose-msg pre {
+    background: var(--panel-2);
+    padding: 10px 12px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 0 0 0.6em;
+}
+
+.prose-msg ul,
+.prose-msg ol {
+    padding-left: 1.2em;
+    margin: 0 0 0.6em;
+}
+
+.prose-msg h1,
+.prose-msg h2,
+.prose-msg h3 {
+    font-weight: 600;
+    margin: 0.8em 0 0.4em;
+}
+
+.prose-msg h1 {
+    font-size: 1.15em;
+}
+
+.prose-msg h2 {
+    font-size: 1.05em;
+}
+
+.prose-msg h3 {
+    font-size: 1em;
+}
+
+.prose-msg a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    word-break: break-word;
+}
+
+.prose-msg blockquote {
+    border-left: 3px solid var(--line);
+    padding-left: 0.8em;
+    margin: 0.5em 0 0.6em;
+    color: var(--muted);
+}
+
+.prose-msg hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: 0.8em 0;
+}
+
+.prose-msg img {
+    max-width: 100%;
+    border-radius: 8px;
+}
+
+.prose-msg pre code {
+    background: transparent;
+    padding: 0;
+}
+
+.prose-table {
+    overflow-x: auto;
+    margin: 0 0 0.7em;
+}
+
+.prose-msg table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.93em;
+}
+
+.prose-msg th,
+.prose-msg td {
+    border: 1px solid var(--line);
+    padding: 0.35em 0.55em;
+    text-align: left;
+    vertical-align: top;
+}
+
+.prose-msg th {
+    background: var(--panel-2);
+    font-weight: 600;
+}
+
+.prose-msg del {
+    color: var(--faint);
+}
+
+.prose-msg input[type="checkbox"] {
+    margin-right: 0.35em;
+    accent-color: var(--accent);
+}
