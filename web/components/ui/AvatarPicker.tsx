@@ -5,13 +5,9 @@ import { ImagePlus, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { toast } from "@/lib/ui";
 import Avatar from "./Avatar";
+import { AVATAR_PICKER_OPTIONS } from "./avatarIcons";
 
-const EMOJIS = [
-  "🤖", "🧭", "🔍", "✍️", "🧮", "🛠️",
-  "📊", "🎨", "🧠", "📚", "⚡️", "🌐",
-];
-
-/** 头像选择：emoji 快捷选择 + 上传图片。 */
+/** 头像选择：SVG 图标快捷选择 + 上传图片。 */
 export default function AvatarPicker({
   value,
   onChange,
@@ -63,23 +59,24 @@ export default function AvatarPicker({
 
       <div className="min-w-0 flex-1 pl-0.5">
         <div className="flex flex-wrap gap-1">
-          {EMOJIS.map((e) => (
+          {AVATAR_PICKER_OPTIONS.map(({ key, label, Icon }) => (
             <button
-              key={e}
+              key={key}
               type="button"
-              onClick={() => onChange(e)}
-              className={`flex h-7 w-7 items-center justify-center rounded-md border text-[14px] transition-colors ${
-                value === e
-                  ? "border-accent bg-accent/10"
-                  : "border-transparent hover:border-line hover:bg-panel2"
+              title={label}
+              onClick={() => onChange(key)}
+              className={`flex h-7 w-7 items-center justify-center rounded-md border transition-colors ${
+                value === key
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-transparent text-muted hover:border-line hover:bg-panel2 hover:text-ink"
               }`}
             >
-              {e}
+              <Icon size={15} />
             </button>
           ))}
         </div>
         <p className="mt-1 text-[10.5px] text-faint">
-          点右上角上传图片（PNG/JPG，≤2MB），也可以选一个 emoji
+          点右上角上传图片（PNG/JPG，≤2MB），也可以选一个图标
         </p>
       </div>
     </div>

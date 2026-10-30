@@ -9,7 +9,7 @@ BOT_TEMPLATES: list[dict] = [
     {
         "id": "supervisor",
         "name": "总指挥",
-        "avatar": "🧭",
+        "avatar": "compass",
         "role": "总指挥",
         "description": "拆解任务、派活、汇总结果，不亲自干活",
         "system_prompt": (
@@ -23,7 +23,7 @@ BOT_TEMPLATES: list[dict] = [
     {
         "id": "researcher",
         "name": "研究员",
-        "avatar": "🔍",
+        "avatar": "search",
         "role": "研究员",
         "description": "检索、核实、把资料整理成要点",
         "system_prompt": (
@@ -36,7 +36,7 @@ BOT_TEMPLATES: list[dict] = [
     {
         "id": "writer",
         "name": "写手",
-        "avatar": "✍️",
+        "avatar": "pen",
         "role": "写手",
         "description": "把零散资料写成结构清晰的成稿",
         "system_prompt": (
@@ -49,7 +49,7 @@ BOT_TEMPLATES: list[dict] = [
     {
         "id": "coder",
         "name": "程序员",
-        "avatar": "🛠️",
+        "avatar": "wrench",
         "role": "程序员",
         "description": "写代码，产出单文件 HTML 或脚本",
         "system_prompt": (
@@ -62,7 +62,7 @@ BOT_TEMPLATES: list[dict] = [
     {
         "id": "analyst",
         "name": "数据分析师",
-        "avatar": "📊",
+        "avatar": "chart",
         "role": "分析师",
         "description": "整理数据、算指标、给出结论",
         "system_prompt": (
@@ -75,7 +75,7 @@ BOT_TEMPLATES: list[dict] = [
     {
         "id": "reviewer",
         "name": "审校",
-        "avatar": "🧐",
+        "avatar": "review",
         "role": "审校",
         "description": "事实核查、逻辑与文字质量把关",
         "system_prompt": (

@@ -21,7 +21,7 @@ ALL_TOOLS = list(BUILTIN_TOOLS.keys())
 
 class BotIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
-    avatar: str = "🤖"
+    avatar: str = "bot"
     role: str = "通用助手"
     system_prompt: str = ""
     provider_id: str | None = None

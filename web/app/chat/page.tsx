@@ -9,6 +9,7 @@ import {
   Columns2,
   Download,
   GitBranch,
+  Compass,
   Loader2,
   Menu as MenuIcon,
   Pencil,
@@ -17,6 +18,7 @@ import {
   SlidersHorizontal,
   Square,
   Trash2,
+  MessageSquare,
   Users,
   Workflow,
   Zap,
@@ -1326,8 +1328,8 @@ function ChatContent() {
 function NoChatState({ onOpenList }: { onOpenList: () => void }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-      <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-panel text-[18px]">
-        💬
+      <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-panel">
+        <MessageSquare size={20} />
       </div>
       <div className="text-[12.5px] font-medium">还没有群聊</div>
       <p className="mt-1.5 max-w-[280px] text-[12px] leading-relaxed text-muted">
@@ -1362,8 +1364,8 @@ function EmptyState({ onPick }: { onPick: (t: string) => void }) {
     <div className="flex h-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-[560px]">
         <div className="mb-6 text-center">
-          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-panel text-[18px]">
-            🧭
+          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-panel">
+            <Compass size={20} />
           </div>
           <h2 className="text-[17px] font-semibold tracking-tight">交代一件事，团队自己跑</h2>
           <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted">

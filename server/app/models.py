@@ -113,7 +113,7 @@ class Bot(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(40))
     # emoji 或上传后的图片地址（/api/uploads/xxx）
-    avatar: Mapped[str] = mapped_column(String(500), default="🤖")
+    avatar: Mapped[str] = mapped_column(String(500), default="bot")
     role: Mapped[str] = mapped_column(String(40), default="通用助手")
     system_prompt: Mapped[str] = mapped_column(Text, default="")
     provider_id: Mapped[str | None] = mapped_column(String(32), nullable=True)

@@ -176,7 +176,7 @@ export default function SearchModal({
             >
               <div className="flex items-center gap-1.5 text-[10.5px] text-faint">
                 {hit.sender_type === "bot" ? (
-                  <Avatar value={hit.sender_bot_avatar || "🤖"} size={16} alt={sender(hit)} />
+                  <Avatar value={hit.sender_bot_avatar || "bot"} size={16} alt={sender(hit)} />
                 ) : null}
                 <span className="text-muted">{sender(hit)}</span>
                 <span>· {TYPE_LABEL[hit.type] || hit.type}</span>

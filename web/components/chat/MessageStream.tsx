@@ -247,7 +247,7 @@ function MessageItem({
   if (msg.type === "tool_call") {
     return (
       <div className="flex gap-2.5">
-        <Avatar value={bot?.avatar || msg.sender_bot_avatar || "🤖"} size={32} className="mt-0.5" />
+        <Avatar value={bot?.avatar || msg.sender_bot_avatar || "bot"} size={32} className="mt-0.5" />
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">
             <span className="text-[12.5px] font-medium">{bot?.name || msg.sender_bot_name || "Bot"}</span>
@@ -348,7 +348,7 @@ function MessageItem({
   const taskStatus = live?.status || msg.meta?.task_status;
   // 发送者可能已移出群聊或已被删除：优先用当前成员信息，其次用消息里补全的历史信息
   const botName = bot?.name || msg.sender_bot_name || "Bot";
-  const botAvatar = bot?.avatar || msg.sender_bot_avatar || "🤖";
+  const botAvatar = bot?.avatar || msg.sender_bot_avatar || "bot";
   const botRole = msg.sender_bot_deleted ? undefined : bot?.role || msg.sender_bot_role;
   const hasContent = !!msg.content?.trim();
   // 运行中的 token 数：task.status 事件会实时刷新 chat.tasks 里的 tokens_used

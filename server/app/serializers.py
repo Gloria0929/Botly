@@ -147,7 +147,7 @@ def task_out(task: Task, bot: Bot | None) -> dict:
         "thread_id": task.thread_id,
         "assigned_bot_id": task.assigned_bot_id,
         "bot_name": bot.name if bot else "",
-        "bot_avatar": bot.avatar if bot else "🤖",
+        "bot_avatar": bot.avatar if bot else "bot",
         "instruction": task.instruction,
         "expected_output": task.expected_output,
         "status": task.status,

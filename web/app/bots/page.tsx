@@ -15,7 +15,7 @@ import { toast } from "@/lib/ui";
 
 const EMPTY: Partial<Bot> = {
   name: "",
-  avatar: "🤖",
+  avatar: "bot",
   role: "通用助手",
   system_prompt: "",
   provider_id: null,
@@ -245,7 +245,7 @@ export default function BotsPage() {
                           : "border-line text-muted hover:border-accent/40 hover:text-ink"
                       }`}
                     >
-                      <span>{t.avatar}</span>
+                      <Avatar value={t.avatar} size={16} />
                       {t.name}
                     </button>
                   ))}
@@ -259,7 +259,7 @@ export default function BotsPage() {
             <div>
               <label className="label">头像</label>
               <AvatarPicker
-                value={editing.avatar || "🤖"}
+                value={editing.avatar || "bot"}
                 onChange={(v) => setEditing({ ...editing, avatar: v })}
               />
             </div>

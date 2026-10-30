@@ -97,7 +97,7 @@ def usage_summary(
             {
                 "bot_id": r.bot_id,
                 "name": bot.name if bot else "（未知 Bot）",
-                "avatar": bot.avatar if bot else "🤖",
+                "avatar": bot.avatar if bot else "bot",
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "tokens": 0,

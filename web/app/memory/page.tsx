@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Brain, Check, Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import Avatar from "@/components/ui/Avatar";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api } from "@/lib/api";
 import type { Bot, Memory, MemoryCandidate } from "@/lib/types";
@@ -123,7 +124,7 @@ export default function MemoryPage() {
             </TabBtn>
             {bots.map((b) => (
               <TabBtn key={b.id} active={tab === b.id} onClick={() => setTab(b.id)}>
-                {b.avatar} {b.name}
+                <span className="inline-flex items-center gap-1"><Avatar value={b.avatar} size={14} />{b.name}</span>
               </TabBtn>
             ))}
           </div>

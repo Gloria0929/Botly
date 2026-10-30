@@ -8,6 +8,7 @@ import {
   Coins,
   Gauge,
   Loader2,
+  MessageSquare,
   RefreshCw,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
@@ -214,8 +215,8 @@ export default function UsagePage() {
                   <Row
                     key={c.chat_id}
                     left={
-                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-panel2 text-[11px]">
-                        💬
+                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-panel2">
+                        <MessageSquare size={13} />
                       </span>
                     }
                     title={c.name}

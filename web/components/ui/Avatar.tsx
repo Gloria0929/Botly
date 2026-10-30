@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { resolveAvatarIcon } from "./avatarIcons";
 
-/** 统一的头像渲染：支持图片地址、emoji、以及带底色的文字标识（厂商标识）。 */
+/** 统一的头像渲染：支持图片地址、图标 key（SVG）、以及带底色的文字标识（厂商标识）。
+ *  老数据里的 emoji 头像也会映射到同一个 SVG 图标，不再直接显示 emoji；
+ *  空值默认渲染 Bot 图标。 */
 export default function Avatar({
   value,
   color,
@@ -66,6 +69,28 @@ export default function Avatar({
         onError={() => setFailed(true)}
         className={`${radius} shrink-0 border border-line bg-panel2 object-cover ${className}`}
       />
+    );
+  }
+
+  // 图标头像：新数据存图标 key，老数据里的 emoji 也映射到同一个 SVG；
+  // 空值默认 Bot 图标。图片地址不走这条分支，图片加载失败时仍走下面的文字兜底。
+  const Icon = resolveAvatarIcon(v);
+  if (Icon && !failed) {
+    const inner = Math.round(size * 0.58);
+    return (
+      <span
+        style={{
+          width: size,
+          height: size,
+          background: color || undefined,
+        }}
+        className={`${radius} flex shrink-0 items-center justify-center border ${
+          color ? "border-transparent text-white" : "border-line bg-panel2 text-ink"
+        } ${className}`}
+        aria-label={alt || "头像"}
+      >
+        <Icon size={inner} strokeWidth={1.8} />
+      </span>
     );
   }
 

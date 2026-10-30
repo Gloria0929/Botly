@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, AtSign, Loader2, Paperclip, Square, X, Zap } from "lucide-react";
 import type { Bot, ChatFile } from "@/lib/types";
+import Avatar from "@/components/ui/Avatar";
 import { toast } from "@/lib/ui";
 
 export default function Composer({
@@ -117,7 +118,7 @@ export default function Composer({
                     i === Math.min(mentionIndex, filtered.length - 1) ? "bg-panel2" : "hover:bg-panel2"
                   }`}
                 >
-                  <span className="text-[13px]">{b.avatar}</span>
+                  <Avatar value={b.avatar} size={16} />
                   <span className="text-[12.5px]">{b.name}</span>
                   <span className="ml-auto text-[10.5px] text-faint">{b.role}</span>
                 </button>
