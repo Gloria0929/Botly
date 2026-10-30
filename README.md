@@ -147,13 +147,16 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
   （业务表、沙箱文件、上传图片、登录记录、加密 Key），也可用 `--purge <邮箱> --yes` 立即清除。
 - **15.2 导出群聊记录**：聊天页「更多操作 → 导出聊天记录」下载 Markdown；按日期分组，
   含用户消息、Bot 最终回复、计划卡片与系统提示，工具调用与子 Bot 过程镜像不重复导出。
+- **MEM-05 长对话摘要**：主线程历史超过 token 阈值（默认约 8k，可配 `BOTLY_SUMMARY_THRESHOLD_TOKENS`）
+  时，用总指挥模型把「最近 40 条之前」的旧消息压缩成摘要，存到线程并注入后续上下文；
+  保留最近 40 条原文。摘要失败自动退回硬截断，不影响执行。
 - **用量页每日趋势**：带 Y 轴刻度、网格、日均虚线与选中日期读数条（日期 / token / 调用次数 / 费用），
   支持近 7 / 30 / 90 天；接口的 `daily` 增加每日调用次数。
 
 ### 未实现（文档中标注为 P1 / P2）
 
 Web Push、找回密码与邮箱验证、子任务并行、分支线程、
-记忆候选自动生成与长对话摘要、MCP/自定义 HTTP 工具、第三方登录、团队空间、代码执行沙箱。
+记忆候选自动生成、MCP/自定义 HTTP 工具、第三方登录、团队空间、代码执行沙箱。
 
 完整的缺口清单、P0 偏差、验收标准对照与建议排期见
 [docs/功能缺口与后续规划.md](docs/功能缺口与后续规划.md)。
@@ -368,6 +371,8 @@ web/
 | `BOTLY_ENCRYPTION_KEY` | 独立的 Fernet 主密钥（可选） | 由 SECRET_KEY 派生 |
 | `BOTLY_COOKIE_SECURE` | 设为 `1` 时强制会话 Cookie 带 Secure（HTTPS 部署） | 关闭 |
 | `BOTLY_METRICS_TOKEN` | `/api/metrics` 的抓取令牌（`Authorization: Bearer <token>`）；未设置时仅回环地址可访问 | 未设置 |
+| `BOTLY_SUMMARY_THRESHOLD_TOKENS` | 主线程历史超过该 token 估算值时触发长对话摘要 | 8000 |
+| `BOTLY_SUMMARY_MAX_ITEMS` | 单次摘要最多处理的历史消息条数 | 80 |
 
 限额、重试、超时等默认值集中在 `server/app/config.py`，对应文档附录 A。
 运行时长与步数已不作为停止条件，只保留统计。

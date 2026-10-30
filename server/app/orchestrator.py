@@ -30,8 +30,11 @@ from . import sandbox, tools as toolmod
 from .config import (
     APPROVAL_TTL_HOURS,
     DELEGATION_DEPTH,
+    HISTORY_KEEP_RECENT,
     LLM_TIMEOUT_SECONDS,
     MAX_REASSIGN,
+    SUMMARY_MAX_ITEMS,
+    SUMMARY_THRESHOLD_TOKENS,
 )
 from .db import session_scope
 from .events import emit, notify
@@ -468,9 +471,6 @@ class RunExecutor:
             provider = execution_provider(db, run, bot) if bot else None
             if not provider:
                 raise LLMError(f"Bot「{bot.name}」未绑定可用的模型接入，请到设置页配置")
-            members = self._member_bots(db, chat, run)
-            tool_list = toolmod.tools_for_bot(bot.tools or [], is_supervisor)
-            messages = self._build_messages(db, run, chat, thread, bot, is_supervisor, members)
             model = bot.model or (
                 provider.models[0]["name"] if provider and provider.models else "mock"
             )
@@ -478,6 +478,13 @@ class RunExecutor:
             base_url = provider.base_url
             api_key = decrypt_secret(provider.api_key_encrypted)
             provider_id = provider.id
+            members = self._member_bots(db, chat, run)
+            tool_list = toolmod.tools_for_bot(bot.tools or [], is_supervisor)
+            # MEM-05：主线程历史过长时，先把更早的消息压成摘要再构造上下文。
+            # 摘要失败只告警、不影响本轮执行，仍会退回硬截断。
+            if is_supervisor and thread.type == "main":
+                await self._maybe_summarize(db, run, thread, kind, base_url, api_key, model)
+            messages = self._build_messages(db, run, chat, thread, bot, is_supervisor, members)
             temperature = bot.temperature if bot.temperature is not None else 0.4
             plan_approved = self._plan_already(db, thread_id)
             task = db.get(Task, task_id) if task_id else None
@@ -1597,6 +1604,111 @@ class RunExecutor:
             ]
         return "\n".join(p for p in parts if p)
 
+    async def _complete_text(
+        self,
+        *,
+        kind: str,
+        base_url: str,
+        api_key: str | None,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.3,
+    ) -> str:
+        """消费一次模型输出，只取正文（用于摘要等维护性调用，不落业务消息）。"""
+        text = ""
+        async for chunk in stream_chat(
+            kind=kind,
+            base_url=base_url,
+            api_key=api_key or "",
+            model=model,
+            messages=messages,
+            tools=None,
+            temperature=temperature,
+        ):
+            if chunk["type"] == "done":
+                text = chunk.get("content") or text
+        return (text or "").strip()
+
+    async def _maybe_summarize(
+        self,
+        db: Session,
+        run: Run,
+        thread: Thread,
+        kind: str,
+        base_url: str,
+        api_key: str | None,
+        model: str,
+    ) -> None:
+        """MEM-05：把主线程「最近 N 条之前」的旧消息压缩成一段摘要。
+
+        只在未摘要部分超过 token 阈值时触发；单次最多处理 SUMMARY_MAX_ITEMS 条，
+        渐进式推进 summary_upto_seq。摘要失败只记日志、不抛错，本轮照常硬截断。
+        """
+        msgs = list(
+            db.scalars(
+                select(Message).where(Message.thread_id == thread.id).order_by(Message.seq)
+            ).all()
+        )
+        bots = {
+            b.id: b.name
+            for b in db.scalars(select(Bot).where(Bot.user_id == run.user_id)).all()
+        }
+        history = [
+            m
+            for m in msgs
+            if m.type == "text"
+            and m.run_id != run.id
+            and m.status != "streaming"
+            and (m.content or "").strip()
+            and not (m.meta or {}).get("delegation")
+            and not (m.meta or {}).get("subtask_live")
+            and not ((m.meta or {}).get("task_id") and (m.meta or {}).get("mention_bot_id"))
+        ]
+        if len(history) <= HISTORY_KEEP_RECENT:
+            return
+        older = history[:-HISTORY_KEEP_RECENT]
+        done_upto = thread.summary_upto_seq or 0
+        pending = [m for m in older if m.seq > done_upto]
+        if not pending:
+            return
+        if sum(estimate_tokens(m.content or "") for m in pending) < SUMMARY_THRESHOLD_TOKENS:
+            return
+        pending = pending[:SUMMARY_MAX_ITEMS]
+
+        records = []
+        for m in pending:
+            sender = (
+                "用户" if m.sender_type == "user" else bots.get(m.sender_bot_id or "") or "Bot"
+            )
+            records.append(f"{sender}：{(m.content or '').strip()}")
+        prev = f"\n\n【已有的更早摘要】\n{thread.summary}" if thread.summary else ""
+        user_msg = (
+            "下面是群聊里更早的对话，请压缩成一段中文摘要。保留：关键事实与数字、已做出的决定、"
+            "未完成的事项、用户明确表达过的偏好；丢弃寒暄与已经完成的过程细节。"
+            f"{prev}\n\n<对话>\n" + "\n\n".join(records) + "\n</对话>"
+        )
+        try:
+            summary = await self._complete_text(
+                kind=kind,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是对话压缩助手，只输出摘要正文，不要寒暄。"},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.2,
+            )
+        except LLMError as exc:
+            log.warning("历史摘要生成失败，本轮退回硬截断：%s", exc)
+            return
+        if not summary:
+            return
+        thread.summary = summary
+        thread.summary_upto_seq = max(m.seq for m in pending)
+        db.flush()
+        log.info("已更新主线程摘要 seq=%s 长度=%d", thread.summary_upto_seq, len(summary))
+
     def _build_messages(
         self,
         db: Session,
@@ -1629,10 +1741,18 @@ class RunExecutor:
         # 旧轮次不能继续作为 user 指令传给模型：失败/中断时旧请求往往没有
         # assistant 回复，模型会把它误认为仍未完成的待办。把历史降为带状态的
         # 只读记录，只有本轮触发消息和插话保留 user 角色。
+        # MEM-05：更早的对话已压缩成摘要，作为只读背景注入。
+        if thread.summary:
+            out.append({
+                "role": "assistant",
+                "content": "更早对话的自动摘要（只读参考，不是当前任务，也不是待办）：\n"
+                + thread.summary,
+                "reasoning_content": "",
+            })
         history = [m for m in msgs if m.type == "text" and m.run_id != run.id
                    and m.status != "streaming" and m.content.strip()
                    and not (m.meta or {}).get("delegation")
-                   and not ((m.meta or {}).get("task_id") and (m.meta or {}).get("mention_bot_id"))][-40:]
+                   and not ((m.meta or {}).get("task_id") and (m.meta or {}).get("mention_bot_id"))][-HISTORY_KEEP_RECENT:]
         if history:
             previous_ids = {m.run_id for m in history if m.run_id}
             previous_runs = {r.id: r for r in db.scalars(select(Run).where(Run.id.in_(previous_ids)))}

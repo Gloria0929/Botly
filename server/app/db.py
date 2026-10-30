@@ -188,6 +188,7 @@ def _light_migrate() -> None:
         "tasks": {"step_key": "VARCHAR(200)"},
         "runs": {"last_turn_message_id": "VARCHAR(32)"},
         "users": {"deleted_at": "TIMESTAMP", "purge_after": "TIMESTAMP"},
+        "threads": {"summary": "TEXT", "summary_upto_seq": "INTEGER DEFAULT 0"},
     }
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())

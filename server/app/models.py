@@ -154,6 +154,9 @@ class Thread(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String(20), default="main")  # main | task | branch
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # MEM-05：主线程长对话的自动摘要与覆盖到的 seq，避免上下文无限增长。
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_upto_seq: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Run(Base, TimestampMixin):

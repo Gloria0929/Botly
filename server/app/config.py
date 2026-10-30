@@ -63,6 +63,10 @@ LLM_RETRY_BACKOFF = (2, 4, 8)
 MAX_REASSIGN = 1
 APPROVAL_TTL_HOURS = 24
 MEMORY_INJECT_LIMIT = 4000
+# MEM-05：主线程历史超过该 token 估算值时，用总指挥模型生成摘要替换更早的历史。
+SUMMARY_THRESHOLD_TOKENS = max(1000, int(os.getenv("BOTLY_SUMMARY_THRESHOLD_TOKENS", "8000")))
+SUMMARY_MAX_ITEMS = max(10, int(os.getenv("BOTLY_SUMMARY_MAX_ITEMS", "80")))
+HISTORY_KEEP_RECENT = 40  # 摘要后仍保留在上下文里的最近消息条数
 WEB_READ_TRUNCATE = 20_000
 # 网页读取先按字节截断，避免恶意/超大响应把进程内存打满（需求 8.4）
 WEB_READ_MAX_BYTES = 5 * 1024 * 1024
