@@ -777,6 +777,11 @@ class RunExecutor:
                 call=call,
                 is_supervisor=(role == "supervisor"),
             )
+        except PauseSignal as sig:
+            # 正常暂停点（计划确认 / 审批 / 提问 / 逐步确认）不是异常：
+            # 只记一条 INFO，不打 Traceback，否则每次等用户确认都会刷一条假 ERROR。
+            log.info("工具调用暂停 tool=%s role=%s kind=%s，等待用户确认", name, role, sig.payload.get("kind"))
+            raise
         except Exception:
             log.exception("工具调用异常 tool=%s role=%s", name, role)
             raise

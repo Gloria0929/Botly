@@ -27,7 +27,9 @@ const LEVEL_CLS: Record<string, string> = {
 const PAGE = 300;
 
 export default function LogsPage() {
-  const [level, setLevel] = useState("");
+  // 默认只看 WARNING 及以上：先看到真正需要处理的事；
+  // 要追踪某次执行时再切回“全部”或按 run 编号过滤。
+  const [level, setLevel] = useState("WARNING");
   const [module, setModule] = useState("");
   const [q, setQ] = useState("");
   const [requestId, setRequestId] = useState("");

@@ -29,7 +29,9 @@ def current_user(
     token = request.cookies.get(SESSION_COOKIE)
     user_id = read_session(token)
     if not user_id:
-        security_log.warning("鉴权失败：未登录 %s %s ip=%s", request.method, request.url.path, _ip(request))
+        # 未带会话的常规请求（退出登录后打开页面、会话过期后的轮询等）：
+        # 记 INFO 即可；真正的攻击信号看登录失败/限流那几条 WARNING，不在这里。
+        security_log.info("鉴权失败：未登录 %s %s ip=%s", request.method, request.url.path, _ip(request))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
     user = db.get(User, user_id)
     if not user or user.status != "active":
