@@ -265,7 +265,7 @@ register(
 register(
     Tool(
         name="web_read",
-        description="读取一个网页并转为纯文本。禁止访问内网与本机地址。",
+        description="读取公网网页并转为纯文本（仅 http/https）。内网、本机与云元数据地址会被拒绝。",
         parameters={
             "type": "object",
             "properties": {"url": {"type": "string", "description": "完整 URL"}},
