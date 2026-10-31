@@ -11,6 +11,7 @@ import {
   ServerCrash,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import DailyChart from "@/components/ui/DailyChart";
 import { api } from "@/lib/api";
 import type { StatsOverview } from "@/lib/types";
 import { timeAgo } from "@/lib/fmt";
@@ -52,11 +53,10 @@ export default function StatusPage() {
     () => (data?.alerts || []).filter((a) => !a.acknowledged),
     [data]
   );
-  const maxDaily = Math.max(
-    1,
-    ...(data?.daily || []).map((d) => d.completed + d.failed + d.stopped + d.other)
-  );
   const maxFail = Math.max(1, ...(data?.failures || []).map((f) => f.count));
+  const activeDays = (data?.daily || []).filter(
+    (d) => d.completed + d.failed + d.stopped + d.other > 0
+  ).length;
   const t = data?.totals;
   const empty = !loading && data && (t?.runs || 0) === 0;
 
@@ -167,65 +167,31 @@ export default function StatusPage() {
               <section className="mt-6">
                 <div className="mb-2 flex items-end justify-between">
                   <h2 className="text-[13.5px] font-medium">每日执行</h2>
-                  <span className="text-[10.5px] text-faint">峰值 {maxDaily} 次/天</span>
+                  <span className="text-[10.5px] text-faint">
+                    {data?.daily.length || 0} 天 · 有执行 {activeDays} 天
+                  </span>
                 </div>
-                <div className="card p-4">
-                  <div className="flex items-center gap-3 text-[10.5px] text-faint">
-                    <span className="flex items-center gap-1">
-                      <span className="h-2 w-2 rounded-sm bg-ok" />
-                      完成
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="h-2 w-2 rounded-sm bg-danger" />
-                      失败
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="h-2 w-2 rounded-sm bg-faint" />
-                      停止
-                    </span>
-                  </div>
-                  <div
-                    className="mx-auto mt-3 grid h-[120px] items-end gap-[3px]"
-                    style={{
-                      gridTemplateColumns: `repeat(${Math.max(1, data?.daily.length || 1)}, minmax(0, 1fr))`,
-                      maxWidth: Math.max(1, data?.daily.length || 1) * 47,
-                    }}
-                  >
-                    {(data?.daily || []).map((d) => {
-                      const total = d.completed + d.failed + d.stopped + d.other;
-                      const h = total ? Math.max(2, Math.round((total / maxDaily) * 120)) : 2;
-                      return (
-                        <div
-                          key={d.date}
-                          title={`${d.date} · 完成 ${d.completed} / 失败 ${d.failed} / 停止 ${d.stopped}`}
-                          className="flex flex-col-reverse overflow-hidden rounded-t-[3px]"
-                          style={{ height: h }}
-                        >
-                          {d.completed > 0 && (
-                            <div className="bg-ok" style={{ height: `${(d.completed / total) * 100}%` }} />
-                          )}
-                          {d.failed > 0 && (
-                            <div className="bg-danger" style={{ height: `${(d.failed / total) * 100}%` }} />
-                          )}
-                          {d.stopped + d.other > 0 && (
-                            <div
-                              className="bg-faint"
-                              style={{ height: `${((d.stopped + d.other) / total) * 100}%` }}
-                            />
-                          )}
-                          {total === 0 && <div className="h-full bg-panel2" />}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div
-                    className="mx-auto mt-2 flex justify-between text-[10px] text-faint"
-                    style={{ maxWidth: Math.max(1, data?.daily.length || 1) * 47 }}
-                  >
-                    <span>{data?.daily[0]?.date.slice(5)}</span>
-                    <span>{data?.daily[data.daily.length - 1]?.date.slice(5)}</span>
-                  </div>
-                </div>
+                <DailyChart
+                  days={(data?.daily || []).map((d) => {
+                    const stopped = d.stopped + d.other;
+                    return {
+                      date: d.date,
+                      segments: [
+                        { label: "完成", value: d.completed, className: "bg-ok" },
+                        { label: "失败", value: d.failed, className: "bg-danger" },
+                        { label: "停止", value: stopped, className: "bg-faint" },
+                      ],
+                      detail: `完成 ${d.completed} · 失败 ${d.failed} · 停止 ${stopped}`,
+                    };
+                  })}
+                  format={(n) => String(n)}
+                  unit="次"
+                  legend={[
+                    { label: "完成", className: "bg-ok" },
+                    { label: "失败", className: "bg-danger" },
+                    { label: "停止", className: "bg-faint" },
+                  ]}
+                />
               </section>
 
               <div className="mt-6 grid gap-4 lg:grid-cols-2">

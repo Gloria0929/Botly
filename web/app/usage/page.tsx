@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Avatar from "@/components/ui/Avatar";
+import DailyChart from "@/components/ui/DailyChart";
 import { api } from "@/lib/api";
 import type { UsageSummary } from "@/lib/types";
 import { timeAgo } from "@/lib/fmt";
@@ -168,7 +169,16 @@ export default function UsagePage() {
                     {data?.daily.length || 0} 天 · 有调用 {activeDays} 天
                   </span>
                 </div>
-                <DailyChart daily={data?.daily || []} />
+                <DailyChart
+                  days={(data?.daily || []).map((d) => ({
+                    date: d.date,
+                    segments: [{ label: "token", value: d.tokens, className: "bg-accent" }],
+                    detail: `${tokens(d.tokens)} tokens · ${d.calls ?? 0} 次调用`,
+                    detailExtra: money(d.cost),
+                  }))}
+                  format={tokens}
+                  unit="tokens"
+                />
               </section>
 
               {/* 按 Bot */}
@@ -264,159 +274,6 @@ export default function UsagePage() {
         </div>
       </div>
     </AppShell>
-  );
-}
-
-const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-
-type DailyPoint = { date: string; tokens: number; cost: number; calls?: number };
-
-function weekday(date: string): string {
-  const d = new Date(`${date}T00:00:00`);
-  return Number.isNaN(d.getTime()) ? "" : WEEKDAYS[d.getDay()];
-}
-
-/** 选一个能整除 4 的刻度步长，Y 轴四等分后都是整数。 */
-function niceScale(peak: number): { top: number; step: number } {
-  if (peak <= 0) return { top: 4, step: 1 };
-  const raw = peak / 4;
-  const base = Math.pow(10, Math.floor(Math.log10(raw)));
-  const n = raw / base;
-  const step = (
-    n <= 1 ? 1 : n <= 1.2 ? 1.2 : n <= 1.5 ? 1.5 : n <= 2 ? 2 : n <= 2.5 ? 2.5 :
-    n <= 3 ? 3 : n <= 4 ? 4 : n <= 5 ? 5 : n <= 6 ? 6 : n <= 8 ? 8 : 10
-  ) * base;
-  return { top: step * 4, step };
-}
-
-/**
- * 每日 token 柱状图：Y 轴刻度 + 网格 + 日均虚线 + 选中日期的明细。
- * 选中用顶部读数条而不是浮动 tooltip，窄屏和最后几天也不会被裁掉。
- */
-function DailyChart({ daily }: { daily: DailyPoint[] }) {
-  const [picked, setPicked] = useState<number | null>(null);
-  const n = daily.length;
-  const peak = Math.max(0, ...daily.map((d) => d.tokens));
-  const { top, step } = niceScale(peak);
-  const total = daily.reduce((s, d) => s + d.tokens, 0);
-  const avg = n ? total / n : 0;
-  const H = 132;
-  const TICKS = [0, 1, 2, 3, 4];
-  const active = picked !== null && daily[picked] ? picked : n - 1;
-  const item = daily[active];
-
-  const labels = useMemo(() => {
-    if (n <= 1) return n === 1 ? [0] : [];
-    const count = Math.min(6, n);
-    const step = (n - 1) / (count - 1);
-    return Array.from(new Set(Array.from({ length: count }, (_, i) => Math.round(i * step))));
-  }, [n]);
-
-  if (!n) return null;
-
-  return (
-    <div className="card px-4 pb-3 pt-3.5">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-faint">
-        <span>
-          合计 <span className="tabular-nums text-muted">{tokens(total)}</span>
-        </span>
-        <span>
-          日均 <span className="tabular-nums text-muted">{tokens(Math.round(avg))}</span>
-        </span>
-        <span>
-          峰值 <span className="tabular-nums text-muted">{tokens(peak)}</span>
-        </span>
-        {avg > 0 && <span className="ml-auto hidden sm:inline">虚线为日均</span>}
-      </div>
-
-      <div className="relative mt-3" style={{ height: H }}>
-        {/* Y 轴刻度 */}
-        <div className="absolute inset-y-0 left-0 w-10">
-          {TICKS.map((i) => (
-            <span
-              key={i}
-              className="absolute right-0 -translate-y-1/2 text-[9.5px] tabular-nums text-faint"
-              style={{ top: `${(1 - i / 4) * 100}%` }}
-            >
-              {i === 0 ? "0" : tokens(Math.round(step * i))}
-            </span>
-          ))}
-        </div>
-
-        <div className="relative ml-11 h-full">
-          {TICKS.map((i) => (
-            <div
-              key={i}
-              className={`absolute inset-x-0 border-t ${i === 0 ? "border-line" : "border-dashed border-line/60"}`}
-              style={{ top: `${(1 - i / 4) * 100}%` }}
-            />
-          ))}
-          {avg > 0 && (
-            <div
-              className="pointer-events-none absolute inset-x-0 border-t border-dotted border-accent/40"
-              style={{ top: `${(1 - Math.min(1, avg / top)) * 100}%` }}
-            />
-          )}
-          <div className="absolute inset-0 flex items-end gap-[2px]">
-            {daily.map((d, i) => {
-              const h = d.tokens ? Math.max(3, Math.round((d.tokens / top) * H)) : 2;
-              const on = i === active;
-              return (
-                <button
-                  key={d.date}
-                  type="button"
-                  aria-label={`${d.date} ${weekday(d.date)}，${d.tokens} tokens，${d.calls ?? 0} 次调用`}
-                  onMouseEnter={() => setPicked(i)}
-                  onMouseLeave={() => setPicked(null)}
-                  onFocus={() => setPicked(i)}
-                  onBlur={() => setPicked(null)}
-                  onClick={() => setPicked(i)}
-                  className="group relative flex h-full min-w-0 flex-1 items-end outline-none"
-                >
-                  <span
-                    className="w-full rounded-t-[2px] transition-[height,opacity] duration-150"
-                    style={{
-                      height: h,
-                      background: d.tokens ? "var(--accent)" : "var(--line)",
-                      opacity: d.tokens ? (on ? 1 : 0.5) : on ? 1 : 0.7,
-                    }}
-                  />
-                  <span className="pointer-events-none absolute inset-x-[-1px] inset-y-0 rounded-[2px] ring-1 ring-inset ring-accent/0 transition-[box-shadow] group-focus-visible:ring-accent/40" />
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      <div className="relative ml-11 mt-1.5 h-3.5">
-        {labels.map((i) => (
-          <span
-            key={i}
-            className="absolute whitespace-nowrap text-[9.5px] tabular-nums text-faint"
-            style={{
-              left: `${n <= 1 ? 0 : (i / (n - 1)) * 100}%`,
-              transform: i === 0 ? "none" : i === n - 1 ? "translateX(-100%)" : "translateX(-50%)",
-            }}
-          >
-            {daily[i].date.slice(5)}
-          </span>
-        ))}
-      </div>
-
-      {item && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-panel2 px-2.5 py-1.5 text-[11px]">
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${item.tokens ? "bg-accent" : "bg-faint/50"}`} />
-          <span className="tabular-nums text-ink">
-            {item.date.slice(5)} {weekday(item.date)}
-          </span>
-          <span className="tabular-nums text-muted">{tokens(item.tokens)} tokens</span>
-          <span className="text-faint">·</span>
-          <span className="tabular-nums text-muted">{item.calls ?? 0} 次调用</span>
-          <span className="ml-auto tabular-nums text-faint">{money(item.cost)}</span>
-        </div>
-      )}
-    </div>
   );
 }
 
