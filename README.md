@@ -141,7 +141,7 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
 | 审批 APV-01~05 | 三级权限判定、审批卡片（参数可展开）、拒绝原因回传、24h 过期、参数哈希校验不可绕过 |
 | 记忆 MEM-01~03 | 共享/私有分离、按更新时间注入并受 4000 字上限约束、仅用户可编辑 |
 | 工具 TOL-01~06 | 网页搜索、网页读取（SSRF 防护）、沙箱文件读写列删、JSON Schema 校验、三级权限；MCP 接入（TOL-05，HTTP/stdio 两种传输，服务级权限级别，审批联动）；代码执行 `code_exec`（TOL-06，跑在群聊的 Ubuntu 容器里，python/node/bash/sh） |
-| 常驻 Linux 环境 | 每个群聊一个 Ubuntu 容器（root + 联网，可 pip/apt 装包），**建群时后台预热**，`run_command`（L3 每次审批）执行 shell 命令，`code_exec` 也跑在里面，`/workspace` 挂载群聊沙箱目录，状态与文件持久 |
+| 常驻 Linux 环境 | 每个群聊一个 Ubuntu 容器（root + 联网，可 pip/apt 装包），**建群时后台预热**，`run_command`（L3 每次审批）执行 shell 命令，`code_exec` 也跑在里面，`/workspace` 挂载群聊沙箱目录，状态与文件持久；可选预装镜像 `deploy/sandbox.Dockerfile`（python3/node/git/jq 开箱可用），没构建就自动退回基础镜像 |
 | 技能 | 提示词 + 工具包，绑定到 Bot 注入提示词并合并工具；支持导入外部技能包（ZIP / SKILL.md / GitHub 仓库精准查找 / URL / ClawHub owner-slug 或技能名），带参考文件时提供 skill_file_read |
 | 通知 NTF-01~05 | 后台队列、页面内通知中心、浏览器通知（用户点击才申请授权）、拒绝后回退、当前群聊不打扰 |
 | 限额 LIM-01~04 | 步数与运行时长均不设上限（只统计步数/记录起止时间）；token 预算可选无限制，有限预算保留 80% 提示；委派深度默认 2 层、可改 1–5（设置页默认 + 群聊覆盖）、单用户并发 2 |
@@ -420,6 +420,7 @@ server/
     backup_db.py       数据库备份（Postgres pg_dump / SQLite .backup）
     migrate_sqlite_to_postgres.py  把业务表从 SQLite 复制到 Postgres
     smoke.py           对运行中的服务做端到端冒烟
+    build_sandbox.sh   构建沙箱预装镜像 botly-sandbox:24.04
   tests/
     test_flow.py       20 项验收测试（进程内驱动，无需常驻 Worker）
     test_account_export.py  账号删除与群聊导出回归
@@ -465,7 +466,8 @@ web/
 | `BOTLY_RESET_TOKEN_TTL_MINUTES` | 重置密码链接有效期 | 60 |
 | `BOTLY_VERIFY_TOKEN_TTL_HOURS` | 邮箱验证链接有效期 | 24 |
 | `BOTLY_LINUX_SANDBOX_ENABLED` | 是否启用常驻 Linux 环境（建群时预热容器） | `1` |
-| `BOTLY_LINUX_SANDBOX_IMAGE` | Linux 环境镜像 | `ubuntu:24.04` |
+| `BOTLY_LINUX_SANDBOX_IMAGE` | 沙箱镜像（预装 python3/node/git/jq 等） | `botly-sandbox:24.04` |
+| `BOTLY_LINUX_SANDBOX_BASELINE_IMAGE` | 预装镜像缺失时的兜底镜像 | `ubuntu:24.04` |
 | `BOTLY_LINUX_SANDBOX_TIMEOUT` | 单条命令超时秒数 | 60 |
 | `BOTLY_LINUX_SANDBOX_MEMORY` / `_CPUS` | 环境资源限制 | `1g` / `1.0` |
 | `BOTLY_LINUX_SANDBOX_AUTO_INSTALL` | 缺 python3/node 时自动 apt 安装 | `1` |

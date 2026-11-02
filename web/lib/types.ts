@@ -9,6 +9,7 @@ export type Bot = {
   temperature: number;
   tools: string[];
   skills?: string[];
+  enabled?: boolean;
   deleted: boolean;
   display_name: string;
   status?: "idle" | "working" | "waiting";

@@ -56,6 +56,19 @@ export default function BotsPage() {
   };
   useEffect(load, []);
 
+  // BOT-06：停用只是「不再参与新执行」，历史消息与成员关系都保留
+  const toggleEnabled = async (b: Bot) => {
+    const next = b.enabled === false;
+    setBots((prev) => prev.map((x) => (x.id === b.id ? { ...x, enabled: next } : x)));
+    try {
+      await api.patchBot(b.id, { enabled: next });
+      toast(next ? `已启用「${b.name}」` : `已停用「${b.name}」`, "ok");
+    } catch (e: any) {
+      setBots((prev) => prev.map((x) => (x.id === b.id ? { ...x, enabled: !next } : x)));
+      toast(e?.message || "操作失败", "error");
+    }
+  };
+
   // TOL-01：没配搜索 Key 时不要把 web_search 带进新 Bot / 模板默认值
   const onlyAvailable = (names: string[]) =>
     names.filter((n) => tools.find((t) => t.name === n)?.available !== false);
@@ -182,7 +195,7 @@ export default function BotsPage() {
 
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             {bots.map((b) => (
-              <div key={b.id} className="card p-4">
+              <div key={b.id} className={`card p-4 ${b.enabled === false ? "opacity-60" : ""}`}>
                 <div className="flex items-start gap-3">
                   <Avatar value={b.avatar} size={40} alt={b.name} />
                   <div className="min-w-0 flex-1">
@@ -191,11 +204,26 @@ export default function BotsPage() {
                       {b.role === "总指挥" && (
                         <span className="chip border-accent/40 text-accent">总指挥</span>
                       )}
+                      {b.enabled === false && <span className="chip text-faint">已停用</span>}
                     </div>
                     <div className="mt-0.5 text-[11.5px] text-faint">
                       {b.role} · {b.model || "未绑定模型"}
                     </div>
                   </div>
+                  <button
+                    onClick={() => toggleEnabled(b)}
+                    title={b.enabled === false ? "启用" : "停用"}
+                    aria-label={b.enabled === false ? "启用" : "停用"}
+                    className={`relative mt-1 h-5 w-9 shrink-0 rounded-full transition-colors ${
+                      b.enabled === false ? "bg-line" : "bg-ok/70"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                        b.enabled === false ? "left-0.5" : "left-[18px]"
+                      }`}
+                    />
+                  </button>
                   <button
                     onClick={() => setEditing(b)}
                     className="text-[11.5px] text-muted hover:text-ink"

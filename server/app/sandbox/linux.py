@@ -20,6 +20,7 @@ from app.core.config import (
     CODE_SANDBOX_MAX_OUTPUT,
     CODE_SANDBOX_TIMEOUT,
     LINUX_SANDBOX_AUTO_INSTALL,
+    LINUX_SANDBOX_BASELINE_IMAGE,
     LINUX_SANDBOX_CPUS,
     LINUX_SANDBOX_ENABLED,
     LINUX_SANDBOX_IMAGE,
@@ -111,6 +112,36 @@ def _lock_for(name: str) -> asyncio.Lock:
     return lock
 
 
+async def _run_container(name: str, workdir: str, image: str) -> tuple[int, str]:
+    _, err, code = await _docker(
+        "run", "-d", "--name", name,
+        "--init",  # tini 当 1 号进程，回收 docker exec 留下的僵尸
+        "--memory", LINUX_SANDBOX_MEMORY,
+        "--cpus", LINUX_SANDBOX_CPUS,
+        "--pids-limit", "512",
+        "-v", f"{workdir}:/workspace",
+        "-w", "/workspace",
+        image, "sleep", "infinity",
+        timeout=300,  # 首次创建可能要现场拉镜像，给足时间
+    )
+    return code, err
+
+
+def _image_missing(err: str) -> bool:
+    """docker run 的报错是不是「镜像不存在」。"""
+    low = (err or "").lower()
+    return any(
+        s in low
+        for s in (
+            "pull access denied",
+            "repository does not exist",
+            "unable to find image",
+            "manifest unknown",
+            "no such image",
+        )
+    )
+
+
 async def _ensure_container(user_id: str, chat_id: str, name: str) -> str:
     state = await _state(name)
     if state == "running":
@@ -123,17 +154,17 @@ async def _ensure_container(user_id: str, chat_id: str, name: str) -> str:
         await _docker("rm", "-f", name)
 
     workdir = str(sandbox.chat_root(user_id, chat_id))
-    _, err, code = await _docker(
-        "run", "-d", "--name", name,
-        "--init",  # tini 当 1 号进程，回收 docker exec 留下的僵尸
-        "--memory", LINUX_SANDBOX_MEMORY,
-        "--cpus", LINUX_SANDBOX_CPUS,
-        "--pids-limit", "512",
-        "-v", f"{workdir}:/workspace",
-        "-w", "/workspace",
-        LINUX_SANDBOX_IMAGE, "sleep", "infinity",
-        timeout=300,  # 首次创建可能要现场拉镜像，给足时间
-    )
+    image = LINUX_SANDBOX_IMAGE
+    code, err = await _run_container(name, workdir, image)
+    if code != 0 and _image_missing(err) and image != LINUX_SANDBOX_BASELINE_IMAGE:
+        # 预装镜像没构建（见 deploy/sandbox.Dockerfile）：退回基础镜像，功能不受影响，
+        # 只是 python/node 第一次用到时要现场 apt 装。
+        log.warning(
+            "沙箱镜像 %s 不存在，回退到 %s（可先跑 scripts/build_sandbox.sh 预装常用工具）",
+            image, LINUX_SANDBOX_BASELINE_IMAGE,
+        )
+        image = LINUX_SANDBOX_BASELINE_IMAGE
+        code, err = await _run_container(name, workdir, image)
     if code != 0:
         # API 和 Worker 是两个进程，进程内的锁管不到对方：谁先建成用谁的
         if "already in use" in err or "Conflict" in err:
@@ -146,9 +177,9 @@ async def _ensure_container(user_id: str, chat_id: str, name: str) -> str:
                     return name
         raise LinuxSandboxError(
             f"启动 Linux 环境失败：{err.strip()[:300]}"
-            f"（确认已安装 Docker，镜像 {LINUX_SANDBOX_IMAGE} 可拉取）"
+            f"（确认已安装 Docker，镜像 {image} 可拉取）"
         )
-    log.info("沙箱容器已创建 chat=%s name=%s", chat_id, name)
+    log.info("沙箱容器已创建 chat=%s name=%s image=%s", chat_id, name, image)
     return name
 
 

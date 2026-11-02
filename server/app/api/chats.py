@@ -230,6 +230,8 @@ def create_chat(
 
     def _blocked(bid: str) -> str | None:
         bot = by_id[bid]
+        if bot.enabled is False:
+            return f"Bot「{bot.name}」已停用，不能作为总指挥"
         return supervisor_block_reason(bot, providers.get(bot.provider_id or ""))
 
     sup_id = payload.supervisor_bot_id
@@ -378,6 +380,8 @@ def update_chat(
         sup_bot = owned_or_404(db, Bot, new_supervisor, user.id)
         if sup_bot.deleted_at:
             raise HTTPException(400, "该 Bot 已被删除，不能担任总指挥")
+        if sup_bot.enabled is False:
+            raise HTTPException(400, f"Bot「{sup_bot.name}」已停用，不能担任总指挥")
         # MOD-02：同上，模型明确不支持工具调用 / 流式输出时不接受为新总指挥
         provider = db.get(Provider, sup_bot.provider_id) if sup_bot.provider_id else None
         reason = supervisor_block_reason(sup_bot, provider)
@@ -1186,6 +1190,14 @@ def post_message(
     effective = target or sup
     if not effective:
         raise HTTPException(400, "该群聊没有配置总指挥 Bot")
+    # BOT-06：停用的 Bot 不再参与新执行，先启用或换人
+    if effective.enabled is False:
+        who = "该成员" if target else "总指挥"
+        raise HTTPException(
+            409,
+            f"{who}「{effective.name}」已停用，请先到 Bot 页启用"
+            + ("，或换一位总指挥" if not target else ""),
+        )
     if not effective.provider_id:
         raise HTTPException(
             409, f"Bot「{effective.name}」尚未绑定模型接入，请先到设置页配置模型接入"

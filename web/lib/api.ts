@@ -98,11 +98,15 @@ export const api = {
   oauthAccounts: () =>
     req<{
       available: { google: boolean; github: boolean };
+      redirect_uri: Record<string, string>;
       linked: Record<
         string,
         { name?: string | null; email?: string | null; avatar?: string | null; last_login_at?: string | null }
       >;
     }>("/auth/oauth/accounts"),
+  /** 解绑第三方账号 */
+  unbindOauth: (provider: string) =>
+    req<{ ok: boolean; remaining: number }>(`/auth/oauth/${provider}`, { method: "DELETE" }),
   /** ACC-07：删除账号（立即停用，30 天后彻底清除） */
   deleteAccount: (password: string, confirm_email: string) =>
     req<{ ok: boolean; purge_after: string | null; retention_days: number }>("/auth/account", {

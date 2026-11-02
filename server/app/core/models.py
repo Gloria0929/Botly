@@ -170,6 +170,9 @@ class Bot(Base, TimestampMixin):
     # 已启用的技能 id 列表（技能提供额外提示词与工具，运行时合并）
     skills: Mapped[list] = mapped_column(JSON, default=list)
     is_supervisor_template: Mapped[bool] = mapped_column(Boolean, default=False)
+    # BOT-06：停用后不再参与任何新执行（不能被派任务、不能被 @、不能当总指挥），
+    # 历史消息与成员关系保留，重新启用即可恢复。
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 

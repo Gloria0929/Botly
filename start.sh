@@ -41,6 +41,20 @@ fi
 echo "==> 检查 Redis"
 ( cd server && ./venv/bin/python -c "from app.core import redis_bus; print('redis ok' if redis_bus.available() else 'redis 不可用，将降级为 DB 轮询')" )
 
+echo "==> 检查沙箱预装镜像"
+SANDBOX_IMAGE="$(grep -E '^BOTLY_LINUX_SANDBOX_IMAGE=' server/.env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-botly-sandbox:24.04}"
+if [ "${SKIP_SANDBOX_IMAGE:-0}" = "1" ]; then
+  echo "已跳过镜像构建（SKIP_SANDBOX_IMAGE=1），容器将用 ubuntu:24.04 + 首次用时现装"
+elif docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1; then
+  echo "已存在：$SANDBOX_IMAGE"
+else
+  echo "首次构建 ${SANDBOX_IMAGE}（约 2–4 分钟；不想等可 Ctrl-C，之后自动退回 ubuntu:24.04）"
+  if ! ./server/scripts/build_sandbox.sh "$SANDBOX_IMAGE"; then
+    echo "构建失败，容器将退回基础镜像 ubuntu:24.04（python/node 首次用到时现装）"
+  fi
+fi
+
 echo "==> 启动 API :8100"
 # 用 exec 让子 shell 被 python 替换，$! 才是真正的进程号；
 # 否则 trap 杀掉的是子 shell，uvicorn 会留下来继续占端口。

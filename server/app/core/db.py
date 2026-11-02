@@ -249,7 +249,7 @@ def _light_migrate() -> None:
     wanted = {
         "providers": {"vendor_id": "VARCHAR(40)", "logo": "VARCHAR(500)"},
         "messages": {"reasoning_content": "TEXT"},
-        "bots": {"skills": "JSON"},
+        "bots": {"skills": "JSON", "enabled": "BOOLEAN DEFAULT TRUE"},
         "tasks": {"step_key": "VARCHAR(200)", "batch": "INTEGER DEFAULT 0"},
         "runs": {
             "last_turn_message_id": "VARCHAR(32)",

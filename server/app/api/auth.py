@@ -333,11 +333,16 @@ def oauth_providers():
 
 
 @router.get("/oauth/accounts")
-def oauth_accounts(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """当前用户绑定了哪些第三方账号（设置页用）。"""
+def oauth_accounts(
+    request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """当前用户绑定了哪些第三方账号，以及回调地址（设置页照着填到对方后台）。"""
     rows = db.scalars(select(OAuthAccount).where(OAuthAccount.user_id == user.id)).all()
     return {
         "available": {"google": oauth.enabled("google"), "github": oauth.enabled("github")},
+        "redirect_uri": {
+            p: _oauth_redirect_uri(p, request) for p in ("google", "github")
+        },
         "linked": {
             r.provider: {
                 "name": r.name,
@@ -347,6 +352,37 @@ def oauth_accounts(user: User = Depends(current_user), db: Session = Depends(get
             }
             for r in rows
         },
+    }
+
+
+@router.delete("/oauth/{provider}")
+def oauth_unbind(
+    provider: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """解绑当前账号的某个第三方登录。"""
+    if provider not in ("google", "github"):
+        raise HTTPException(404, "不支持的登录方式")
+    row = db.scalar(
+        select(OAuthAccount).where(
+            OAuthAccount.user_id == user.id, OAuthAccount.provider == provider
+        )
+    )
+    if not row:
+        raise HTTPException(404, "尚未绑定该账号")
+    db.delete(row)
+    db.flush()
+    left = db.scalar(
+        select(func.count())
+        .select_from(OAuthAccount)
+        .where(OAuthAccount.user_id == user.id)
+    )
+    log.info("OAuth 解绑 provider=%s uid=%s", provider, fingerprint(user.id))
+    return {
+        "ok": True,
+        # 一个都没剩时前端提示「记得确认邮箱密码可用」
+        "remaining": int(left or 0),
     }
 
 

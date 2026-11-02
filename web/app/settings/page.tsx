@@ -76,8 +76,47 @@ export default function SettingsPage() {
   // 第三方登录绑定状态：available 是「后端配了这个 provider」，linked 是「当前账号已绑」
   const [oauth, setOauth] = useState<{
     available: { google: boolean; github: boolean };
+    redirect_uri: Record<string, string>;
     linked: Record<string, { name?: string | null; email?: string | null }>;
   } | null>(null);
+
+  // ACC-09：解绑第三方登录；解绑后只能用邮箱密码登录
+  const unbindOauth = async (p: "google" | "github") => {
+    const label = p === "google" ? "Google" : "GitHub";
+    const ok = await confirm({
+      title: `解除 ${label} 绑定？`,
+      description: "解绑后需要用邮箱密码登录。忘记密码可在登录页点「忘记密码」重置。",
+      confirmText: "解除绑定",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.unbindOauth(p);
+      setOauth((prev) =>
+        prev
+          ? {
+              ...prev,
+              linked: Object.fromEntries(
+                Object.entries(prev.linked).filter(([k]) => k !== p)
+              ),
+            }
+          : prev
+      );
+      toast(`已解除 ${label} 绑定`, "ok");
+      if (r.remaining === 0) {
+        toast("已没有第三方登录方式，请确认邮箱密码可以登录", "info");
+      }
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
+
+  const copyText = (text: string) => {
+    navigator.clipboard?.writeText(text).then(
+      () => toast("已复制", "ok"),
+      () => toast("复制失败，请手动选中", "error")
+    );
+  };
 
   // ACC-08：发一封验证邮件；本地没配 SMTP 时后端会回 dev_link，直接复制给用户
   const sendVerify = async () => {
@@ -698,6 +737,12 @@ export default function SettingsPage() {
                             <span className="min-w-0 truncate text-[10.5px] text-faint">
                               {bound.email || bound.name || ""}
                             </span>
+                            <button
+                              className="ml-auto text-[11px] text-faint hover:text-danger"
+                              onClick={() => unbindOauth(p)}
+                            >
+                              解除绑定
+                            </button>
                           </>
                         ) : (
                           <>
@@ -710,6 +755,15 @@ export default function SettingsPage() {
                             >
                               绑定
                             </button>
+                            <div className="w-full break-all font-mono text-[10px] leading-relaxed text-faint">
+                              回调地址 {oauth.redirect_uri?.[p]}
+                              <button
+                                className="ml-1 text-accent hover:underline"
+                                onClick={() => copyText(oauth.redirect_uri[p])}
+                              >
+                                复制
+                              </button>
+                            </div>
                           </>
                         )}
                       </div>

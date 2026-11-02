@@ -142,6 +142,11 @@ export default function MembersModal({
                           <Crown size={9} /> 总指挥
                         </span>
                       )}
+                      {m.enabled === false && (
+                        <span className="chip text-faint" title="停用的成员不接任务，也不能被 @">
+                          已停用
+                        </span>
+                      )}
                       {working && (
                         <span className="text-[10px] text-warn">
                           {m.status === "waiting" ? "等待处理" : "执行中"}

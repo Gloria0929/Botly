@@ -213,3 +213,32 @@ def test_bind_refuses_account_owned_by_someone_else(client, invite, monkeypatch)
     assert r.status_code == 302
     assert "oauth_error" in r.headers["location"]
     assert "google" not in client.get("/api/auth/oauth/accounts").json()["linked"]
+
+
+def test_unbind_removes_binding_and_exposes_redirect_uri(client, invite, monkeypatch):
+    client.cookies.clear()
+    register(client, invite, "unbind@example.com")
+    uid = client.get("/api/auth/me").json()["id"]
+
+    _enabled(monkeypatch)
+    _profile(monkeypatch, uid="g-unbind", email="unbind@example.com")
+    state, nonce = make_oauth_state("google", uid)
+    client.cookies.set(OAUTH_STATE_COOKIE, nonce, path="/api/auth/oauth")
+    client.get(CALLBACK.format(p="google") + f"?code=abc&state={state}", follow_redirects=False)
+
+    accounts = client.get("/api/auth/oauth/accounts").json()
+    assert "google" in accounts["linked"]
+    # 设置页要照着这个地址去对方后台登记，必须和实际发出去的一致
+    assert accounts["redirect_uri"]["google"].endswith("/api/auth/oauth/google/callback")
+
+    r = client.delete("/api/auth/oauth/google")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "remaining": 0}
+    assert "google" not in client.get("/api/auth/oauth/accounts").json()["linked"]
+
+
+def test_unbind_unknown_binding_returns_404(client, invite):
+    client.cookies.clear()
+    register(client, invite, "unbind-none@example.com")
+    r = client.delete("/api/auth/oauth/github")
+    assert r.status_code == 404

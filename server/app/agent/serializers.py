@@ -22,6 +22,8 @@ def bot_out(bot: Bot, deleted_label: bool = False) -> dict:
         "temperature": bot.temperature,
         "tools": bot.tools or [],
         "skills": bot.skills or [],
+        # 老库刚加列时可能还是 NULL，按「启用」处理
+        "enabled": bot.enabled is not False,
         "deleted": bool(bot.deleted_at),
         "display_name": bot.name if not bot.deleted_at else f"{bot.name}（已删除）",
         "created_at": iso(bot.created_at),

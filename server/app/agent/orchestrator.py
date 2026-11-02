@@ -1366,6 +1366,14 @@ class RunExecutor:
                     thread_id, call, f"没有名为「{target_name}」的成员。可选成员：{names}"
                 )
                 return {}
+            # BOT-06：停用的成员不接活，明确告诉模型换人，别让它反复重试
+            if target.enabled is False:
+                names = "、".join(b.name for b in members if b.enabled is not False)
+                self.write_tool_result(
+                    thread_id, call,
+                    f"「{target.name}」已停用，不能接受任务。可派给：{names}",
+                )
+                return {}
             if target.id == bot_id:
                 self.write_tool_result(thread_id, call, "不能把任务派给自己。")
                 return {}
@@ -2464,7 +2472,18 @@ class RunExecutor:
             .where(ChatMember.chat_id == chat.id)
             .order_by(Bot.created_at)
         ).scalars().all()
-        return [execution_bot(db, run, b.id) if run else b for b in rows if not b.deleted_at]
+        out: list[Bot] = []
+        for b in rows:
+            if b.deleted_at:
+                continue
+            bot = execution_bot(db, run, b.id) if run else b
+            if bot is None:
+                continue
+            # 快照冻结的是模型/工具配置；启停是运营开关，取当前值，
+            # 这样执行中途停用某个成员也能立刻生效（BOT-06）。
+            bot.enabled = b.enabled is not False
+            out.append(bot)
+        return out
 
     # ---------------- RUN-09：委派深度与嵌套派任务 ----------------
     def _thread_depth(self, db: Session, thread_id: str) -> int:
@@ -2588,7 +2607,8 @@ class RunExecutor:
 
         member_desc = "、".join(
             f"{b.name}（{b.role}；工具：{', '.join(b.tools or []) or '无'}；"
-            f"{'模型已配置' if b.provider_id else '未配置模型，暂不可派任务'}）"
+            f"{'模型已配置' if b.provider_id else '未配置模型，暂不可派任务'}"
+            f"{'；已停用，不要派任务给它' if b.enabled is False else ''}）"
             for b in members
         )
         budget = self._limits(db, run)["token_budget"]

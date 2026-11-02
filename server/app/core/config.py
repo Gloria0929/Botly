@@ -150,7 +150,9 @@ if CODE_EXEC_LEVEL not in ("L1", "L2", "L3"):
 
 # ---- 常驻 Linux 运行环境（每个群聊一个容器，root + 联网，可装包）----
 LINUX_SANDBOX_ENABLED = os.getenv("BOTLY_LINUX_SANDBOX_ENABLED", "1").lower() not in ("0", "false", "no")
-LINUX_SANDBOX_IMAGE = os.getenv("BOTLY_LINUX_SANDBOX_IMAGE", "ubuntu:24.04")
+# 预装镜像（deploy/sandbox.Dockerfile 构建）；镜像不存在时自动回退到 BASELINE
+LINUX_SANDBOX_IMAGE = os.getenv("BOTLY_LINUX_SANDBOX_IMAGE", "botly-sandbox:24.04")
+LINUX_SANDBOX_BASELINE_IMAGE = os.getenv("BOTLY_LINUX_SANDBOX_BASELINE_IMAGE", "ubuntu:24.04")
 LINUX_SANDBOX_TIMEOUT = max(10, int(os.getenv("BOTLY_LINUX_SANDBOX_TIMEOUT", "60")))
 LINUX_SANDBOX_MEMORY = os.getenv("BOTLY_LINUX_SANDBOX_MEMORY", "1g")
 LINUX_SANDBOX_CPUS = os.getenv("BOTLY_LINUX_SANDBOX_CPUS", "1.0")

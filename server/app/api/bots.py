@@ -40,6 +40,7 @@ class BotPatch(BaseModel):
     temperature: float | None = None
     tools: list[str] | None = None
     skills: list[str] | None = None
+    enabled: bool | None = None
 
 
 def _allowed_tools(db: Session, user_id: str) -> set[str]:
