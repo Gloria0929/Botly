@@ -362,29 +362,30 @@ export default function BotsPage() {
                   return (
                     <label
                       key={t.name}
-                      className={`flex items-start gap-2 rounded px-1 py-1.5 ${
+                      className={`block rounded px-1 py-1.5 ${
                         off ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-panel2"
                       }`}
                       title={off ? t.reason || "" : t.description}
                     >
-                      <input
-                        type="checkbox"
-                        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--accent)] disabled:cursor-not-allowed"
-                        disabled={off}
-                        checked={(editing.tools || []).includes(t.name)}
-                        onChange={(e) =>
-                          setEditing({
-                            ...editing,
-                            tools: e.target.checked
-                              ? [...(editing.tools || []), t.name]
-                              : (editing.tools || []).filter((x) => x !== t.name),
-                          })
-                        }
-                      />
-                      <span className="min-w-0">
-                        <span className="font-mono text-[11.5px]">{t.name}</span>
+                      {/* 勾选框和名称放在同一行做 flex 居中，说明文字缩进对齐到名称左侧 */}
+                      <span className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)] disabled:cursor-not-allowed"
+                          disabled={off}
+                          checked={(editing.tools || []).includes(t.name)}
+                          onChange={(e) =>
+                            setEditing({
+                              ...editing,
+                              tools: e.target.checked
+                                ? [...(editing.tools || []), t.name]
+                                : (editing.tools || []).filter((x) => x !== t.name),
+                            })
+                          }
+                        />
+                        <span className="min-w-0 font-mono text-[11.5px]">{t.name}</span>
                         <span
-                          className={`ml-1.5 text-[10px] ${
+                          className={`shrink-0 text-[10px] ${
                             t.level === "L3"
                               ? "text-warn"
                               : t.level === "L2"
@@ -395,20 +396,22 @@ export default function BotsPage() {
                           {t.level}
                         </span>
                         {off && (
-                          <span className="chip ml-1.5 border-warn/40 text-warn">未配置，暂不可用</span>
-                        )}
-                        <span className="block text-[10.5px] leading-relaxed text-faint">
-                          {t.description}
-                        </span>
-                        {off && (
-                          <span className="mt-0.5 block text-[10.5px] text-warn">
-                            {t.reason}{" "}
-                            <Link href="/settings" className="underline hover:text-ink">
-                              去设置页配置
-                            </Link>
+                          <span className="chip shrink-0 border-warn/40 text-warn">
+                            未配置，暂不可用
                           </span>
                         )}
                       </span>
+                      <span className="mt-0.5 block pl-[22px] text-[10.5px] leading-relaxed text-faint">
+                        {t.description}
+                      </span>
+                      {off && (
+                        <span className="mt-0.5 block pl-[22px] text-[10.5px] text-warn">
+                          {t.reason}{" "}
+                          <Link href="/settings" className="underline hover:text-ink">
+                            去设置页配置
+                          </Link>
+                        </span>
+                      )}
                     </label>
                   );
                 })}
