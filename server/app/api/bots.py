@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, owned_or_404
-from ..models import Bot, Chat, ChatMember, Provider, Run, Task, User, now
+from ..models import Bot, Chat, ChatMember, Provider, Run, Task, User, UserSettings, now
 from ..serializers import bot_out
 from ..templates import BOT_TEMPLATES, out as template_out
 from ..tools import BUILTIN_TOOLS
@@ -78,11 +78,31 @@ def list_bots(
 
 
 @router.get("/tools")
-def list_tools(user: User = Depends(current_user)):
-    return [
-        {"name": t.name, "description": t.description, "level": t.level}
-        for t in BUILTIN_TOOLS.values()
-    ]
+def list_tools(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """内置工具清单，附带「当前用户现在能不能用」。
+
+    TOL-01：`web_search` 依赖用户在设置页填写的搜索服务 API Key。没配 Key 时
+    前端直接禁用勾选并给出跳转提示，避免选了以后执行时静默回退到公共搜索
+    （结果不稳定，用户也不知道查询被发给了第三方）。
+    """
+    settings = db.get(UserSettings, user.id)
+    search_ready = bool(settings and settings.search_api_key_encrypted)
+    out = []
+    for t in BUILTIN_TOOLS.values():
+        available, reason = True, None
+        if t.name == "web_search" and not search_ready:
+            available = False
+            reason = "未配置搜索服务 API Key，请先到设置页填写"
+        out.append(
+            {
+                "name": t.name,
+                "description": t.description,
+                "level": t.level,
+                "available": available,
+                "reason": reason,
+            }
+        )
+    return out
 
 
 @router.get("/templates")

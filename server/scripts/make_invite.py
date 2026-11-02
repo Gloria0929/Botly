@@ -12,7 +12,7 @@ import string
 from datetime import timedelta
 
 from app.db import init_db, session_scope
-from app.models import InviteCode, now
+from app.models import InviteCode, User, now
 from sqlalchemy import select
 
 ALPHABET = string.ascii_uppercase + string.digits
@@ -39,9 +39,23 @@ def main() -> None:
             rows = db.scalars(select(InviteCode).order_by(InviteCode.created_at.desc())).all()
             if not rows:
                 print("暂无邀请码")
+            # ACC-04：除了用量，还要能看到「被谁用了」，方便回收与追责
+            users = db.scalars(
+                select(User).where(User.invite_code_id.isnot(None)).order_by(User.created_at)
+            ).all()
+            by_code: dict[str, list[User]] = {}
+            for u in users:
+                by_code.setdefault(u.invite_code_id, []).append(u)
             for r in rows:
                 exp = r.expires_at.strftime("%Y-%m-%d") if r.expires_at else "永久"
-                print(f"{r.code}\t已用 {r.used_count}/{r.max_uses}\t到期 {exp}\t{r.note or ''}")
+                print(
+                    f"{r.code}\t已用 {r.used_count}/{r.max_uses}\t到期 {exp}\t{r.note or ''}"
+                )
+                for u in by_code.get(r.id, []):
+                    created = u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "-"
+                    print(f"    - {u.email}\t注册于 {created}")
+            used = sum(len(v) for v in by_code.values())
+            print(f"\n共 {len(rows)} 个邀请码，{used} 个账号通过邀请码注册")
             return
 
         code = InviteCode(

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   Loader2,
@@ -26,8 +27,8 @@ import {
   unsubscribePush,
   type PushSupport,
 } from "@/lib/push";
-import { capLabel, modelCapability } from "@/lib/fmt";
-import type { Me, Provider, Vendor } from "@/lib/types";
+import { capLabel, modelCapability, timeAgo } from "@/lib/fmt";
+import type { Bot, Me, Provider, Vendor } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
 export default function SettingsPage() {
@@ -41,6 +42,26 @@ export default function SettingsPage() {
   const [pricing, setPricing] = useState<Provider | null>(null);
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [probing, setProbing] = useState<string | null>(null);
+  // 每个厂商同一时间只允许一个动作（刷新/测试/检测），按钮显示进行中文案
+  const [providerBusy, setProviderBusy] = useState<{ id: string; action: string } | null>(null);
+  // 检测结果明细：批量检测最多 12 个模型，只在 toast 里报个数字看不出哪些不可用
+  const [probeResult, setProbeResult] = useState<{
+    provider: string;
+    message: string;
+    results: {
+      model: string;
+      ok: boolean;
+      message?: string;
+      streaming?: boolean | null;
+      tool_calling?: boolean | null;
+    }[];
+  } | null>(null);
+  // MOD-04：删除厂商前先看受影响的 Bot，二选一（去改绑 / 确认置为不可用）
+  const [deleteTarget, setDeleteTarget] = useState<Provider | null>(null);
+  const [deleteAffected, setDeleteAffected] = useState<Bot[]>([]);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  // ACC-06：注册/首次登录后的引导（未配置厂商时提示先配模型）
+  const [welcome, setWelcome] = useState(false);
   const [vendorId, setVendorId] = useState("");
   const confirm = useConfirm();
   const [pwd, setPwd] = useState({ current: "", next: "" });
@@ -81,6 +102,10 @@ export default function SettingsPage() {
     api.vendors().then(setVendors).catch(() => {});
     if (typeof Notification !== "undefined") setNotifyPerm(Notification.permission);
     getPushState().then(setPushSt).catch(() => {});
+    // ACC-06：注册 / 首次登录会带 ?welcome=1
+    if (typeof window !== "undefined") {
+      setWelcome(new URLSearchParams(window.location.search).get("welcome") === "1");
+    }
   }, []);
 
   const saveSettings = async (patch: any, msg = "已保存") => {
@@ -151,6 +176,99 @@ export default function SettingsPage() {
     }
   };
 
+  // 单个厂商的耗时操作：同一时间只跑一个，按钮上显示进行中文案
+  const withProviderBusy = async (p: Provider, action: string, fn: () => Promise<void>) => {
+    if (providerBusy) return;
+    setProviderBusy({ id: p.id, action });
+    try {
+      await fn();
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setProviderBusy(null);
+    }
+  };
+
+  const refreshProvider = (p: Provider) =>
+    withProviderBusy(p, "refresh", async () => {
+      const r = await api.refreshProvider(p.id);
+      toast(r.message, r.detected ? "ok" : "error");
+      load();
+    });
+
+  const testProvider = (p: Provider) =>
+    withProviderBusy(p, "test", async () => {
+      const r = await api.testProvider(p.id);
+      const caps =
+        r.ok && r.model
+          ? ` · ${capLabel(r.streaming, "流式")} · ${capLabel(r.tool_calling, "工具调用")}`
+          : "";
+      toast(r.ok ? `「${r.model}」连接正常${caps}` : r.message, r.ok ? "ok" : "error");
+      load();
+    });
+
+  const probeProvider = async (p: Provider) => {
+    setProbing(p.id);
+    await withProviderBusy(p, "probe", async () => {
+      const r = await api.probeProvider(p.id);
+      setProbeResult({
+        provider: p.name || p.vendor_name,
+        message: r.message,
+        results: r.results || [],
+      });
+      toast(r.message, "ok");
+      load();
+    });
+    setProbing(null);
+  };
+
+  // MOD-04：删除厂商前先查受影响的 Bot，让用户选「去改绑」还是「确认置为不可用」
+  const askDeleteProvider = async (p: Provider) => {
+    try {
+      const bots = await api.bots();
+      const affected = bots.filter((b) => b.provider_id === p.id && !b.deleted);
+      if (!affected.length) {
+        const ok = await confirm({
+          title: `删除「${p.vendor_name}」？`,
+          description: "删除后需要重新添加才能继续使用该厂商，已绑定的模型选择也会失效。",
+          confirmText: "删除",
+          danger: true,
+        });
+        if (!ok) return;
+        await withProviderBusy(p, "delete", async () => {
+          await api.deleteProvider(p.id, false);
+          toast("已删除", "ok");
+          load();
+        });
+        return;
+      }
+      setDeleteAffected(affected);
+      setDeleteTarget(p);
+    } catch (e: any) {
+      toast(e.message, "error");
+    }
+  };
+
+  const forceDeleteProvider = async () => {
+    if (!deleteTarget) return;
+    const p = deleteTarget;
+    setDeleteBusy(true);
+    try {
+      await api.deleteProvider(p.id, true);
+      toast(
+        `已删除「${p.vendor_name}」。${deleteAffected.length} 个 Bot 已置为不可用，请尽快重新绑定模型`,
+        "ok"
+      );
+      setDeleteTarget(null);
+      setDeleteAffected([]);
+      load();
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
   const usedVendors = useMemo(
     () => new Set(providers.map((p) => p.vendor_id).filter(Boolean) as string[]),
     [providers]
@@ -180,6 +298,21 @@ export default function SettingsPage() {
           <p className="mt-1 text-[12.5px] text-muted">
             模型费用由你自带的 Key 承担，平台不提供统一额度。
           </p>
+
+          {/* ACC-06：未配置模型接入时的引导。配好之前发起执行会被后端拒绝，
+              与其让用户在建群聊时撞到 409，不如在这里说清楚下一步做什么。 */}
+          {!providersLoading && !providers.length && (
+            <div className="mt-4 rounded-lg border border-accent/40 bg-accent/5 px-3.5 py-3">
+              <div className="flex items-center gap-2 text-[12.5px] font-medium text-accent">
+                <AlertTriangle size={14} />
+                {welcome ? "欢迎！还差一步：先配置模型接入" : "还差一步：先配置模型接入"}
+              </div>
+              <p className="mt-1 text-[11.5px] leading-relaxed text-muted">
+                在下面选一个厂商、填 API Key，模型列表会自动获取（也可以手动填）。配好之后回到群聊，
+                总指挥才能开始工作；在此之前发起执行会提示「尚未绑定模型接入」。
+              </p>
+            </div>
+          )}
 
           {/* 模型厂商 */}
           <Section
@@ -259,100 +392,97 @@ export default function SettingsPage() {
                           ` · ${p.capabilities.no_streaming} 个不支持流式`}
                       </span>
                     )}
+                    {p.last_checked_at && (
+                      <span
+                        className="hidden text-[10.5px] text-faint sm:inline"
+                        title="上次刷新/测试/检测的时间"
+                      >
+                        上次检测 {timeAgo(p.last_checked_at)}
+                      </span>
+                    )}
                     <div className="ml-auto flex items-center gap-2">
-                      {p.kind !== "mock" && (
-                        <button
-                          className="text-[11.5px] text-muted hover:text-ink"
-                          onClick={() => setEditingProvider(p)}
-                          title="修改名称、base_url 或重新输入 API Key"
-                        >
-                          编辑
-                        </button>
-                      )}
-                      <button
-                        className="text-[11.5px] text-muted hover:text-ink"
-                        onClick={() => setPricing(p)}
-                        title="填写模型单价，用于用量页估算费用"
-                      >
-                        价格
-                      </button>
-                      <button
-                        className="text-[11.5px] text-muted hover:text-ink"
-                        onClick={async () => {
-                          try {
-                            const r = await api.refreshProvider(p.id);
-                            toast(r.message, r.detected ? "ok" : "error");
-                            load();
-                          } catch (e: any) {
-                            toast(e.message, "error");
-                          }
-                        }}
-                      >
-                        刷新模型
-                      </button>
-                      {p.kind !== "mock" && (
-                        <button
-                          className="text-[11.5px] text-muted hover:text-ink disabled:opacity-50"
-                          disabled={probing === p.id}
-                          title="批量检测流式输出与工具调用能力"
-                          onClick={async () => {
-                            setProbing(p.id);
-                            try {
-                              const r = await api.probeProvider(p.id);
-                              toast(r.message, "ok");
-                              load();
-                            } catch (e: any) {
-                              toast(e.message, "error");
-                            } finally {
-                              setProbing(null);
-                            }
-                          }}
-                        >
-                          {probing === p.id ? "检测中…" : "检测能力"}
-                        </button>
-                      )}
-                      <button
-                        className="text-[11.5px] text-muted hover:text-ink"
-                        onClick={async () => {
-                          try {
-                            const r = await api.testProvider(p.id);
-                            const caps =
-                              r.ok && r.model
-                                ? ` · ${capLabel(r.streaming, "流式")} · ${capLabel(
-                                    r.tool_calling,
-                                    "工具调用"
-                                  )}`
-                                : "";
-                            toast(r.ok ? `「${r.model}」连接正常${caps}` : r.message, r.ok ? "ok" : "error");
-                            load();
-                          } catch (e: any) {
-                            toast(e.message, "error");
-                          }
-                        }}
-                      >
-                        测试
-                      </button>
-                      <button
-                        className="text-faint hover:text-danger"
-                        onClick={async () => {
-                          const ok = await confirm({
-                            title: `删除「${p.vendor_name}」？`,
-                            description: "使用该厂商的 Bot 会被置为不可用，需要重新选择模型。",
-                            confirmText: "删除",
-                            danger: true,
-                          });
-                          if (!ok) return;
-                          try {
-                            await api.deleteProvider(p.id, true);
-                            toast("已删除", "ok");
-                            load();
-                          } catch (e: any) {
-                            toast(e.message, "error");
-                          }
-                        }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
+                      {(() => {
+                        const busy = providerBusy?.id === p.id ? providerBusy.action : null;
+                        const anyBusy = Boolean(providerBusy);
+                        return (
+                          <>
+                            {p.kind !== "mock" && (
+                              <button
+                                className="text-[11.5px] text-muted hover:text-ink disabled:opacity-40"
+                                disabled={anyBusy}
+                                onClick={() => setEditingProvider(p)}
+                                title="修改名称、base_url 或重新输入 API Key"
+                              >
+                                编辑
+                              </button>
+                            )}
+                            <button
+                              className="text-[11.5px] text-muted hover:text-ink disabled:opacity-40"
+                              disabled={anyBusy}
+                              onClick={() => setPricing(p)}
+                              title="填写模型单价，用于用量页估算费用"
+                            >
+                              价格
+                            </button>
+                            <button
+                              className="text-[11.5px] text-muted hover:text-ink disabled:opacity-40"
+                              disabled={anyBusy}
+                              onClick={() => refreshProvider(p)}
+                              title="重新拉取厂商的模型列表"
+                            >
+                              {busy === "refresh" ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <Loader2 size={11} className="animate-spin" /> 刷新中
+                                </span>
+                              ) : (
+                                "刷新模型"
+                              )}
+                            </button>
+                            {p.kind !== "mock" && (
+                              <button
+                                className="text-[11.5px] text-muted hover:text-ink disabled:opacity-40"
+                                disabled={anyBusy}
+                                title="批量检测流式输出与工具调用能力"
+                                onClick={() => probeProvider(p)}
+                              >
+                                {probing === p.id ? (
+                                  <span className="inline-flex items-center gap-1">
+                                    <Loader2 size={11} className="animate-spin" /> 检测中
+                                  </span>
+                                ) : (
+                                  "检测能力"
+                                )}
+                              </button>
+                            )}
+                            <button
+                              className="text-[11.5px] text-muted hover:text-ink disabled:opacity-40"
+                              disabled={anyBusy}
+                              onClick={() => testProvider(p)}
+                              title="真实发一次请求，检测首个模型的连通性与能力"
+                            >
+                              {busy === "test" ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <Loader2 size={11} className="animate-spin" /> 测试中
+                                </span>
+                              ) : (
+                                "测试"
+                              )}
+                            </button>
+                            <button
+                              className="text-faint hover:text-danger disabled:opacity-40"
+                              disabled={anyBusy}
+                              onClick={() => askDeleteProvider(p)}
+                              title="删除该厂商"
+                            >
+                              {busy === "delete" ? (
+                                <Loader2 size={13} className="animate-spin" />
+                              ) : (
+                                <Trash2 size={13} />
+                              )}
+                            </button>
+                          </>
+                        );
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -393,8 +523,23 @@ export default function SettingsPage() {
           {/* 搜索 */}
           <Section
             title="网页搜索"
-            desc="未配置时使用免密钥的公共搜索，稳定性较差。推荐填入 Tavily 等搜索服务的 API Key。"
+            desc="配置后 Bot 才能勾选 web_search。未配置时该工具在 Bot 编辑页禁用，已在用的老 Bot 会回退到免密钥公共搜索（稳定性较差）。"
           >
+            <div className="mb-1.5 flex items-center gap-1.5 text-[11px]">
+              {settings?.search_configured ? (
+                <>
+                  <Check size={12} className="text-ok" />
+                  <span className="text-ok">已配置</span>
+                  <span className="text-faint">· web_search 可在 Bot 里选用</span>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle size={12} className="text-warn" />
+                  <span className="text-warn">未配置</span>
+                  <span className="text-faint">· Bot 编辑页的 web_search 暂不可选</span>
+                </>
+              )}
+            </div>
             <input
               className="field"
               type="password"
@@ -403,12 +548,15 @@ export default function SettingsPage() {
               }
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  saveSettings({ search_api_key: (e.target as HTMLInputElement).value }, "已保存");
-                  (e.target as HTMLInputElement).value = "";
+                  const input = e.target as HTMLInputElement;
+                  saveSettings({ search_api_key: input.value }, input.value ? "已保存" : "已清除");
+                  input.value = "";
                 }
               }}
             />
-            <p className="mt-1.5 text-[10.5px] text-faint">回车保存。留空并保存可清除。</p>
+            <p className="mt-1.5 text-[10.5px] text-faint">
+              回车保存；留空并回车可清除。目前支持 Tavily。
+            </p>
           </Section>
 
           {/* 通知 */}
@@ -641,6 +789,112 @@ export default function SettingsPage() {
           }}
         />
       )}
+
+      {/* MOD-02：批量检测的逐模型结果，光看一个「已检测 N 个」不知道哪些不能用 */}
+      <Modal
+        open={!!probeResult}
+        onClose={() => setProbeResult(null)}
+        title={`「${probeResult?.provider || ""}」能力检测结果`}
+        subtitle={probeResult?.message}
+        width="max-w-lg"
+        footer={
+          <button className="btn-primary" onClick={() => setProbeResult(null)}>
+            知道了
+          </button>
+        }
+      >
+        <div className="max-h-[46vh] space-y-1.5 overflow-y-auto">
+          {(probeResult?.results || []).map((r) => (
+            <div key={r.model} className="rounded-lg border border-line px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[11.5px]">{r.model}</span>
+                {r.ok ? (
+                  <Check size={12} className="text-ok" />
+                ) : (
+                  <AlertTriangle size={12} className="text-danger" />
+                )}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px]">
+                <span
+                  className={`chip ${
+                    r.streaming === false
+                      ? "border-danger/40 text-danger"
+                      : r.streaming
+                        ? "border-ok/40 text-ok"
+                        : "text-faint"
+                  }`}
+                >
+                  {capLabel(r.streaming, "流式")}
+                </span>
+                <span
+                  className={`chip ${
+                    r.tool_calling === false
+                      ? "border-danger/40 text-danger"
+                      : r.tool_calling
+                        ? "border-ok/40 text-ok"
+                        : "text-faint"
+                  }`}
+                >
+                  {capLabel(r.tool_calling, "工具调用")}
+                </span>
+                {!r.ok && r.message && <span className="text-faint">{r.message}</span>}
+              </div>
+            </div>
+          ))}
+          {!(probeResult?.results || []).length && (
+            <div className="rounded-lg border border-dashed border-line px-3 py-5 text-center text-[12px] text-faint">
+              没有可展示的结果
+            </div>
+          )}
+        </div>
+        <p className="mt-2 text-[10.5px] leading-relaxed text-faint">
+          只检测前 12 个模型；未检测的模型不拦截选择，但可能在执行时才失败。可以再次点「检测能力」继续。
+        </p>
+      </Modal>
+
+      {/* MOD-04：删除厂商前列出受影响的 Bot，二选一 */}
+      <Modal
+        open={!!deleteTarget}
+        onClose={() => !deleteBusy && setDeleteTarget(null)}
+        title={`删除「${deleteTarget?.vendor_name || ""}」？`}
+        subtitle={`有 ${deleteAffected.length} 个 Bot 正在使用该厂商`}
+        footer={
+          <>
+            <button className="btn-ghost" disabled={deleteBusy} onClick={() => setDeleteTarget(null)}>
+              取消
+            </button>
+            <button
+              className="btn-ghost"
+              disabled={deleteBusy}
+              onClick={() => {
+                window.location.href = "/bots";
+              }}
+            >
+              去改绑
+            </button>
+            <button className="btn-danger" disabled={deleteBusy} onClick={forceDeleteProvider}>
+              {deleteBusy ? "删除中…" : "置为不可用并删除"}
+            </button>
+          </>
+        }
+      >
+        <div className="max-h-[40vh] space-y-1.5 overflow-y-auto">
+          {deleteAffected.map((b) => (
+            <div
+              key={b.id}
+              className="flex items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-[12px]"
+            >
+              <span className="min-w-0 truncate">{b.name}</span>
+              <span className="ml-auto shrink-0 font-mono text-[10.5px] text-faint">
+                {b.model || "未绑定模型"}
+              </span>
+            </div>
+          ))}
+        </div>
+        <p className="mt-2 text-[11px] leading-relaxed text-muted">
+          删除后这些 Bot 会失去模型，无法发起执行，直到你为它们重新选择模型。历史消息与执行记录保留。
+        </p>
+      </Modal>
     </AppShell>
   );
 }
@@ -742,7 +996,11 @@ function PriceDialog({
               </span>
               <span
                 className={`block truncate text-[10px] ${
-                  modelCapability(r).bad ? "text-warn" : "text-faint"
+                  modelCapability(r).bad
+                    ? "text-warn"
+                    : modelCapability(r).unknown
+                      ? "text-faint"
+                      : "text-ok"
                 }`}
                 title="在厂商条目上点「检测能力」可更新"
               >
@@ -998,6 +1256,13 @@ function VendorDialog({
           保存时会调用 <code className="text-muted">GET {baseUrl || "base_url"}/models</code>{" "}
           自动获取可用模型，并对首个模型真实探测流式输出与工具调用能力；拿不到模型列表就用预置列表，不影响保存。
         </p>
+
+        {loading && (
+          <p className="flex items-center gap-1.5 rounded-lg border border-line bg-panel2/50 px-2.5 py-2 text-[11px] text-muted">
+            <Loader2 size={12} className="animate-spin" />
+            正在获取模型列表并探测首个模型，通常需要 5–20 秒，请稍候…
+          </p>
+        )}
       </div>
     </Modal>
   );

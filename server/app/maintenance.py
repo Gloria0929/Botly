@@ -14,9 +14,20 @@ from sqlalchemy.orm import Session
 from .config import EVENT_RETENTION_DAYS, LOG_RETENTION_DAYS
 from .accounts import purge_due_accounts
 from .events import emit, notify
-from .models import Approval, Chat, EmailToken, Event, Message, Question, Run, UsageLog, now
+from .models import (
+    Approval,
+    Chat,
+    EmailToken,
+    Event,
+    Message,
+    Question,
+    Run,
+    Thread,
+    UsageLog,
+    now,
+)
 from .logging_setup import get_logger
-from .orchestrator import emit_run_status, settle_run_tasks
+from .orchestrator import add_message, emit_run_status, settle_run_tasks
 
 log = get_logger("maintenance")
 
@@ -55,6 +66,43 @@ def _fail_waiting_run(db: Session, run: Run, reason: str) -> None:
     emit_run_status(db, run)
 
 
+def _resume_after_expiry(db: Session, run: Run, ap: Approval) -> bool:
+    """把「停在过期审批上」的执行交回总指挥，而不是直接判失败（APV-03）。
+
+    恢复后图会重放工具节点，`_approval_gate` 看到审批已是 expired，就把
+    「审批已过期，工具未执行」作为工具结果交给模型，由总指挥决定改派、跳过
+    还是结束——与「用户拒绝」的语义保持一致。
+    """
+    payload = run.resume_payload or {}
+    if (
+        run.status != "waiting"
+        or payload.get("kind") != "approval"
+        or payload.get("approval_id") != ap.id
+    ):
+        return False
+    thread = db.scalar(
+        select(Thread).where(Thread.chat_id == run.chat_id, Thread.type == "main")
+    )
+    if thread:
+        add_message(
+            db,
+            thread=thread,
+            run_id=run.id,
+            sender_type="system",
+            type_="system",
+            content=(
+                f"审批已过期（{ap.tool} 未执行，用户未在规定时间内处理）。"
+                "已交回总指挥决定后续。"
+            ),
+            meta={"kind": "approval_expired", "approval_id": ap.id},
+        )
+    run.status = "queued"
+    run.lease_until = None
+    db.flush()
+    emit_run_status(db, run)
+    return True
+
+
 def expire_approval(db: Session, ap: Approval) -> bool:
     """单个审批过期。已经处理过的返回 False。"""
     if ap.status != "pending" or not ap.expires_at or ap.expires_at >= now():
@@ -71,15 +119,18 @@ def expire_approval(db: Session, ap: Approval) -> bool:
         {"approval_id": ap.id, "run_id": ap.run_id, "status": "expired"},
     )
     run = db.get(Run, ap.run_id)
-    reason = "审批过期，用户未在规定时间内处理"
     if run:
-        _fail_waiting_run(db, run, reason)
+        resumed = _resume_after_expiry(db, run, ap)
         notify(
             db,
             ap.user_id,
             "approval_expired",
             "审批已过期",
-            f"{ap.tool} 的审批请求已过期，执行已终止",
+            (
+                f"{ap.tool} 的审批请求已过期，已交回总指挥决定后续"
+                if resumed
+                else f"{ap.tool} 的审批请求已过期"
+            ),
             chat_id=run.chat_id,
             target_type="approval",
             target_id=ap.id,

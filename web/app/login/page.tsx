@@ -24,7 +24,9 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await api.login(email, password);
-      router.push("/chat");
+      // ACC-06：一个模型接入都没有时先去设置页引导，别让用户到群聊才撞到 409
+      const providers = await api.providers().catch(() => null);
+      router.push(providers && providers.length === 0 ? "/settings?welcome=1" : "/chat");
     } catch (e: any) {
       setErr(e.message || "登录失败");
     } finally {

@@ -30,7 +30,8 @@ export default function RegisterPage() {
         invite_code: form.invite.trim(),
         name: form.name || undefined,
       });
-      router.push("/chat");
+      // ACC-06：新账号还没有模型接入，先带去设置页完成配置，再回群聊
+      router.push("/settings?welcome=1");
     } catch (e: any) {
       setErr(e.message || "注册失败");
     } finally {
@@ -61,7 +62,8 @@ export default function RegisterPage() {
             邀请制内测
           </h1>
           <p className="mt-4 max-w-sm text-[12.5px] leading-relaxed text-white/55">
-            注册后会自动为你创建总指挥、研究员、写手三个 Bot，以及一个可直接使用的群聊。
+            注册后会自动为你创建总指挥、研究员、写手三个 Bot，以及一个群聊；
+            填好模型接入的 API Key 就能开始。
           </p>
         </div>
         <p className="relative max-w-sm text-[11.5px] leading-relaxed text-white/35">

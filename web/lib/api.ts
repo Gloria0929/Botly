@@ -164,7 +164,16 @@ export const api = {
   patchBot: (id: string, body: any) =>
     req<import("./types").Bot>(`/bots/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteBot: (id: string) => req(`/bots/${id}`, { method: "DELETE" }),
-  tools: () => req<{ name: string; description: string; level: string }[]>("/bots/tools"),
+  tools: () =>
+    req<
+      {
+        name: string;
+        description: string;
+        level: string;
+        available?: boolean;
+        reason?: string | null;
+      }[]
+    >("/bots/tools"),
   templates: () => req<import("./types").BotTemplate[]>("/bots/templates"),
 
   // 群聊

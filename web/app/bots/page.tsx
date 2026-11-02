@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Loader2, Plus, Save, Trash2, Wrench } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Avatar from "@/components/ui/Avatar";
@@ -28,7 +29,9 @@ export default function BotsPage() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [botsLoading, setBotsLoading] = useState(true);
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [tools, setTools] = useState<{ name: string; description: string; level: string }[]>([]);
+  const [tools, setTools] = useState<
+    { name: string; description: string; level: string; available?: boolean; reason?: string | null }[]
+  >([]);
   const [templates, setTemplates] = useState<BotTemplate[]>([]);
   const [editing, setEditing] = useState<Partial<Bot> | null>(null);
   const [saving, setSaving] = useState(false);
@@ -42,6 +45,10 @@ export default function BotsPage() {
   };
   useEffect(load, []);
 
+  // TOL-01：没配搜索 Key 时不要把 web_search 带进新 Bot / 模板默认值
+  const onlyAvailable = (names: string[]) =>
+    names.filter((n) => tools.find((t) => t.name === n)?.available !== false);
+
   const applyTemplate = (t: BotTemplate) => {
     if (!editing) return;
     const used = new Set(bots.filter((b) => !b.deleted).map((b) => b.name));
@@ -54,9 +61,12 @@ export default function BotsPage() {
       avatar: t.avatar,
       role: t.role,
       system_prompt: t.system_prompt,
-      tools: t.tools,
+      tools: onlyAvailable(t.tools),
     });
   };
+
+  const newBot = () =>
+    setEditing({ ...EMPTY, tools: onlyAvailable(EMPTY.tools || []) });
 
   const save = async () => {
     if (!editing?.name?.trim()) return toast("请填写名字", "error");
@@ -150,7 +160,7 @@ export default function BotsPage() {
                 每个 Bot = 角色提示词 + 模型 + 工具集。编辑只影响之后开始的执行。
               </p>
             </div>
-            <button className="btn-primary ml-auto" onClick={() => setEditing({ ...EMPTY })}>
+            <button className="btn-primary ml-auto" onClick={newBot}>
               <Plus size={14} /> 新建 Bot
             </button>
           </div>
@@ -347,43 +357,61 @@ export default function BotsPage() {
             <div>
               <label className="label">可用工具</label>
               <div className="space-y-1 rounded-lg border border-line p-2">
-                {tools.map((t) => (
-                  <label
-                    key={t.name}
-                    className="flex cursor-pointer items-center gap-2 rounded px-1 py-1.5 hover:bg-panel2"
-                  >
-                    <input
-                      type="checkbox"
-                      className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[var(--accent)]"
-                      checked={(editing.tools || []).includes(t.name)}
-                      onChange={(e) =>
-                        setEditing({
-                          ...editing,
-                          tools: e.target.checked
-                            ? [...(editing.tools || []), t.name]
-                            : (editing.tools || []).filter((x) => x !== t.name),
-                        })
-                      }
-                    />
-                    <span className="min-w-0">
-                      <span className="font-mono text-[11.5px]">{t.name}</span>
-                      <span
-                        className={`ml-1.5 text-[10px] ${
-                          t.level === "L3"
-                            ? "text-warn"
-                            : t.level === "L2"
-                              ? "text-accent"
-                              : "text-faint"
-                        }`}
-                      >
-                        {t.level}
+                {tools.map((t) => {
+                  const off = t.available === false;
+                  return (
+                    <label
+                      key={t.name}
+                      className={`flex items-start gap-2 rounded px-1 py-1.5 ${
+                        off ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-panel2"
+                      }`}
+                      title={off ? t.reason || "" : t.description}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--accent)] disabled:cursor-not-allowed"
+                        disabled={off}
+                        checked={(editing.tools || []).includes(t.name)}
+                        onChange={(e) =>
+                          setEditing({
+                            ...editing,
+                            tools: e.target.checked
+                              ? [...(editing.tools || []), t.name]
+                              : (editing.tools || []).filter((x) => x !== t.name),
+                          })
+                        }
+                      />
+                      <span className="min-w-0">
+                        <span className="font-mono text-[11.5px]">{t.name}</span>
+                        <span
+                          className={`ml-1.5 text-[10px] ${
+                            t.level === "L3"
+                              ? "text-warn"
+                              : t.level === "L2"
+                                ? "text-accent"
+                                : "text-faint"
+                          }`}
+                        >
+                          {t.level}
+                        </span>
+                        {off && (
+                          <span className="chip ml-1.5 border-warn/40 text-warn">未配置，暂不可用</span>
+                        )}
+                        <span className="block text-[10.5px] leading-relaxed text-faint">
+                          {t.description}
+                        </span>
+                        {off && (
+                          <span className="mt-0.5 block text-[10.5px] text-warn">
+                            {t.reason}{" "}
+                            <Link href="/settings" className="underline hover:text-ink">
+                              去设置页配置
+                            </Link>
+                          </span>
+                        )}
                       </span>
-                      <span className="block text-[10.5px] leading-relaxed text-faint">
-                        {t.description}
-                      </span>
-                    </span>
-                  </label>
-                ))}
+                    </label>
+                  );
+                })}
               </div>
             </div>
           </div>
