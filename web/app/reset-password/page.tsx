@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Loader2 } from "lucide-react";
 import AuthShell from "@/components/AuthShell";
-import { api } from "@/lib/api";
+import { api, errText } from "@/lib/api";
 
 /** ACC-08：用邮件里的令牌设置新密码。 */
 export default function ResetPasswordPage() {
@@ -39,7 +39,7 @@ export default function ResetPasswordPage() {
       await api.resetPassword(token, form.next);
       router.push("/login?reset=1");
     } catch (e: any) {
-      setErr(e.message || "重置失败");
+      setErr(errText(e, "重置失败"));
     } finally {
       setLoading(false);
     }

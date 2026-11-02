@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Gauge, Loader2, ShieldCheck, Workflow, X } from "lucide-react";
 import Modal from "@/components/ui/Modal";
-import { api } from "@/lib/api";
+import { api, toastError, errText } from "@/lib/api";
 import type { Chat } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
@@ -75,8 +75,8 @@ export default function ChatSettings({
       toast(okMsg, "ok");
       onSaved();
     } catch (e: any) {
-      setError(e.message || "保存失败，请稍后重试");
-      toast(e.message, "error");
+      setError(errText(e, "保存失败，请稍后重试"));
+      toastError(e);
       // 失败时回滚为服务端状态
       setMode(chat.run_mode);
       setRequireWrite(chat.require_approval_for_write);

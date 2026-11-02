@@ -12,11 +12,11 @@ import {
   X,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/ui/PageHeader";
 import DailyChart from "@/components/ui/DailyChart";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import type { StatsOverview } from "@/lib/types";
 import { timeAgo } from "@/lib/fmt";
-import { toast } from "@/lib/ui";
 
 const RANGES = [
   { days: 7, label: "近 7 天" },
@@ -44,7 +44,7 @@ export default function StatusPage() {
     api
       .statsOverview(d)
       .then(setData)
-      .catch((e: any) => toast(e.message, "error"))
+      .catch((e) => toastError(e))
       .finally(() => setLoading(false));
   };
   useEffect(() => {
@@ -92,33 +92,32 @@ export default function StatusPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-5xl px-6 py-8">
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-tight">运行状况</h1>
-              <p className="mt-1 text-[12.5px] text-muted">
-                执行完成率、失败原因分布与系统告警；统计只包含你自己的执行。
-              </p>
-            </div>
-            <div className="ml-auto flex items-center gap-1">
-              <div className="flex rounded-lg border border-line p-0.5">
-                {RANGES.map((r) => (
-                  <button
-                    key={r.days}
-                    onClick={() => setDays(r.days)}
-                    className={`rounded-md px-2.5 py-1 text-[11.5px] transition-colors ${
-                      days === r.days ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
-                    }`}
-                  >
-                    {r.label}
-                  </button>
-                ))}
-              </div>
-              <button onClick={() => load()} title="刷新" className="p-1.5 text-faint hover:text-ink">
-                {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              </button>
-            </div>
-          </div>
+        <div className="page">
+          <PageHeader
+            eyebrow="OPS / HEALTH"
+            title="运行状况"
+            description="执行完成率、失败原因分布与系统告警；统计只包含你自己的执行。"
+            actions={
+              <>
+                <div className="segmented">
+                  {RANGES.map((r) => (
+                    <button
+                      key={r.days}
+                      onClick={() => setDays(r.days)}
+                      className={`segmented-item ${
+                        days === r.days ? "segmented-item-active" : ""
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+                <button onClick={() => load()} title="刷新" className="icon-btn">
+                  {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                </button>
+              </>
+            }
+          />
 
           {alerts.length > 0 && (
             <div className="mt-4">
@@ -136,7 +135,7 @@ export default function StatusPage() {
                 {alerts.map((a) => (
                   <div
                     key={a.id}
-                    className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 ${
+                    className={`flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 ${
                       a.level === "critical"
                         ? "border-danger/35 bg-danger/[0.07]"
                         : "border-warn/35 bg-warn/[0.07]"
@@ -180,10 +179,12 @@ export default function StatusPage() {
           )}
 
           {empty ? (
-            <div className="mt-10 rounded-xl border border-dashed border-line px-6 py-14 text-center">
-              <Activity size={22} className="mx-auto text-faint" />
-              <div className="mt-2.5 text-[13px] font-medium">这段时间还没有执行</div>
-              <p className="mt-1 text-[12px] text-muted">
+            <div className="empty-state mt-10">
+              <div className="empty-icon">
+                <Activity size={20} />
+              </div>
+              <div className="mt-3 text-[13px] font-medium">这段时间还没有执行</div>
+              <p className="mx-auto mt-1 max-w-xs text-[12px] leading-relaxed text-muted">
                 发起一次任务后，这里会显示完成率、失败原因与队列状况。
               </p>
             </div>
@@ -219,7 +220,7 @@ export default function StatusPage() {
               {/* 每日执行趋势 */}
               <section className="mt-6">
                 <div className="mb-2 flex items-end justify-between">
-                  <h2 className="text-[13.5px] font-medium">每日执行</h2>
+                  <h2 className="section-title">每日执行</h2>
                   <span className="text-[10.5px] text-faint">
                     {data?.daily.length || 0} 天 · 有执行 {activeDays} 天
                   </span>
@@ -250,7 +251,7 @@ export default function StatusPage() {
               <div className="mt-6 grid gap-4 lg:grid-cols-2">
                 {/* 失败原因 */}
                 <section>
-                  <h2 className="mb-2 text-[13.5px] font-medium">失败原因</h2>
+                  <h2 className="section-title mb-2">失败原因</h2>
                   <div className="card p-4">
                     {(data?.failures || []).map((f) => (
                       <div key={f.reason} className="mt-2.5 first:mt-0">
@@ -282,7 +283,7 @@ export default function StatusPage() {
 
                 {/* 最近失败 */}
                 <section>
-                  <h2 className="mb-2 text-[13.5px] font-medium">最近失败</h2>
+                  <h2 className="section-title mb-2">最近失败</h2>
                   <div className="card overflow-hidden">
                     {(data?.recent_failures || []).map((r) => (
                       <div
@@ -332,13 +333,15 @@ function Stat({
   hint?: string;
 }) {
   return (
-    <div className="card px-3.5 py-3">
-      <div className="flex items-center gap-1.5 text-[11px] text-faint">
-        {icon}
+    <div className="card card-hover px-4 py-3.5">
+      <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.16em] text-faint">
+        <span className="text-accent">{icon}</span>
         {label}
       </div>
-      <div className="mt-1 text-[19px] font-semibold tabular-nums tracking-tight">{value}</div>
-      {hint && <div className="mt-0.5 text-[10.5px] text-faint">{hint}</div>}
+      <div className="mt-2.5 text-[24px] font-bold leading-none tabular-nums tracking-[-0.03em]">
+        {value}
+      </div>
+      {hint && <div className="mt-1.5 text-[10.5px] leading-relaxed text-faint">{hint}</div>}
     </div>
   );
 }

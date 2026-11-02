@@ -34,6 +34,9 @@ def _out(m: Memory) -> dict:
         "bot_id": m.bot_id,
         "title": m.title,
         "content": m.content,
+        # user = 用户手动维护；bot = Bot 执行中自主保存（MEM-03 修订）
+        "source": getattr(m, "source", None) or "user",
+        "run_id": getattr(m, "run_id", None),
         "updated_at": m.updated_at.isoformat() if m.updated_at else None,
     }
 

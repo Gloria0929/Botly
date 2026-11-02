@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Download, Github, Link2, Loader2, Plus, Save, Sparkles, Trash2, Upload } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Modal from "@/components/ui/Modal";
+import PageHeader from "@/components/ui/PageHeader";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, errText, toastError } from "@/lib/api";
 import type { Skill } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
@@ -43,8 +44,8 @@ export default function SkillsPage() {
   const confirm = useConfirm();
 
   const load = () => {
-    api.skills().then(setSkills).catch(() => {}).finally(() => setLoading(false));
-    api.tools().then(setTools).catch(() => {});
+    api.skills().then(setSkills).catch((e) => toastError(e, "技能列表加载失败")).finally(() => setLoading(false));
+    api.tools().then(setTools).catch((e) => toastError(e, "工具清单加载失败"));
   };
   useEffect(load, []);
 
@@ -86,8 +87,8 @@ export default function SkillsPage() {
       setSaveError(null);
       load();
     } catch (e: any) {
-      setSaveError(e.message || "保存失败，请稍后重试");
-      toast(e.message, "error");
+      setSaveError(errText(e, "保存失败，请稍后重试"));
+      toastError(e);
     } finally {
       setSaving(false);
     }
@@ -109,8 +110,8 @@ export default function SkillsPage() {
     try {
       finishImport(await api.importSkillFromGithub(githubRepo.trim()));
     } catch (e: any) {
-      setImportError(e.message || "导入失败，请稍后重试");
-      toast(e.message, "error");
+      setImportError(errText(e, "导入失败，请稍后重试"));
+      toastError(e, "导入失败，请稍后重试");
     } finally {
       setImportBusy(false);
     }
@@ -119,10 +120,12 @@ export default function SkillsPage() {
   const importFromUrl = async () => {
     if (!importUrl.trim()) return toast("请填写技能包地址", "error");
     setImportBusy(true);
+    setImportError(null);
     try {
       finishImport(await api.importSkillUrl(importUrl.trim()));
     } catch (e: any) {
-      toast(e.message, "error");
+      setImportError(errText(e, "导入失败，请稍后重试"));
+      toastError(e, "导入失败，请稍后重试");
     } finally {
       setImportBusy(false);
     }
@@ -131,10 +134,12 @@ export default function SkillsPage() {
   const importFromClawhub = async () => {
     if (!clawhubSlug.trim()) return toast("请填写技能名称（slug）", "error");
     setImportBusy(true);
+    setImportError(null);
     try {
       finishImport(await api.importSkillFromClawhub(clawhubSlug.trim()));
     } catch (e: any) {
-      toast(e.message, "error");
+      setImportError(errText(e, "导入失败，请稍后重试"));
+      toastError(e, "导入失败，请稍后重试");
     } finally {
       setImportBusy(false);
     }
@@ -143,10 +148,12 @@ export default function SkillsPage() {
   const importFromFile = async () => {
     if (!importFile) return toast("请选择技能包文件", "error");
     setImportBusy(true);
+    setImportError(null);
     try {
       finishImport(await api.importSkillFile(importFile));
     } catch (e: any) {
-      toast(e.message, "error");
+      setImportError(errText(e, "导入失败，请稍后重试"));
+      toastError(e, "导入失败，请稍后重试");
     } finally {
       setImportBusy(false);
     }
@@ -165,7 +172,7 @@ export default function SkillsPage() {
       toast("已删除", "ok");
       load();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -194,29 +201,34 @@ export default function SkillsPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-4xl px-6 py-8">
-          <div className="flex items-end gap-3">
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-tight">技能</h1>
-              <p className="mt-1 text-[12.5px] text-muted">
-                技能 = 一段可复用的方法提示词 + 一组工具。绑定到 Bot 后自动注入提示词并合并工具。
-              </p>
-            </div>
-            <div className="ml-auto flex items-center gap-2">
-              <button className="btn-ghost" onClick={() => setImportOpen(true)}>
-                <Download size={14} /> 导入技能
-              </button>
-              <button className="btn-primary" onClick={() => setEditing({ ...EMPTY })}>
-                <Plus size={14} /> 新建技能
-              </button>
-            </div>
-          </div>
+        <div className="page">
+          <PageHeader
+            eyebrow="AGENT / SKILLS"
+            title="技能"
+            description="技能 = 一段可复用的方法提示词 + 一组工具。绑定到 Bot 后自动注入提示词并合并工具。"
+            actions={
+              <>
+                <button
+                  className="btn-ghost"
+                  onClick={() => {
+                    setImportError(null);
+                    setImportOpen(true);
+                  }}
+                >
+                  <Download size={14} /> 导入技能
+                </button>
+                <button className="btn-primary" onClick={() => setEditing({ ...EMPTY })}>
+                  <Plus size={14} /> 新建技能
+                </button>
+              </>
+            }
+          />
 
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             {skills.map((s) => (
-              <div key={s.id} className="card p-4">
+              <div key={s.id} className="card card-hover p-4">
                 <div className="flex items-start gap-3">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent/12 text-accent">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent/12 text-accent">
                     <Sparkles size={16} />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -267,9 +279,17 @@ export default function SkillsPage() {
             </div>
           )}
           {!loading && !skills.length && (
-            <div className="mt-10 rounded-xl border border-dashed border-line px-4 py-10 text-center text-[12.5px] leading-relaxed text-faint">
-              还没有技能。把常用的工作方法（例如「调研先列来源再下结论」）保存成技能，
-              绑定到 Bot 就能复用。
+            <div className="empty-state mt-10">
+              <div className="empty-icon">
+                <Sparkles size={19} />
+              </div>
+              <div className="mt-3 text-[13px] font-medium">还没有技能</div>
+              <p className="mx-auto mt-1 max-w-sm text-[12px] leading-relaxed text-muted">
+                把常用的工作方法（例如「调研先列来源再下结论」）保存成技能，绑定到 Bot 就能复用。
+              </p>
+              <button className="btn-primary mt-4" onClick={() => setEditing({ ...EMPTY })}>
+                <Plus size={14} /> 新建技能
+              </button>
             </div>
           )}
         </div>

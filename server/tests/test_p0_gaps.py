@@ -36,22 +36,48 @@ def _messages(client, chat_id: str) -> list[dict]:
     return client.get(f"/api/chats/{chat_id}/messages?limit=200").json()["messages"]
 
 
-def test_search_tool_requires_key(client, invite):
-    """TOL-01：没配搜索 Key 时 web_search 不可选，配上之后恢复可选。"""
+def test_search_tool_available_without_key(client, invite):
+    """TOL-01：没配搜索 Key 时 web_search 依然可选，执行时自动回退 DuckDuckGo。"""
     register(client, invite, "tol01@test.dev")
     tools = _tools(client)
-    assert tools["web_search"]["available"] is False
-    assert "API Key" in (tools["web_search"]["reason"] or "")
+    assert tools["web_search"]["available"] is True
+    assert "DuckDuckGo" in (tools["web_search"]["reason"] or "")
     # 其它工具不受影响
     assert tools["web_read"]["available"] is True
 
     r = client.patch("/api/settings", json={"search_api_key": "tvly-test-key"})
     assert r.status_code == 200, r.text
-    assert _tools(client)["web_search"]["available"] is True
+    tools = _tools(client)
+    assert tools["web_search"]["available"] is True
+    assert tools["web_search"]["reason"] is None
 
-    # 清空 Key 后再次不可用
+    # 清空 Key 后回到 DuckDuckGo，仍然可选
     client.patch("/api/settings", json={"search_api_key": ""})
-    assert _tools(client)["web_search"]["available"] is False
+    tools = _tools(client)
+    assert tools["web_search"]["available"] is True
+    assert "DuckDuckGo" in (tools["web_search"]["reason"] or "")
+
+
+def test_ddg_result_parser_returns_real_urls():
+    """回退结果不能把 DuckDuckGo 的跳转链接交给模型，要还原成真实网址。"""
+    from app.tools.registry import _ddg_results
+
+    page = """
+    <a rel="nofollow" class="result__a"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=1">Example <b>A</b></a>
+    <a class="result__snippet"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=1">第一段 <b>摘要</b></a>
+    <a rel="nofollow" class="result__a"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=2">重复结果</a>
+    <a class="nav" href="//duckduckgo.com/y.js?ad=1">广告位</a>
+    <a rel="nofollow" class="result-link"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fb">Lite 结果</a>
+    <td class="result-snippet">Lite 摘要</td>
+    """
+    assert _ddg_results(page, 5) == [
+        ("https://example.com/a", "Example A", "第一段 摘要"),
+        ("https://example.org/b", "Lite 结果", "Lite 摘要"),
+    ]
 
 
 def _waiting_approval(client, invite, label: str, *, expired: bool = True, on_payload: bool = True):

@@ -55,6 +55,11 @@ else
   fi
 fi
 
+# 每个子进程放进独立进程组（set -m），退出时整组杀掉。
+# 只 kill 直接子进程是不够的：npm 会再拉 sh → node → next-server，
+# 父进程一死，前面那个 next dev 会变成孤儿继续占着 3200（表现为「项目停了网页还能开」）。
+set -m
+
 echo "==> 启动 API :8100"
 # 用 exec 让子 shell 被 python 替换，$! 才是真正的进程号；
 # 否则 trap 杀掉的是子 shell，uvicorn 会留下来继续占端口。
@@ -67,5 +72,31 @@ echo "==> 启动 Web :3200"
 ( cd web && CODEBUDDY_SAFE_DELETE_ENABLED=0 exec npm run dev ) &
 WEB=$!
 
-trap 'kill $API $WORKER $WEB 2>/dev/null || true' INT TERM
+set +m
+
+CLEANED=0
+cleanup() {
+  [ "$CLEANED" = 1 ] && return
+  CLEANED=1
+  echo
+  echo "==> 正在停止 API / Worker / Web"
+  local pid
+  for pid in "${API:-}" "${WORKER:-}" "${WEB:-}"; do
+    [ -n "$pid" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  done
+  sleep 0.5
+  # 还赖着不走的（例如 npm 把信号吞了）直接整组 SIGKILL
+  for pid in "${API:-}" "${WORKER:-}" "${WEB:-}"; do
+    [ -n "$pid" ] || continue
+    kill -KILL -- "-$pid" 2>/dev/null || true
+  done
+}
+
+# Ctrl-C / kill / 关终端（SIGHUP）都要收干净，否则又会留下孤儿
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 wait

@@ -37,10 +37,10 @@ export default function Modal({
       <div
         role="dialog"
         aria-modal="true"
-        className={`relative flex max-h-[88vh] w-full ${width} animate-rise flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-card`}
+        className={`relative flex max-h-[88vh] w-full ${width} animate-rise flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-pop`}
       >
         {(title || subtitle) && (
-          <div className="flex items-start gap-2 border-b border-line px-4 py-3">
+          <div className="flex items-start gap-2 border-b border-line/80 px-5 py-3.5">
             <div className="min-w-0 flex-1">
               {title && <div className="text-[13px] font-medium">{title}</div>}
               {subtitle && (
@@ -56,9 +56,9 @@ export default function Modal({
             </button>
           </div>
         )}
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
         {footer && (
-          <div className="flex justify-end gap-2 border-t border-line px-4 py-3">{footer}</div>
+          <div className="flex justify-end gap-2 border-t border-line/80 px-5 py-3.5">{footer}</div>
         )}
       </div>
     </div>

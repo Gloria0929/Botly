@@ -240,7 +240,7 @@ export function TaskCard({
   return (
     <button
       onClick={onOpen}
-      className="group flex w-full items-start gap-3 rounded-xl border border-line bg-panel2/40 px-3.5 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-panel2"
+      className="group flex w-full items-start gap-3 rounded-lg border border-line bg-panel2/40 px-3.5 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-panel2"
     >
       <Avatar value={avatar || botName?.slice(0, 1)} size={28} className="mt-0.5" />
       <div className="min-w-0 flex-1">
@@ -271,7 +271,7 @@ export function TaskDoneCard({
 }) {
   const m = msg.meta || {};
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-ok/25 bg-ok/[0.06] px-3.5 py-2.5">
+    <div className="flex items-start gap-3 rounded-lg border border-ok/25 bg-ok/[0.06] px-3.5 py-2.5">
       <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-ok" />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
@@ -456,7 +456,7 @@ export function ApprovalCard({
   }, [pending]);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-warn/35 bg-warn/[0.07]">
+    <div className="overflow-hidden rounded-lg border border-warn/35 bg-warn/[0.07]">
       <div className="flex items-center gap-2 border-b border-warn/25 px-3.5 py-2.5">
         <ShieldAlert size={15} className="text-warn" />
         <span className="text-[12.5px] font-medium text-warn">{pending ? "需要审批" : status === "invalidated" ? "审批已失效" : "审批记录"}</span>
@@ -577,7 +577,7 @@ export function QuestionCard({
   const [text, setText] = useState("");
   const pending = m.status === "pending" && !["completed", "failed", "stopped"].includes(m.run_status);
   return (
-    <div className="overflow-hidden rounded-xl border border-accent/35 bg-accent/[0.06]">
+    <div className="overflow-hidden rounded-lg border border-accent/35 bg-accent/[0.06]">
       <div className="flex items-center gap-2 border-b border-accent/20 px-3.5 py-2.5">
         <HelpCircle size={15} className="text-accent" />
         <span className="text-[12.5px] font-medium text-accent">提问</span>
@@ -706,7 +706,7 @@ export function HandoffLine({ text }: { text: string }) {
 
 export function LimitNotice({ text }: { text: string }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/[0.07] px-3.5 py-2.5">
+    <div className="flex items-start gap-2.5 rounded-lg border border-danger/30 bg-danger/[0.07] px-3.5 py-2.5">
       <AlertTriangle size={15} className="mt-0.5 shrink-0 text-danger" />
       <div className="text-[12.5px] leading-relaxed text-danger/90">{text}</div>
     </div>

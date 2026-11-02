@@ -110,7 +110,7 @@ def test_full_flow_plan_delegate_summarize(client, invite, mention_supervisor):
     assert not [m for m in msgs if (m["meta"] or {}).get("subtask_live")]
     assert len({m["content"] for m in replies}) == 2, "同一条回复不应出现两次"
     assert all(m["content"].startswith("@") for m in delegations)
-    assert {m["meta"]["mention_name"] for m in delegations} == {"研究员", "写手"}
+    assert {m["meta"]["mention_name"] for m in delegations} == {"研究员", "架构师"}
     assert all(m["sender_type"] == "bot" and m["content"] for m in replies)
 
     files = client.get(f"/api/chats/{chat_id}/files").json()
@@ -268,7 +268,7 @@ def test_soft_delete_releases_bot_name(client, invite):
     register(client, invite, "namereuse@test.dev")
     _, bots = setup_workspace(client)
     researcher = next(b for b in bots if b["name"] == "研究员")
-    writer = next(b for b in bots if b["name"] == "写手")
+    writer = next(b for b in bots if b["name"] == "架构师")
 
     assert client.delete(f"/api/bots/{researcher['id']}").status_code == 200
 
@@ -664,14 +664,14 @@ def test_approved_plan_returns_edited_assignments_to_supervisor(client, invite, 
     ).json()["run"]["id"]
     run_worker(run_id)
     wait_status(client, run_id, {"waiting"})
-    edited = [{"title": "只整理需求，不要联网检索", "bot": "写手", "expected": "一页需求文档"}]
+    edited = [{"title": "只整理需求，不要联网检索", "bot": "架构师", "expected": "一页需求文档"}]
     assert client.post(f"/api/runs/{run_id}/plan/approve", json={"steps": edited}).status_code == 200
     supervisor_turns = 0
 
     async def fake_stream_chat(**kw):
         nonlocal supervisor_turns
         if kw["ctx"]["role"] == "worker":
-            assert kw["ctx"]["bot_name"] == "写手"
+            assert kw["ctx"]["bot_name"] == "架构师"
             assert kw["ctx"]["task"] == edited[0]["title"]
             yield {"type": "done", "content": "需求整理完成", "tool_calls": []}
             return
@@ -680,7 +680,7 @@ def test_approved_plan_returns_edited_assignments_to_supervisor(client, invite, 
             assert any(m["role"] == "tool" and json.dumps(edited, ensure_ascii=False) in m["content"] for m in kw["messages"])
             yield {"type": "done", "content": "", "tool_calls": [{
                 "id": "edited-plan-delegate", "type": "function", "function": {
-                    "name": "delegate", "arguments": json.dumps({"bot": "写手", "instruction": edited[0]["title"]}, ensure_ascii=False),
+                    "name": "delegate", "arguments": json.dumps({"bot": "架构师", "instruction": edited[0]["title"]}, ensure_ascii=False),
                 },
             }]}
             return

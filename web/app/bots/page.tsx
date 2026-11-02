@@ -8,8 +8,9 @@ import Avatar from "@/components/ui/Avatar";
 import AvatarPicker from "@/components/ui/AvatarPicker";
 import Select from "@/components/ui/Select";
 import Modal from "@/components/ui/Modal";
+import PageHeader from "@/components/ui/PageHeader";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, errText, toastError } from "@/lib/api";
 import { modelCapability } from "@/lib/fmt";
 import type { Bot, BotTemplate, Provider, Skill } from "@/lib/types";
 import { toast } from "@/lib/ui";
@@ -48,9 +49,9 @@ export default function BotsPage() {
   const confirm = useConfirm();
 
   const load = () => {
-    api.bots().then(setBots).catch(() => {}).finally(() => setBotsLoading(false));
+    api.bots().then(setBots).catch((e) => toastError(e, "Bot 列表加载失败")).finally(() => setBotsLoading(false));
     api.providers().then(setProviders).catch(() => {});
-    api.tools().then(setTools).catch(() => {});
+    api.tools().then(setTools).catch((e) => toastError(e, "工具清单加载失败"));
     api.templates().then(setTemplates).catch(() => {});
     api.skills().then(setSkills).catch(() => {});
   };
@@ -65,11 +66,12 @@ export default function BotsPage() {
       toast(next ? `已启用「${b.name}」` : `已停用「${b.name}」`, "ok");
     } catch (e: any) {
       setBots((prev) => prev.map((x) => (x.id === b.id ? { ...x, enabled: !next } : x)));
-      toast(e?.message || "操作失败", "error");
+      toastError(e, "操作失败");
     }
   };
 
-  // TOL-01：没配搜索 Key 时不要把 web_search 带进新 Bot / 模板默认值
+  // 未配置搜索 Key 时 web_search 仍可选（执行时回退 DuckDuckGo），
+  // 这里只过滤后端明确标记为不可用的工具。
   const onlyAvailable = (names: string[]) =>
     names.filter((n) => tools.find((t) => t.name === n)?.available !== false);
 
@@ -89,13 +91,34 @@ export default function BotsPage() {
     });
   };
 
-  const newBot = () =>
+  const refreshProviders = () => {
+    // 首屏加载时后端可能刚重启、厂商列表拉空了；打开弹窗前再拉一次，避免
+    // 「明明配了厂商，新建时却选不到」。
+    api.providers().then(setProviders).catch((e) => toastError(e, "厂商列表加载失败"));
+  };
+
+  const newBot = () => {
+    refreshProviders();
     setEditing({ ...EMPTY, tools: onlyAvailable(EMPTY.tools || []) });
+  };
 
   const save = async () => {
-    if (!editing?.name?.trim()) return toast("请填写名字", "error");
-    if (!editing.provider_id) return toast("请选择模型厂商", "error");
-    if (!editing.model?.trim()) return toast("请选择或填写模型", "error");
+    // 校验失败不能只弹底部 toast：弹窗底部按钮和页面底部 toast 经常一起被挡住，
+    // 用户看到的就是「点保存没反应」。这里同时写进弹窗内联错误并滚到可见位置。
+    const fail = (msg: string) => {
+      setSaveError(msg);
+      toast(msg, "error");
+      setTimeout(() => {
+        document.getElementById("bot-save-error")?.scrollIntoView({ block: "nearest" });
+      }, 0);
+    };
+    if (!editing?.name?.trim()) return fail("请填写名字");
+    if (!editing.provider_id) {
+      return fail(
+        providers.length ? "请选择模型厂商" : "还没有可用的模型厂商，请先到设置页添加一个"
+      );
+    }
+    if (!editing.model?.trim()) return fail("请选择模型（手动输入模型名后需按回车确认）");
     setSaving(true);
     setSaveError(null);
     try {
@@ -117,8 +140,8 @@ export default function BotsPage() {
       setSaveError(null);
       load();
     } catch (e: any) {
-      setSaveError(e.message || "保存失败，请稍后重试");
-      toast(e.message, "error");
+      setSaveError(errText(e, "保存失败，请稍后重试"));
+      toastError(e);
     } finally {
       setSaving(false);
     }
@@ -137,7 +160,7 @@ export default function BotsPage() {
       toast("已删除", "ok");
       load();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -180,22 +203,21 @@ export default function BotsPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-4xl px-6 py-8">
-          <div className="flex items-end gap-3">
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-tight">Bot 管理</h1>
-              <p className="mt-1 text-[12.5px] text-muted">
-                每个 Bot = 角色提示词 + 模型 + 工具集。编辑只影响之后开始的执行。
-              </p>
-            </div>
-            <button className="btn-primary ml-auto" onClick={newBot}>
-              <Plus size={14} /> 新建 Bot
-            </button>
-          </div>
+        <div className="page">
+          <PageHeader
+            eyebrow="AGENT / BOTS"
+            title="Bot 管理"
+            description="每个 Bot = 角色提示词 + 模型 + 工具集。编辑只影响之后开始的执行。"
+            actions={
+              <button className="btn-primary" onClick={newBot}>
+                <Plus size={14} /> 新建 Bot
+              </button>
+            }
+          />
 
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             {bots.map((b) => (
-              <div key={b.id} className={`card p-4 ${b.enabled === false ? "opacity-60" : ""}`}>
+              <div key={b.id} className={`card card-hover p-4 ${b.enabled === false ? "opacity-60" : ""}`}>
                 <div className="flex items-start gap-3">
                   <Avatar value={b.avatar} size={40} alt={b.name} />
                   <div className="min-w-0 flex-1">
@@ -210,29 +232,34 @@ export default function BotsPage() {
                       {b.role} · {b.model || "未绑定模型"}
                     </div>
                   </div>
-                  <button
-                    onClick={() => toggleEnabled(b)}
-                    title={b.enabled === false ? "启用" : "停用"}
-                    aria-label={b.enabled === false ? "启用" : "停用"}
-                    className={`relative mt-1 h-5 w-9 shrink-0 rounded-full transition-colors ${
-                      b.enabled === false ? "bg-line" : "bg-ok/70"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
-                        b.enabled === false ? "left-0.5" : "left-[18px]"
+                  <div className="flex shrink-0 items-center gap-3">
+                    <button
+                      onClick={() => toggleEnabled(b)}
+                      title={b.enabled === false ? "启用" : "停用"}
+                      aria-label={b.enabled === false ? "启用" : "停用"}
+                      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                        b.enabled === false ? "bg-line" : "bg-accent"
                       }`}
-                    />
-                  </button>
-                  <button
-                    onClick={() => setEditing(b)}
-                    className="text-[11.5px] text-muted hover:text-ink"
-                  >
-                    编辑
-                  </button>
-                  <button onClick={() => remove(b)} className="text-faint hover:text-danger">
-                    <Trash2 size={14} />
-                  </button>
+                    >
+                      <span
+                        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                          b.enabled === false ? "left-0.5" : "left-[18px]"
+                        }`}
+                      />
+                    </button>
+                    <button
+                      onClick={() => {
+                        refreshProviders();
+                        setEditing(b);
+                      }}
+                      className="text-[11.5px] text-muted hover:text-ink"
+                    >
+                      编辑
+                    </button>
+                    <button onClick={() => remove(b)} className="text-faint hover:text-danger">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </div>
                 <p className="mt-3 line-clamp-2 text-[11.5px] leading-relaxed text-muted">
                   {b.system_prompt || "（无提示词）"}
@@ -286,7 +313,18 @@ export default function BotsPage() {
             </div>
           )}
           {!botsLoading && !bots.length && (
-            <div className="mt-10 text-center text-[12.5px] text-faint">还没有 Bot</div>
+            <div className="empty-state mt-10">
+              <div className="empty-icon">
+                <Sparkles size={19} />
+              </div>
+              <div className="mt-3 text-[13px] font-medium">还没有 Bot</div>
+              <p className="mx-auto mt-1 max-w-xs text-[12px] leading-relaxed text-muted">
+                每个 Bot 负责一类工作。先创建几个角色，再把任务交给总指挥调度。
+              </p>
+              <button className="btn-primary mt-4" onClick={newBot}>
+                <Plus size={14} /> 新建 Bot
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -315,8 +353,20 @@ export default function BotsPage() {
         {editing && (
           <div className="space-y-4">
             {saveError && (
-              <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+              <div
+                id="bot-save-error"
+                className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger"
+              >
                 {saveError}
+              </div>
+            )}
+            {!providers.length && (
+              <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[11.5px] leading-relaxed text-warn">
+                还没有可用的模型厂商，Bot 需要绑定模型才能创建。请先到{" "}
+                <Link href="/settings" className="underline">
+                  设置页
+                </Link>{" "}
+                添加厂商后再回来。
               </div>
             )}
             {!editing.id && templates.length > 0 && (
@@ -370,7 +420,7 @@ export default function BotsPage() {
                   className="field"
                   value={editing.role || ""}
                   onChange={(e) => setEditing({ ...editing, role: e.target.value })}
-                  placeholder="例如：研究员 / 写手 / 总指挥"
+                  placeholder="例如：研究员 / 架构师 / 总指挥"
                 />
               </div>
             </div>
@@ -408,6 +458,11 @@ export default function BotsPage() {
                   disabled={!editing.provider_id}
                   emptyText="该厂商没有可用模型，可直接输入模型名"
                 />
+                {editing.provider_id && !editing.model && (
+                  <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
+                    可直接输入模型名，输入后按回车确认。
+                  </p>
+                )}
                 {currentCap.bad && (
                   <p className="mt-1 text-[10.5px] leading-relaxed text-warn">
                     该模型{currentCap.text}，执行会失败，也不能担任总指挥。
@@ -494,6 +549,14 @@ export default function BotsPage() {
                           {t.reason}{" "}
                           <Link href="/settings" className="underline hover:text-ink">
                             去设置页配置
+                          </Link>
+                        </span>
+                      )}
+                      {!off && t.reason && (
+                        <span className="mt-0.5 block pl-[22px] text-[10.5px] leading-relaxed text-faint">
+                          {t.reason}{" "}
+                          <Link href="/settings" className="underline hover:text-ink">
+                            配置 Key 更稳定
                           </Link>
                         </span>
                       )}

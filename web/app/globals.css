@@ -3,61 +3,73 @@
 @tailwind utilities;
 
 :root {
-    --canvas: #0b0d11;
-    --panel: #111419;
-    --panel-2: #161a21;
-    --line: #232a34;
-    --ink: #e7ebf2;
-    --muted: #8d97a8;
-    --faint: #5d6675;
-    --accent: #7c8cff;
+    --canvas: #0c0c0d;
+    --panel: #141416;
+    --panel-2: #1a1a1d;
+    --panel-3: #222226;
+    --line: #2a2a2e;
+    --line-2: #3a3a40;
+    --ink: #f2f2f4;
+    --muted: #a3a3ac;
+    --faint: #71717a;
+    --accent: #ff5c5c;
     --accent-ink: #ffffff;
+    --info: #2dd4bf;
     --ok: #34d399;
     --warn: #f5a524;
-    --danger: #f2555a;
+    --danger: #ef4444;
 
     /* 同一组颜色的 RGB 分量：供 Tailwind 生成 bg-accent/15 这类透明度类 */
-    --canvas-rgb: 11 13 17;
-    --panel-rgb: 17 20 25;
-    --panel-2-rgb: 22 26 33;
-    --line-rgb: 35 42 52;
-    --ink-rgb: 231 235 242;
-    --muted-rgb: 141 151 168;
-    --faint-rgb: 93 102 117;
-    --accent-rgb: 124 140 255;
+    --canvas-rgb: 12 12 13;
+    --panel-rgb: 20 20 22;
+    --panel-2-rgb: 26 26 29;
+    --panel-3-rgb: 34 34 38;
+    --line-rgb: 42 42 46;
+    --line-2-rgb: 58 58 64;
+    --ink-rgb: 242 242 244;
+    --muted-rgb: 163 163 172;
+    --faint-rgb: 113 113 122;
+    --accent-rgb: 255 92 92;
     --accent-ink-rgb: 255 255 255;
+    --info-rgb: 45 212 191;
     --ok-rgb: 52 211 153;
     --warn-rgb: 245 165 36;
-    --danger-rgb: 242 85 90;
+    --danger-rgb: 239 68 68;
     color-scheme: dark;
 }
 
 html.light {
-    --canvas: #f6f7f9;
+    --canvas: #f4f4f5;
     --panel: #ffffff;
-    --panel-2: #f2f4f7;
-    --line: #e3e7ee;
-    --ink: #101828;
-    --muted: #667085;
-    --faint: #98a2b3;
-    --accent: #4f5bd5;
+    --panel-2: #f7f7f8;
+    --panel-3: #ededf0;
+    --line: #e4e4e8;
+    --line-2: #d4d4d9;
+    --ink: #18181b;
+    --muted: #5f5f69;
+    --faint: #92929c;
+    --accent: #e5484d;
     --accent-ink: #ffffff;
-    --ok: #0f9f6e;
+    --info: #0f766e;
+    --ok: #16a34a;
     --warn: #b45309;
-    --danger: #d92d20;
+    --danger: #dc2626;
 
-    --canvas-rgb: 246 247 249;
+    --canvas-rgb: 244 244 245;
     --panel-rgb: 255 255 255;
-    --panel-2-rgb: 242 244 247;
-    --line-rgb: 227 231 238;
-    --ink-rgb: 16 24 40;
-    --muted-rgb: 102 112 133;
-    --faint-rgb: 152 162 179;
-    --accent-rgb: 79 91 213;
+    --panel-2-rgb: 247 247 248;
+    --panel-3-rgb: 237 237 240;
+    --line-rgb: 228 228 232;
+    --line-2-rgb: 212 212 217;
+    --ink-rgb: 24 24 27;
+    --muted-rgb: 95 95 105;
+    --faint-rgb: 146 146 156;
+    --accent-rgb: 229 72 77;
     --accent-ink-rgb: 255 255 255;
-    --ok-rgb: 15 159 110;
+    --info-rgb: 15 118 110;
+    --ok-rgb: 22 163 74;
     --warn-rgb: 180 83 9;
-    --danger-rgb: 217 45 32;
+    --danger-rgb: 220 38 38;
     color-scheme: light;
 }
 
@@ -73,18 +85,40 @@ body {
 body {
     background: var(--canvas);
     color: var(--ink);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     overscroll-behavior: none;
 }
 
+/* 控制台风格：纯色近黑画布，不使用渐变或大面积光晕 */
+
+::selection {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* 统一键盘焦点环：可访问性 + 一致性 */
+:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+    outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
 }
 
 ::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, var(--muted) 32%, transparent);
+    background: color-mix(in srgb, var(--muted) 26%, transparent);
+    border: 2px solid transparent;
+    background-clip: padding-box;
     border-radius: 99px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--muted) 42%, transparent);
+    border: 2px solid transparent;
+    background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-track {
@@ -93,39 +127,123 @@ body {
 
 @layer components {
     .btn {
-        @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+        @apply inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40;
+    }
+
+    .btn-sm {
+        @apply min-h-7 rounded-md px-2.5 py-1 text-[11px];
     }
 
     .btn-primary {
-        @apply btn bg-accent text-accentink hover:opacity-90;
+        @apply btn bg-accent text-accentink;
+        box-shadow: inset 0 1px 0 rgb(255 255 255 / 12%);
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        filter: brightness(1.09);
+    }
+
+    .btn-primary:active:not(:disabled) {
+        filter: brightness(0.94);
     }
 
     .btn-ghost {
-        @apply btn border border-line bg-transparent text-muted hover:bg-panel2 hover:text-ink;
+        @apply btn border border-line bg-transparent text-muted hover:border-line2 hover:bg-panel2 hover:text-ink;
     }
 
     .btn-soft {
-        @apply btn bg-panel2 text-ink hover:opacity-80;
+        @apply btn bg-panel2 text-ink hover:bg-panel3;
     }
 
     .btn-danger {
-        @apply btn bg-danger text-white hover:opacity-90;
+        @apply btn bg-danger text-white hover:brightness-110;
+    }
+
+    .icon-btn {
+        @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-faint transition-colors hover:bg-panel2 hover:text-ink;
     }
 
     .field {
-        @apply w-full rounded-lg border border-line bg-panel2 px-3 py-2 text-[13px] text-ink outline-none placeholder:text-faint focus:border-accent;
+        @apply w-full rounded-lg border border-line bg-panel2 px-3 py-2 text-[13px] text-ink outline-none transition-colors duration-150 placeholder:text-faint;
+    }
+
+    .field:hover:not(:disabled) {
+        border-color: var(--line-2);
+    }
+
+    .field:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
     }
 
     .label {
-        @apply mb-1.5 block text-[12px] font-medium text-muted;
+        @apply mb-1.5 block text-[11px] font-medium tracking-[0.02em] text-faint;
     }
 
     .chip {
-        @apply inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted;
+        @apply inline-flex items-center gap-1 whitespace-nowrap rounded border border-line px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-muted;
+    }
+
+    .chip-accent {
+        @apply border-accent/35 bg-accent/10 text-accent;
     }
 
     .card {
-        @apply rounded-xl border border-line bg-panel;
+        @apply rounded-[10px] border border-line bg-panel;
+        box-shadow: none;
+    }
+
+    .card-hover {
+        @apply transition-colors duration-150 hover:border-line2;
+    }
+
+    .page {
+        margin-inline: auto;
+        width: 100%;
+        max-width: 1160px;
+        padding: 2rem 1.5rem;
+    }
+
+    @media (min-width: 768px) {
+        .page {
+            padding: 2.25rem 2rem;
+        }
+    }
+
+    .page-title {
+        @apply text-[30px] font-bold leading-tight tracking-[-0.035em] text-ink;
+    }
+
+    .page-desc {
+        @apply mt-1.5 max-w-[780px] text-[12.5px] leading-relaxed text-muted;
+    }
+
+    .page-eyebrow {
+        @apply mb-2.5 flex items-center gap-2 font-mono text-[9.5px] font-medium uppercase tracking-[0.18em] text-faint;
+    }
+
+    .section-title {
+        @apply text-[13px] font-semibold tracking-[-0.01em] text-ink;
+    }
+
+    .empty-state {
+        @apply rounded-[10px] border border-dashed border-line bg-transparent px-6 py-14 text-center;
+    }
+
+    .empty-icon {
+        @apply mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-line bg-panel2 text-faint;
+    }
+
+    .segmented {
+        @apply inline-flex items-center gap-0.5 rounded-lg border border-line bg-panel2/60 p-0.5;
+    }
+
+    .segmented-item {
+        @apply rounded-md px-2.5 py-1 text-[11px] font-medium text-muted transition-colors hover:text-ink;
+    }
+
+    .segmented-item-active {
+        @apply bg-accent text-accentink;
     }
 }
 
@@ -135,6 +253,26 @@ body {
     border-radius: 4px;
     padding: 0 3px;
     font-weight: 500;
+}
+
+.no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
 }
 
 /* LobeHub 单色厂商图标（OpenAI / xAI / Groq）在深色主题下反色 */

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Search } from "lucide-react";
 import Avatar from "@/components/ui/Avatar";
 import Modal from "@/components/ui/Modal";
-import { api } from "@/lib/api";
+import { api, errText } from "@/lib/api";
 import { clock } from "@/lib/fmt";
 import type { SearchHit } from "@/lib/types";
 
@@ -84,7 +84,7 @@ export default function SearchModal({
         setHits([]);
         setTotal(0);
         setHasMore(false);
-        setError(e.message);
+        setError(errText(e, "搜索失败，请稍后重试"));
       } finally {
         if (current === seq.current) setLoading(false);
       }
@@ -104,7 +104,7 @@ export default function SearchModal({
       setHits((prev) => [...prev, ...r.results]);
       setHasMore(r.has_more);
     } catch (e: any) {
-      if (current === seq.current) setError(e.message);
+      if (current === seq.current) setError(errText(e, "搜索失败，请稍后重试"));
     } finally {
       if (current === seq.current) setLoadingMore(false);
     }

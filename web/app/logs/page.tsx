@@ -1,18 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Loader2, RefreshCw, Search, ScrollText, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Copy, Loader2, RefreshCw, Search, ScrollText, X } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/ui/PageHeader";
 import Select from "@/components/ui/Select";
-import { api } from "@/lib/api";
-import type { LogEntry, LogModule, LogPage } from "@/lib/types";
+import { api, toastError } from "@/lib/api";
 import { toast } from "@/lib/ui";
+import type { LogEntry, LogModule, LogPage } from "@/lib/types";
 
 const LEVELS = [
   { value: "", label: "全部" },
-  { value: "DEBUG", label: "DEBUG 及以上" },
-  { value: "INFO", label: "INFO 及以上" },
-  { value: "WARNING", label: "WARNING 及以上" },
+  { value: "DEBUG", label: "DEBUG" },
+  { value: "INFO", label: "INFO" },
+  { value: "WARNING", label: "WARNING" },
   { value: "ERROR", label: "ERROR" },
 ];
 
@@ -32,9 +33,9 @@ const isDbLog = (module: string) => module.startsWith("sqlalchemy");
 const CLAMP_AT = 180;
 
 export default function LogsPage() {
-  // 默认只看 WARNING 及以上：先看到真正需要处理的事；
-  // 要追踪某次执行时再切回“全部”或按 run 编号过滤。
-  const [level, setLevel] = useState("WARNING");
+  // 默认不筛选：和直接看 data/logs/app.log 看到的内容一致，
+  // 要排查问题再切到 WARNING / ERROR。
+  const [level, setLevel] = useState("");
   const [module, setModule] = useState("");
   const [q, setQ] = useState("");
   const [requestId, setRequestId] = useState("");
@@ -53,7 +54,7 @@ export default function LogsPage() {
         const page = await api.logs({ level, module, q, request_id: requestId, run_id: runId, limit: nextLimit });
         setData(page);
       } catch (e: any) {
-        if (!silent) toast(e.message, "error");
+        if (!silent) toastError(e);
       } finally {
         if (!silent) setLoading(false);
       }
@@ -114,25 +115,29 @@ export default function LogsPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-5xl px-6 py-8">
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-tight">运行日志</h1>
-              <p className="mt-1 text-[12.5px] text-muted">
-                API 请求、Agent 执行链路与安全事件。每行带 <code className="font-mono">req=</code> /{" "}
-                <code className="font-mono">run=</code> 编号，点编号可只保留同一请求或同一次执行。
-              </p>
-            </div>
-            <div className="ml-auto flex items-center gap-1">
-              <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11.5px] text-muted">
-                <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-                自动刷新
-              </label>
-              <button onClick={() => load(limit)} title="刷新" className="p-1.5 text-faint hover:text-ink">
-                {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              </button>
-            </div>
-          </div>
+        <div className="page">
+          <PageHeader
+            eyebrow="OPS / LOGS"
+            title="运行日志"
+            description={
+              <>
+                和 <code className="font-mono text-[11.5px] text-muted">data/logs/app.log</code>{" "}
+                同源：时间、级别、模块、pid 与 req / run 编号都保留。API 请求会拆成方法、路径、状态与耗时；
+                堆栈等多行内容可展开查看。
+              </>
+            }
+            actions={
+              <>
+                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11.5px] text-muted">
+                  <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+                  自动刷新
+                </label>
+                <button onClick={() => load(limit)} title="刷新" className="icon-btn">
+                  {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                </button>
+              </>
+            }
+          />
 
           {/*{data && (*/}
           {/*  <div className="mt-2 text-[11px] text-faint">*/}
@@ -144,7 +149,7 @@ export default function LogsPage() {
 
           {/* 筛选 */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-lg border border-line bg-panel px-2">
+            <div className="flex items-center gap-1.5 rounded-[9px] border border-line bg-panel px-2.5 transition-colors focus-within:border-accent/70 focus-within:ring-2 focus-within:ring-accent/10">
               <Search size={13} className="text-faint" />
               <input
                 value={q}
@@ -201,7 +206,7 @@ export default function LogsPage() {
           {(requestId || runId) && (
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[11.5px]">
               {requestId && (
-                <span className="flex items-center gap-1 rounded-md bg-accent/10 px-2 py-1 text-accent">
+                <span className="flex items-center gap-1 rounded-md bg-info/10 px-2 py-1 text-info">
                   请求 <code className="font-mono">{requestId}</code>
                   <button onClick={() => setRequestId("")} className="hover:text-ink">
                     <X size={11} />
@@ -209,7 +214,7 @@ export default function LogsPage() {
                 </span>
               )}
               {runId && (
-                <span className="flex items-center gap-1 rounded-md bg-accent/10 px-2 py-1 text-accent">
+                <span className="flex items-center gap-1 rounded-md bg-info/10 px-2 py-1 text-info">
                   执行 <code className="font-mono">{runId}</code>
                   <button onClick={() => setRunId("")} className="hover:text-ink">
                     <X size={11} />
@@ -220,18 +225,20 @@ export default function LogsPage() {
           )}
 
           {/* 列表 */}
-          <div className="mt-3 overflow-hidden rounded-xl border border-line bg-panel">
+          <div className="mt-3 overflow-hidden rounded-[14px] border border-line bg-panel shadow-card">
             {loading && !items.length ? (
               <div className="flex items-center justify-center py-16">
                 <Loader2 size={18} className="animate-spin text-faint" />
               </div>
             ) : !items.length ? (
               <div className="px-6 py-16 text-center">
-                <ScrollText size={22} className="mx-auto text-faint" />
-                <div className="mt-2.5 text-[13px] font-medium">
+                <div className="empty-icon">
+                  <ScrollText size={20} />
+                </div>
+                <div className="mt-3 text-[13px] font-medium">
                   {hasFilter ? "没有匹配的日志" : "还没有日志"}
                 </div>
-                <p className="mt-1 text-[12px] text-muted">
+                <p className="mx-auto mt-1 max-w-sm text-[12px] leading-relaxed text-muted">
                   {hasFilter
                     ? "换个关键字或级别再试，或清除筛选查看全部。"
                     : "后端处理请求或执行任务后，日志会写入 data/logs/app.log。"}
@@ -239,9 +246,24 @@ export default function LogsPage() {
               </div>
             ) : (
               <div className="divide-y divide-line/60">
-                {items.map((row, i) => (
-                  <LogRow key={`${row.time}-${i}`} row={row} onRequest={(id) => setRequestId(id)} onRun={(id) => setRunId(id)} />
-                ))}
+                {items.map((row, i) => {
+                  const date = row.time.slice(0, 10);
+                  const newDay = i === 0 || items[i - 1].time.slice(0, 10) !== date;
+                  return (
+                    <Fragment key={`${row.time}-${i}`}>
+                      {newDay && (
+                        <div className="bg-panel2/70 px-3 py-1 text-[10.5px] font-medium text-faint">
+                          {date}
+                        </div>
+                      )}
+                      <LogRow
+                        row={row}
+                        onRequest={(id) => setRequestId(id)}
+                        onRun={(id) => setRunId(id)}
+                      />
+                    </Fragment>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -265,48 +287,168 @@ export default function LogsPage() {
   );
 }
 
+type AccessInfo = {
+  method: string;
+  path: string;
+  status: number;
+  ms: number;
+  size: string;
+  ip: string;
+  uid: string;
+  ua: string;
+  query: string;
+  body: string;
+};
+
+/** 后端 access 日志的固定格式，拆开后才不会糊成一长串。
+ *  METHOD path -> 状态 耗时ms size=... ip=... uid=... [ua='...'][ query=...][ body=...]
+ */
+function parseAccess(message: string): AccessInfo | null {
+  const m = message.match(
+    /^([A-Z]+) (\S+) -> (\d{3}) (\d+)ms size=(\S+) ip=(\S+) uid=(\S+)([\s\S]*)$/
+  );
+  if (!m) return null;
+  const rest = m[8] || "";
+  // body 里可能有空格和引号，用第一个 " body=" 切开，后续内容整体当 body
+  const bodyAt = rest.indexOf(" body=");
+  const head = bodyAt >= 0 ? rest.slice(0, bodyAt) : rest;
+  return {
+    method: m[1],
+    path: m[2],
+    status: Number(m[3]),
+    ms: Number(m[4]),
+    size: m[5],
+    ip: m[6],
+    uid: m[7],
+    ua: head.match(/\bua='([^']*)'/)?.[1] || "",
+    query: head.match(/\bquery=(\S+)/)?.[1] || "",
+    body: bodyAt >= 0 ? rest.slice(bodyAt + 6) : "",
+  };
+}
+
+function prettyBody(body: string) {
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
+  }
+}
+
+/** 还原成和 data/logs/app.log 一模一样的一行，方便贴到别处或对比 */
+function rawLine(row: LogEntry) {
+  return `${row.time} ${row.level.padEnd(7)} pid=${row.pid || "-"} [${row.module}] req=${row.request_id} run=${row.run_id} task=${row.task_id} ${row.message}`;
+}
+
+function statusClass(status: number) {
+  if (status >= 500) return "text-danger";
+  if (status >= 400) return "text-warn";
+  return "text-ok";
+}
+
 function LogRow({ row, onRequest, onRun }: { row: LogEntry; onRequest: (id: string) => void; onRun: (id: string) => void }) {
   const isError = row.level === "ERROR" || row.level === "CRITICAL";
   const isWarn = row.level === "WARNING";
   const [open, setOpen] = useState(false);
-  const long = row.message.length > CLAMP_AT;
+  const access = row.module === "access" ? parseAccess(row.message) : null;
+  const multiline = row.message.includes("\n");
+  const long = row.message.length > CLAMP_AT || multiline;
+  const detail = !!access && !!(access.query || access.body || access.ua);
+
+  const copy = () => {
+    const text = rawLine(row);
+    const fail = () => toast("复制失败，请手动选择文本", "error");
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => toast("已复制原始日志行", "ok"), fail);
+    else fail();
+  };
+
   return (
     <div
-      className={`flex gap-2 px-3 py-1.5 font-mono text-[11.5px] leading-relaxed ${
+      className={`group flex gap-2 px-3 py-1.5 font-mono text-[11.5px] leading-relaxed ${
         isError ? "bg-danger/[0.04]" : isWarn ? "bg-warn/[0.04]" : ""
       }`}
     >
-      <span className="shrink-0 text-faint">{row.time.slice(11)}</span>
-      <span className={`w-[62px] shrink-0 ${LEVEL_CLS[row.level] || "text-muted"}`}>{row.level}</span>
-      <span className="w-[76px] shrink-0 truncate text-accent/80" title={row.module}>
+      <span className="w-[56px] shrink-0 text-faint" title={row.time}>
+        {row.time.slice(11)}
+      </span>
+      <span className={`w-[58px] shrink-0 ${LEVEL_CLS[row.level] || "text-muted"}`}>{row.level}</span>
+      <span className="w-[76px] shrink-0 truncate text-info/80" title={row.module}>
         {row.module}
       </span>
       <div className="min-w-0 flex-1 text-ink/90">
-        <div className={long && !open ? "line-clamp-2 break-words" : "whitespace-pre-wrap break-words"}>
-          {row.message}
-        </div>
-        {long && (
-          <button
-            onClick={() => setOpen((v) => !v)}
-            className="mt-0.5 text-[10.5px] text-accent/80 hover:text-accent"
-          >
-            {open ? "收起" : `展开（${row.message.length} 字）`}
-          </button>
+        {access ? (
+          <>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="rounded bg-info/10 px-1 text-[10px] font-semibold text-info">
+                {access.method}
+              </span>
+              <span className="break-all">{access.path}</span>
+              <span className={`font-semibold ${statusClass(access.status)}`}>{access.status}</span>
+              <span className={access.ms >= 1000 ? "text-warn" : "text-faint"}>{access.ms}ms</span>
+              <span className="text-faint">size={access.size}</span>
+            </div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10.5px] text-faint">
+              <span>ip={access.ip}</span>
+              <span>uid={access.uid}</span>
+              {detail && (
+                <button onClick={() => setOpen((v) => !v)} className="text-info/80 hover:text-info">
+                  {open ? "收起详情" : "请求详情"}
+                </button>
+              )}
+            </div>
+            {open && detail && (
+              <div className="mt-1 space-y-1 rounded-md border border-line bg-panel2/60 p-2 text-[10.5px] text-muted">
+                {access.query && (
+                  <div>
+                    <span className="text-faint">query </span>
+                    <span className="break-all">{access.query}</span>
+                  </div>
+                )}
+                {access.body && (
+                  <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all">
+                    {prettyBody(access.body)}
+                  </pre>
+                )}
+                {access.ua && <div className="break-all text-faint">{access.ua}</div>}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className={long && !open ? "line-clamp-3 break-words" : "whitespace-pre-wrap break-words"}>
+              {row.message}
+            </div>
+            {long && (
+              <button
+                onClick={() => setOpen((v) => !v)}
+                className="mt-0.5 text-[10.5px] text-info/80 hover:text-info"
+              >
+                {open ? "收起" : multiline ? "展开完整内容（含堆栈）" : `展开（${row.message.length} 字）`}
+              </button>
+            )}
+          </>
         )}
         <div className="mt-0.5 flex flex-wrap gap-2 text-[10.5px] text-faint">
+          {row.pid && <span title="后端进程号">pid={row.pid}</span>}
           {row.request_id !== "-" && (
-            <button onClick={() => onRequest(row.request_id)} className="hover:text-accent" title="只看这个请求">
+            <button onClick={() => onRequest(row.request_id)} className="hover:text-info" title="只看这个请求">
               req={row.request_id}
             </button>
           )}
           {row.run_id !== "-" && (
-            <button onClick={() => onRun(row.run_id)} className="hover:text-accent" title="只看这次执行">
+            <button onClick={() => onRun(row.run_id)} className="hover:text-info" title="只看这次执行">
               run={row.run_id}
             </button>
           )}
           {row.task_id !== "-" && <span>task={row.task_id}</span>}
         </div>
       </div>
+      <button
+        onClick={copy}
+        title="复制与 data/logs/app.log 一致的原始行"
+        className="mt-0.5 shrink-0 text-faint opacity-50 hover:text-ink hover:opacity-100"
+      >
+        <Copy size={12} />
+      </button>
       {(isError || isWarn) && (
         <AlertTriangle size={12} className={`mt-1 shrink-0 ${isError ? "text-danger" : "text-warn"}`} />
       )}

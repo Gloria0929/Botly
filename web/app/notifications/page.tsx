@@ -4,8 +4,9 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BellRing, CheckCheck, CircleAlert, CircleCheck, CircleHelp, Loader2, Trash2 } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/ui/PageHeader";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import type { Notification } from "@/lib/types";
 import { timeAgo } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
@@ -34,7 +35,7 @@ export default function NotificationsPage() {
         setItems(d.items);
         setUnread(d.unread_count);
       })
-      .catch(() => {})
+      .catch((e) => toastError(e, "通知加载失败"))
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
@@ -56,7 +57,7 @@ export default function NotificationsPage() {
   }, []);
 
   const markAll = async () => {
-    await api.readNotifications({ all: true }).catch(() => {});
+    await api.readNotifications({ all: true }).catch((e) => toastError(e, "标记已读失败"));
     load();
   };
 
@@ -85,39 +86,43 @@ export default function NotificationsPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-6 py-8">
-          <div className="flex items-end gap-3">
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-tight">通知</h1>
-              <p className="mt-1 text-[12.5px] text-muted">
-                审批、提问、执行完成与失败都会出现在这里。
-              </p>
-            </div>
-            <div className="ml-auto flex items-center gap-1">
-              <button className="btn-ghost" onClick={markAll} disabled={!unread}>
-                <CheckCheck size={13} /> 全部已读
-              </button>
-              <button
-                className="btn-ghost hover:text-danger"
-                onClick={clearAll}
-                disabled={!items.length || clearing}
-                title="清空全部通知"
-              >
-                {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} 清空
-              </button>
-            </div>
-          </div>
+        <div className="page">
+          <PageHeader
+            eyebrow="INBOX / NOTIFICATIONS"
+            title="通知"
+            description="审批、提问、执行完成与失败都会出现在这里。"
+            actions={
+              <>
+                <button className="btn-ghost" onClick={markAll} disabled={!unread}>
+                  <CheckCheck size={13} /> 全部已读
+                </button>
+                <button
+                  className="btn-ghost hover:border-danger/40 hover:text-danger"
+                  onClick={clearAll}
+                  disabled={!items.length || clearing}
+                  title="清空全部通知"
+                >
+                  {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} 清空
+                </button>
+              </>
+            }
+          />
 
           {loading && <Loader2 size={15} className="mt-8 animate-spin text-faint" />}
 
           {!loading && !items.length && (
-            <div className="mt-16 flex flex-col items-center text-faint">
-              <BellRing size={26} strokeWidth={1.4} />
-              <p className="mt-3 text-[12.5px]">暂无通知</p>
+            <div className="empty-state mt-10">
+              <div className="empty-icon">
+                <BellRing size={20} />
+              </div>
+              <div className="mt-3 text-[13px] font-medium">暂无通知</div>
+              <p className="mx-auto mt-1 max-w-xs text-[12px] leading-relaxed text-muted">
+                审批、提问或执行状态变化时，提醒会出现在这里。
+              </p>
             </div>
           )}
 
-          <div className="mt-5 space-y-1.5">
+          <div className="mt-5 grid gap-2 lg:grid-cols-2">
             {items.map((n) => {
               const Icon = ICON[n.type] || BellRing;
               return (
@@ -135,10 +140,10 @@ export default function NotificationsPage() {
                     }
                     load();
                   }}
-                  className={`flex w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors ${
+                  className={`flex w-full items-start gap-3 rounded-lg border px-3.5 py-3 text-left transition-all ${
                     n.read
-                      ? "border-line bg-transparent hover:bg-panel"
-                      : "border-accent/25 bg-accent/[0.05] hover:bg-accent/[0.09]"
+                      ? "border-line bg-panel/40 hover:border-line2 hover:bg-panel"
+                      : "border-accent/25 bg-accent/[0.05] hover:border-accent/40 hover:bg-accent/[0.08]"
                   }`}
                 >
                   <Icon

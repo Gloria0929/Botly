@@ -75,7 +75,7 @@ export const AVATAR_PICKER_OPTIONS: { key: string; label: string; Icon: LucideIc
   { key: "bot", label: "默认", Icon: Bot },
   { key: "compass", label: "总指挥", Icon: Compass },
   { key: "search", label: "研究员", Icon: Search },
-  { key: "pen", label: "写手", Icon: PenLine },
+  { key: "pen", label: "架构师", Icon: PenLine },
   { key: "calculator", label: "计算", Icon: Calculator },
   { key: "wrench", label: "程序员", Icon: Wrench },
   { key: "chart", label: "数据", Icon: ChartColumn },

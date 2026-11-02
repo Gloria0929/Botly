@@ -8,6 +8,54 @@ export class ApiError extends Error {
   }
 }
 
+/** FastAPI 的错误体：detail 可能是字符串，也可能是校验错误数组。 */
+export function detailText(detail: unknown): string {
+  if (typeof detail === "string") return detail.trim();
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d: any) => (typeof d === "string" ? d : d?.msg || ""))
+      .filter(Boolean)
+      .join("；");
+  }
+  if (detail && typeof detail === "object") {
+    const obj = detail as any;
+    for (const key of ["msg", "message", "detail"]) {
+      if (typeof obj[key] === "string" && obj[key].trim()) return obj[key].trim();
+    }
+  }
+  return "";
+}
+
+/** 统一取错误文案：优先后端 detail，其次 Error.message，最后兜底。 */
+export function errText(e: unknown, fallback = "操作失败，请稍后重试"): string {
+  if (e instanceof ApiError && e.message) return e.message;
+  if (typeof e === "string" && e.trim()) return e;
+  const message = (e as any)?.message;
+  if (typeof message === "string" && message.trim()) {
+    // 浏览器把网络层的失败暴露成英文 TypeError，对用户没意义
+    if (/^(Failed to fetch|Load failed|NetworkError)/i.test(message)) {
+      return "网络请求失败，请检查连接或稍后重试";
+    }
+    return message;
+  }
+  return fallback;
+}
+
+/** 错误提示统一出口：任何用户触发的失败都要能说清原因，不能只留一个空 toast。 */
+export function toastError(e: unknown, fallback?: string) {
+  toast(errText(e, fallback), "error");
+}
+
+/** 从响应里读 detail；不是 JSON 或没有 detail 时用兜底文案。 */
+async function readError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json();
+    return detailText(data?.detail) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   // FormData 由浏览器自己带 boundary，不能手动指定 Content-Type
   const isForm = typeof FormData !== "undefined" && init.body instanceof FormData;
@@ -34,19 +82,12 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(401, "未登录");
   }
   if (!res.ok) {
-    let detail = `请求失败（${res.status}）`;
-    try {
-      const data = await res.json();
-      if (typeof data.detail === "string") detail = data.detail;
-      else if (Array.isArray(data.detail)) {
-        detail = data.detail
-          .map((d: any) => (typeof d === "string" ? d : d?.msg || ""))
-          .filter(Boolean)
-          .join("；") || detail;
-      }
-    } catch {
-      /* ignore */
-    }
+    // 5xx 多半不是用户操作的问题：后端没起来 / 代理连不上，给一句能排查的提示
+    const fallback =
+      res.status >= 500
+        ? `服务暂时不可用（${res.status}），请确认后端已启动后重试`
+        : `请求失败（${res.status}）`;
+    const detail = await readError(res, fallback);
     toast(detail, "error");
     throw new ApiError(res.status, detail);
   }
@@ -125,14 +166,7 @@ export const api = {
       headers: { "X-Botly-Client": "web" },
     });
     if (!res.ok) {
-      let msg = "上传失败";
-      try {
-        const d = await res.json();
-        if (typeof d.detail === "string") msg = d.detail;
-      } catch {
-        /* ignore */
-      }
-      throw new ApiError(res.status, msg);
+      throw new ApiError(res.status, await readError(res, "上传失败"));
     }
     return (await res.json()) as { id: string; url: string };
   },
@@ -280,8 +314,7 @@ export const api = {
       method: "POST", credentials: "same-origin", headers: { "X-Botly-Client": "web" }, body,
     });
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, typeof data.detail === "string" ? data.detail : "文件上传失败");
+      throw new ApiError(response.status, await readError(response, "文件上传失败"));
     }
     return await response.json() as import("./types").ChatFile;
   },
@@ -338,14 +371,7 @@ export const api = {
       credentials: "same-origin",
     });
     if (!res.ok) {
-      let msg = "导出失败";
-      try {
-        const data = await res.json();
-        if (typeof data.detail === "string") msg = data.detail;
-      } catch {
-        /* ignore */
-      }
-      throw new ApiError(res.status, msg);
+      throw new ApiError(res.status, await readError(res, "导出失败"));
     }
     return await res.blob();
   },
@@ -354,7 +380,7 @@ export const api = {
       headers: { "X-Botly-Client": "web" },
       credentials: "same-origin",
     });
-    if (!res.ok) throw new ApiError(res.status, "无法读取文件");
+    if (!res.ok) throw new ApiError(res.status, await readError(res, "无法读取文件"));
     return res.text();
   },
 

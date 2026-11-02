@@ -96,12 +96,12 @@ export default function Select({
         onClick={() => setOpen(!open)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={`flex w-full items-center gap-2 rounded-lg border bg-panel2 px-2.5 ${h} text-left outline-none transition-colors ${
+        className={`flex w-full items-center gap-2 rounded-lg border bg-panel2/70 px-2.5 ${h} text-left outline-none transition-colors ${
           disabled
             ? "cursor-not-allowed border-line opacity-50"
             : open
-              ? "border-accent"
-              : "border-line hover:border-faint/60"
+              ? "border-accent ring-2 ring-accent/10"
+              : "border-line hover:border-line2"
         }`}
       >
         {current?.avatar !== undefined && current?.avatar !== null && (
@@ -122,9 +122,9 @@ export default function Select({
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full min-w-[200px] overflow-hidden rounded-xl border border-line bg-panel shadow-card">
+        <div className="absolute z-50 mt-1.5 w-full min-w-[200px] overflow-hidden rounded-lg border border-line bg-panel p-1 shadow-pop">
           {(searchable || freeInput) && (
-            <div className="flex items-center gap-1.5 border-b border-line px-2.5 py-1.5">
+            <div className="flex items-center gap-1.5 border-b border-line/70 px-2 py-1.5">
               <Search size={12} className="shrink-0 text-faint" />
               <input
                 ref={input}
@@ -141,7 +141,7 @@ export default function Select({
               />
             </div>
           )}
-          <div className="max-h-60 overflow-y-auto py-1" role="listbox">
+          <div className="max-h-60 overflow-y-auto py-0.5" role="listbox">
             {filtered.map((o) => (
               <button
                 key={o.value}
@@ -150,7 +150,7 @@ export default function Select({
                 aria-selected={o.value === value}
                 disabled={o.disabled}
                 onClick={() => pick(o.value)}
-                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
                   o.disabled
                     ? "cursor-not-allowed opacity-40"
                     : o.value === value

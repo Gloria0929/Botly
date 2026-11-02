@@ -5,7 +5,7 @@ import { Crown, Loader2, Plus, Search, UserMinus, UserPlus } from "lucide-react"
 import Avatar from "@/components/ui/Avatar";
 import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import { modelCapability } from "@/lib/fmt";
 import type { Bot, Chat, Provider } from "@/lib/types";
 import { toast } from "@/lib/ui";
@@ -37,7 +37,7 @@ export default function MembersModal({
     api
       .bots()
       .then((bs) => setBots(bs.filter((b) => !b.deleted)))
-      .catch(() => {});
+      .catch((e) => toastError(e, "Bot 列表加载失败"));
     // MOD-02：用已探测的模型能力决定谁能当总指挥
     api.providers().then(setProviders).catch(() => {});
   }, [open]);
@@ -68,7 +68,7 @@ export default function MembersModal({
       toast(`已把「${bot.name}」加入群聊`, "ok");
       onChanged();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setBusy(null);
     }
@@ -82,7 +82,7 @@ export default function MembersModal({
       toast(`「${bot.name}」已设为总指挥，下一次执行生效`, "ok");
       onChanged();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setBusy(null);
     }
@@ -103,7 +103,7 @@ export default function MembersModal({
       toast(`已把「${bot.name}」移出群聊`, "ok");
       onChanged();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setBusy(null);
     }
@@ -123,7 +123,7 @@ export default function MembersModal({
             <span className="text-[12px] font-medium text-muted">成员</span>
             <span className="text-[10.5px] text-faint">{members.length}</span>
           </div>
-          <div className="overflow-hidden rounded-xl border border-line">
+          <div className="overflow-hidden rounded-lg border border-line">
             {members.map((m) => {
               const isSup = chat?.supervisor_bot_id === m.id;
               const working = m.status === "working" || m.status === "waiting";
@@ -213,7 +213,7 @@ export default function MembersModal({
             </div>
           )}
 
-          <div className="max-h-[260px] overflow-y-auto rounded-xl border border-line">
+          <div className="max-h-[260px] overflow-y-auto rounded-lg border border-line">
             {filtered.map((b) => (
               <button
                 key={b.id}

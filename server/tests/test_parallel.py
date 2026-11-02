@@ -58,7 +58,7 @@ def messages(client, chat_id: str) -> list[dict]:
 def plan_steps(parallel: bool) -> list[dict]:
     steps = [
         {"title": "资料收集", "bot": "研究员", "expected": "要点清单", "batch": 1},
-        {"title": "撰写成稿", "bot": "写手", "expected": "成稿", "batch": 1},
+        {"title": "撰写成稿", "bot": "架构师", "expected": "成稿", "batch": 1},
     ]
     if not parallel:
         for step in steps:
@@ -114,7 +114,7 @@ def make_stream(parallel: bool, worker_results: dict[str, str], calls: dict):
                     "function": {
                         "name": "delegate",
                         "arguments": json.dumps({
-                            "bot": "写手",
+                            "bot": "架构师",
                             "instruction": "根据资料写一份成稿",
                             "step": "撰写成稿",
                             "expected_output": "成稿",
@@ -126,7 +126,7 @@ def make_stream(parallel: bool, worker_results: dict[str, str], calls: dict):
         # 汇总轮：两个子任务的结果都必须能读到
         blob = json.dumps(kw["messages"], ensure_ascii=False)
         assert "研究员的结果" in blob
-        assert "写手的结果" in blob
+        assert "架构师的结果" in blob
         calls["summary_input"] = blob
         yield {"type": "done", "content": "两份结果已汇总", "tool_calls": []}
 
@@ -143,7 +143,7 @@ def test_same_batch_runs_in_parallel(client, invite, monkeypatch, parallel):
     monkeypatch.setattr(
         orchestrator,
         "stream_chat",
-        make_stream(parallel, {"研究员": "研究员的结果", "写手": "写手的结果"}, calls),
+        make_stream(parallel, {"研究员": "研究员的结果", "架构师": "架构师的结果"}, calls),
     )
 
     run_id = client.post(
@@ -180,8 +180,8 @@ def test_same_batch_runs_in_parallel(client, invite, monkeypatch, parallel):
         # 同一批的两个步骤都各有一条独立执行
         assert len(children) == 2 and all(c.status == "completed" for c in children)
         assert len(summary) == 1, "批次结束后应有一条汇总，且只写一次"
-        # 写手没有显式 delegate 调用，结果只能靠批次汇总进入总指挥上下文
-        assert "写手的结果" in summary[0].content
+        # 架构师没有显式 delegate 调用，结果只能靠批次汇总进入总指挥上下文
+        assert "架构师的结果" in summary[0].content
     else:
         # 没写 batch 时保持串行：不产生子执行，也不写并行汇总
         assert children == []
@@ -218,7 +218,7 @@ def test_stop_parent_stops_children(client, invite, monkeypatch):
     monkeypatch.setattr(
         orchestrator,
         "stream_chat",
-        make_stream(True, {"研究员": "研究员的结果", "写手": "写手的结果"}, calls),
+        make_stream(True, {"研究员": "研究员的结果", "架构师": "架构师的结果"}, calls),
     )
 
     run_id = client.post(
@@ -251,7 +251,7 @@ def test_stop_parent_stops_children(client, invite, monkeypatch):
     with SessionLocal() as db:
         still = list(db.scalars(select(Run).where(Run.parent_run_id == run_id)))
     assert all(c.status == "stopped" for c in still)
-    assert not [m for m in messages(client, chat_id) if m["content"] == "写手的结果"]
+    assert not [m for m in messages(client, chat_id) if m["content"] == "架构师的结果"]
 
 
 def test_child_executions_really_run_concurrently(client, invite, monkeypatch):

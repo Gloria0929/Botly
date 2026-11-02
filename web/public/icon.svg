@@ -1,4 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#4f46e5"/>
-  <text x="32" y="44" text-anchor="middle" font-family="-apple-system,'Segoe UI',Arial,sans-serif" font-size="34" font-weight="700" fill="#ffffff">B</text>
+  <rect width="64" height="64" rx="12" fill="#ff5c5c"/>
+  <g stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M20 15 V49"/>
+    <path d="M23 16 L43 24.5 L23 33"/>
+    <path d="M23 33 L48 43.5 L23 53"/>
+  </g>
+  <circle cx="43" cy="24.5" r="3.4" fill="#2dd4bf"/>
+  <circle cx="48" cy="43.5" r="3.6" fill="#2dd4bf"/>
 </svg>

@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Loader2, Mail } from "lucide-react";
 import AuthShell from "@/components/AuthShell";
-import { api } from "@/lib/api";
+import { api, errText } from "@/lib/api";
 
 /** ACC-08：申请重置密码。不区分邮箱是否存在，统一给同样的提示。 */
 export default function ForgotPasswordPage() {
@@ -23,7 +23,7 @@ export default function ForgotPasswordPage() {
       setDevLink(r.dev_link || null);
       setSent(true);
     } catch (e: any) {
-      setErr(e.message || "发送失败");
+      setErr(errText(e, "发送失败"));
     } finally {
       setLoading(false);
     }
@@ -35,7 +35,7 @@ export default function ForgotPasswordPage() {
         title="检查你的邮箱"
         subtitle="如果这个邮箱已注册，我们刚刚发送了一封带重置链接的邮件。"
       >
-        <div className="rounded-xl border border-line bg-panel px-4 py-3.5 text-[12.5px] leading-relaxed text-muted">
+        <div className="rounded-lg border border-line bg-panel px-4 py-3.5 text-[12.5px] leading-relaxed text-muted">
           <div className="flex items-center gap-2 text-ink">
             <Mail size={14} className="text-accent" />
             <span className="font-medium">{email}</span>
@@ -47,7 +47,7 @@ export default function ForgotPasswordPage() {
         </div>
 
         {devLink && (
-          <div className="mt-4 rounded-xl border border-warn/35 bg-warn/[0.08] px-4 py-3 text-[12px] leading-relaxed text-warn">
+          <div className="mt-4 rounded-lg border border-warn/35 bg-warn/[0.08] px-4 py-3 text-[12px] leading-relaxed text-warn">
             本地开发模式（未配置 SMTP）：邮件没有真的发出。
             <a href={devLink} className="mt-1 block break-all underline">
               {devLink}

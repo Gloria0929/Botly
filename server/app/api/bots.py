@@ -96,9 +96,9 @@ def list_bots(
 def list_tools(user: User = Depends(current_user), db: Session = Depends(get_db)):
     """内置工具清单，附带「当前用户现在能不能用」。
 
-    TOL-01：`web_search` 依赖用户在设置页填写的搜索服务 API Key。没配 Key 时
-    前端直接禁用勾选并给出跳转提示，避免选了以后执行时静默回退到公共搜索
-    （结果不稳定，用户也不知道查询被发给了第三方）。
+    TOL-01：`web_search` 优先用设置页配置的搜索服务 API Key；没配 Key 时依然
+    可选，执行时自动回退到 DuckDuckGo 免密钥搜索（结果稳定性差一些），并在
+    工具结果里注明来源，不静默消耗第三方额度。
     """
     settings = db.get(UserSettings, user.id)
     search_ready = bool(settings and settings.search_api_key_encrypted)
@@ -106,8 +106,7 @@ def list_tools(user: User = Depends(current_user), db: Session = Depends(get_db)
     for t in BUILTIN_TOOLS.values():
         available, reason = True, None
         if t.name == "web_search" and not search_ready:
-            available = False
-            reason = "未配置搜索服务 API Key，请先到设置页填写"
+            reason = "未配置搜索 Key，将使用 DuckDuckGo 免密钥搜索（结果可能不稳定）"
         out.append(
             {
                 "name": t.name,

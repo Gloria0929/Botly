@@ -268,6 +268,8 @@ export type Memory = {
   bot_id: string | null;
   title: string;
   content: string;
+  /** user = 用户手动维护；bot = Bot 执行中通过 memory_save 自主保存 */
+  source?: "user" | "bot";
   updated_at: string | null;
 };
 
@@ -404,6 +406,8 @@ export type LogEntry = {
   time: string;
   level: string;
   module: string;
+  /** 后端进程号，和后端 app.log 里的一致 */
+  pid?: string;
   request_id: string;
   run_id: string;
   task_id: string;

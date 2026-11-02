@@ -392,6 +392,10 @@ class Memory(Base, TimestampMixin):
     bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(120), default="")
     content: Mapped[str] = mapped_column(Text, default="")
+    # user = 用户在记忆页维护；bot = Bot 执行中通过 memory_save 自主写入（MEM-03 修订）
+    source: Mapped[str] = mapped_column(String(20), default="user")
+    # 写入时的执行 id：追溯来源，也用于「每次执行最多自动保存 N 条」的限额
+    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 class MemoryCandidate(Base, TimestampMixin):

@@ -12,6 +12,8 @@ import {
   LogOut,
   MessagesSquare,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plug,
   Settings,
   ScrollText,
@@ -19,22 +21,54 @@ import {
   Sun,
   UserRound,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { api } from "@/lib/api";
+import { LogoMark } from "@/components/ui/Logo";
 import { registerSW } from "@/lib/push";
 import type { Me } from "@/lib/types";
 
-const NAV = [
-  { href: "/chat", label: "群聊", icon: MessagesSquare },
-  { href: "/bots", label: "Bot", icon: Blocks },
-  { href: "/skills", label: "技能", icon: Sparkles },
-  { href: "/mcp", label: "MCP", icon: Plug },
-  { href: "/memory", label: "记忆", icon: Brain },
-  { href: "/status", label: "运行状况", icon: Activity },
-  { href: "/usage", label: "用量", icon: BarChart3 },
-  { href: "/logs", label: "日志", icon: ScrollText },
-  { href: "/notifications", label: "通知", icon: Bell },
-  { href: "/settings", label: "设置", icon: Settings },
+type NavItem = { href: string; label: string; icon: LucideIcon };
+
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: "Workspace",
+    items: [
+      { href: "/chat", label: "群聊", icon: MessagesSquare },
+      { href: "/bots", label: "Bot", icon: Blocks },
+      { href: "/skills", label: "技能", icon: Sparkles },
+      { href: "/mcp", label: "MCP", icon: Plug },
+    ],
+  },
+  {
+    label: "Insight",
+    items: [
+      { href: "/memory", label: "记忆", icon: Brain },
+      { href: "/status", label: "运行状况", icon: Activity },
+      { href: "/usage", label: "用量", icon: BarChart3 },
+      { href: "/logs", label: "日志", icon: ScrollText },
+    ],
+  },
+  {
+    label: "System",
+    items: [
+      { href: "/notifications", label: "通知", icon: Bell },
+      { href: "/settings", label: "设置", icon: Settings },
+    ],
+  },
 ];
+
+const SECTIONS: Record<string, string> = {
+  chat: "CHAT",
+  bots: "AGENTS",
+  skills: "SKILLS",
+  mcp: "MCP",
+  memory: "MEMORY",
+  status: "HEALTH",
+  usage: "USAGE",
+  logs: "LOGS",
+  notifications: "INBOX",
+  settings: "SETTINGS",
+};
 
 function useTheme() {
   const [light, setLight] = useState(false);
@@ -50,6 +84,25 @@ function useTheme() {
   return { light, toggle };
 }
 
+/** 侧栏折叠状态：桌面端可收起为 68px 图标栏，记忆在 localStorage */
+function useCollapsed() {
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      setCollapsed(localStorage.getItem("botly-nav") === "collapsed");
+    } catch {}
+  }, []);
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem("botly-nav", next ? "collapsed" : "expanded");
+      } catch {}
+      return next;
+    });
+  return { collapsed, toggleCollapsed };
+}
+
 export default function AppShell({
   children,
   bare = false,
@@ -60,8 +113,10 @@ export default function AppShell({
   const path = usePathname();
   const router = useRouter();
   const { light, toggle } = useTheme();
+  const { collapsed, toggleCollapsed } = useCollapsed();
   const [me, setMe] = useState<Me | null>(null);
   const [unread, setUnread] = useState(0);
+  const [userOpen, setUserOpen] = useState(false);
 
   useEffect(() => {
     api.me().then(setMe).catch(() => {});
@@ -104,69 +159,173 @@ export default function AppShell({
     return () => es.close();
   }, [path, me?.settings?.notifications_enabled, router]);
 
+  useEffect(() => setUserOpen(false), [path]);
+
   if (bare) return <>{children}</>;
 
+  const section = SECTIONS[path.split("/")[1] || ""] || "CONSOLE";
+
+  const navItemClass = (active: boolean, isCollapsed: boolean) =>
+    `group relative flex shrink-0 items-center gap-2.5 rounded-md text-[12px] font-medium transition-colors duration-150 max-lg:h-10 max-lg:w-11 max-lg:justify-center max-lg:px-0 ${
+      isCollapsed ? "h-9 w-9 justify-center px-0" : "h-9 px-2.5"
+    } ${
+      active
+        ? "bg-accent/[0.11] text-accent ring-1 ring-inset ring-accent/25"
+        : "text-muted hover:bg-panel2 hover:text-ink"
+    }`;
+
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-canvas">
-      <nav className="flex w-[68px] shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-3 max-lg:fixed max-lg:inset-x-0 max-lg:bottom-0 max-lg:z-40 max-lg:h-[56px] max-lg:w-full max-lg:flex-row max-lg:justify-around max-lg:border-r-0 max-lg:border-t max-lg:py-0">
-        <Link
-          href="/chat"
-          className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-[15px] font-bold text-accentink max-lg:hidden"
-          title="Botly"
-        >
-          B
+    <div className="flex h-screen w-full flex-col overflow-hidden bg-canvas">
+      {/* 顶栏：品牌 + 当前分区 + 全局状态 */}
+      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-panel px-3 sm:px-4">
+        <Link href="/chat" className="flex min-w-0 items-center gap-2.5" title="Botly">
+          <LogoMark size={26} />
+          <span className="min-w-0">
+            <span className="block font-mono text-[13px] font-semibold uppercase leading-none tracking-[0.1em]">
+              Botly
+            </span>
+            <span className="mt-1 hidden truncate font-mono text-[8px] uppercase leading-none tracking-[0.16em] text-faint sm:block">
+              Multi-agent console
+            </span>
+          </span>
         </Link>
-        {NAV.map((n) => {
-          const active = path.startsWith(n.href);
-          const Icon = n.icon;
-          return (
-            <Link
-              key={n.href}
-              href={n.href}
-              title={n.label}
-              className={`relative flex h-10 w-10 items-center justify-center rounded-xl transition-colors ${
-                active
-                  ? "bg-accent/15 text-accent"
-                  : "text-faint hover:bg-panel2 hover:text-ink"
-              }`}
-            >
-              <Icon size={18} strokeWidth={1.9} />
-              {n.href === "/notifications" && unread > 0 && (
-                <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-danger" />
-              )}
-            </Link>
-          );
-        })}
-        <div className="mt-auto flex flex-col items-center gap-1 max-lg:mt-0 max-lg:flex-row max-lg:gap-1">
+        <span className="hidden font-mono text-[9px] uppercase tracking-[0.16em] text-faint lg:inline">
+          / {section}
+        </span>
+
+        <div className="ml-auto flex items-center gap-1.5">
+          <span className="hidden items-center gap-1.5 rounded-full border border-line bg-panel2 px-2.5 py-1 font-mono text-[9px] uppercase tracking-[0.12em] text-muted sm:flex">
+            <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+            v1.0
+          </span>
           <button
             onClick={toggle}
             title={light ? "切换到深色" : "切换到浅色"}
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-faint hover:bg-panel2 hover:text-ink"
+            className="icon-btn"
           >
-            {light ? <Moon size={17} /> : <Sun size={17} />}
+            {light ? <Moon size={16} /> : <Sun size={16} />}
           </button>
-          <div className="group relative">
-            <button className="flex h-9 w-9 items-center justify-center rounded-full border border-line bg-panel2 text-[12px] font-medium text-muted">
-              {me?.name?.slice(0, 1)?.toUpperCase() || <UserRound size={15} />}
+          <div className="relative">
+            <button
+              onClick={() => setUserOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={userOpen}
+              className={`flex h-8 items-center gap-2 rounded-md border border-transparent px-1.5 text-left transition-colors hover:border-line hover:bg-panel2 ${
+                userOpen ? "border-line bg-panel2" : ""
+              }`}
+            >
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-accent/30 bg-accent/10 text-[10px] font-semibold text-accent">
+                {me?.name?.slice(0, 1)?.toUpperCase() || <UserRound size={12} />}
+              </span>
+              <span className="hidden max-w-[110px] truncate text-[11.5px] text-muted md:block">
+                {me?.name || "未登录"}
+              </span>
             </button>
-            <div className="invisible absolute bottom-11 left-0 z-50 w-52 rounded-xl border border-line bg-panel p-2 opacity-0 shadow-card transition-all group-hover:visible group-hover:opacity-100">
-              <div className="px-2 py-1.5 text-[12px] text-muted">
-                {me?.email || "未登录"}
-              </div>
-              <button
-                onClick={async () => {
-                  await api.logout().catch(() => {});
-                  router.push("/login");
-                }}
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-muted hover:bg-panel2 hover:text-ink"
-              >
-                <LogOut size={14} /> 退出登录
-              </button>
-            </div>
+
+            {userOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setUserOpen(false)} />
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-50 mt-2 w-56 animate-rise rounded-lg border border-line bg-panel p-1.5 shadow-pop"
+                >
+                  <div className="border-b border-line/70 px-2.5 pb-2 pt-1.5">
+                    <div className="truncate text-[12.5px] font-medium">{me?.name || "未登录"}</div>
+                    <div className="mt-0.5 truncate font-mono text-[10px] text-faint">
+                      {me?.email || "—"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setUserOpen(false);
+                      await api.logout().catch(() => {});
+                      router.push("/login");
+                    }}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] text-muted transition-colors hover:bg-danger/10 hover:text-danger"
+                    role="menuitem"
+                  >
+                    <LogOut size={14} /> 退出登录
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
-      </nav>
-      <main className="min-w-0 flex-1 overflow-hidden max-lg:pb-[56px]">{children}</main>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <nav
+          className={`no-scrollbar relative flex shrink-0 flex-col border-r border-line bg-panel py-3 transition-[width] duration-200 max-lg:fixed max-lg:inset-x-0 max-lg:bottom-0 max-lg:z-40 max-lg:h-[58px] max-lg:w-full max-lg:flex-row max-lg:items-center max-lg:gap-1 max-lg:overflow-x-auto max-lg:border-r-0 max-lg:border-t max-lg:px-1.5 max-lg:py-0 ${
+            collapsed
+              ? "w-[68px] items-center px-2.5 max-lg:w-full"
+              : "w-[224px] px-3 max-lg:w-full"
+          }`}
+          style={{ scrollbarWidth: "none" }}
+        >
+          <div
+            className={`mb-1 flex w-full items-center max-lg:hidden ${
+              collapsed ? "justify-center" : "justify-end px-1"
+            }`}
+          >
+            <button
+              onClick={toggleCollapsed}
+              title={collapsed ? "展开侧栏" : "收起侧栏"}
+              aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
+              className="icon-btn h-7 w-7"
+            >
+              {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            </button>
+          </div>
+
+          <div className="flex min-h-0 w-full flex-1 flex-col gap-0.5 overflow-y-auto overflow-x-hidden max-lg:contents">
+            {NAV_GROUPS.map((group) => (
+              <div key={group.label} className="max-lg:contents">
+                {!collapsed && (
+                  <div className="mb-1 mt-4 px-2.5 font-mono text-[9px] font-medium uppercase tracking-[0.2em] text-faint/80 max-lg:hidden">
+                    {group.label}
+                  </div>
+                )}
+                {group.items.map((n) => {
+                  const active = path.startsWith(n.href);
+                  const Icon = n.icon;
+                  return (
+                    <Link
+                      key={n.href}
+                      href={n.href}
+                      title={n.label}
+                      aria-current={active ? "page" : undefined}
+                      className={navItemClass(active, collapsed)}
+                    >
+                      {active && !collapsed && (
+                        <span className="absolute inset-y-2 left-0 w-[2.5px] rounded-full bg-accent max-lg:hidden" />
+                      )}
+                      <Icon
+                        size={16}
+                        strokeWidth={active ? 2.1 : 1.9}
+                        className="shrink-0 transition-transform duration-150 group-active:scale-90"
+                      />
+                      {!collapsed && <span className="truncate max-lg:hidden">{n.label}</span>}
+                      {n.href === "/notifications" && unread > 0 && (
+                        <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent ring-2 ring-panel max-lg:right-1 max-lg:top-1" />
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-auto hidden w-full border-t border-line/70 px-2.5 pt-3 max-lg:hidden">
+            {!collapsed && (
+              <div className="font-mono text-[8px] uppercase leading-relaxed tracking-[0.16em] text-faint/70">
+                v1.0 · self-hosted
+              </div>
+            )}
+          </div>
+        </nav>
+
+        <main className="min-w-0 flex-1 overflow-hidden max-lg:pb-[58px]">{children}</main>
+      </div>
     </div>
   );
 }

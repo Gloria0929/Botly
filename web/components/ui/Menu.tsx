@@ -59,7 +59,7 @@ export default function Menu({
       {open && (
         <div
           role="menu"
-          className={`absolute top-full z-50 mt-1 w-40 overflow-hidden rounded-xl border border-line bg-panel py-1 shadow-card ${
+          className={`absolute top-full z-50 mt-1.5 w-44 overflow-hidden rounded-lg border border-line bg-panel p-1 shadow-pop ${
             align === "right" ? "right-0" : "left-0"
           }`}
         >
@@ -73,7 +73,7 @@ export default function Menu({
                   setOpen(false);
                   it.onClick();
                 }}
-                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors ${
                   it.danger
                     ? "text-danger hover:bg-danger/10"
                     : "text-muted hover:bg-panel2 hover:text-ink"

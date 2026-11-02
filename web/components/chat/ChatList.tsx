@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, MessageSquarePlus, Plus, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import Avatar from "@/components/ui/Avatar";
 import Select from "@/components/ui/Select";
 import type { Bot, ChatSummary } from "@/lib/types";
@@ -28,12 +28,14 @@ export default function ChatList({
 
   return (
     <div className="flex h-full min-h-0 flex-col border-r border-line bg-panel">
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3">
-        <span className="text-[12.5px] font-medium text-muted">群聊</span>
-        <span className="text-[10.5px] text-faint">{chats.length}</span>
+      <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-line/80 px-3.5">
+        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-faint">Chats</span>
+        <span className="font-mono text-[9.5px] tabular-nums text-faint">
+          {chats.length}
+        </span>
         <button
           onClick={() => setOpen(true)}
-          className="ml-auto flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-panel2 hover:text-ink"
+          className="ml-auto flex h-7 w-7 items-center justify-center rounded-lg text-muted transition-colors hover:bg-panel2 hover:text-ink"
           title="新建群聊"
         >
           <Plus size={15} />
@@ -62,8 +64,10 @@ export default function ChatList({
           <button
             key={c.id}
             onClick={() => onSelect(c.id)}
-            className={`mb-0.5 w-full rounded-lg px-2.5 py-2 text-left transition-colors ${
-              activeId === c.id ? "bg-panel2" : "hover:bg-panel2/60"
+            className={`relative mb-0.5 w-full rounded-lg px-2.5 py-2 text-left transition-colors ${
+              activeId === c.id
+                ? "bg-accent/[0.10] ring-1 ring-inset ring-accent/20"
+                : "hover:bg-panel2/70"
             }`}
           >
             <div className="flex items-center gap-2">
@@ -138,7 +142,7 @@ function NewChatDialog({
       });
       onCreated(c.id);
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setLoading(false);
     }
@@ -146,8 +150,8 @@ function NewChatDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-line bg-panel shadow-card">
-        <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+      <div className="w-full max-w-md rounded-xl border border-line bg-panel shadow-pop">
+        <div className="flex items-center gap-2 border-b border-line/80 px-5 py-3.5">
           <MessageSquarePlus size={15} className="text-accent" />
           <span className="text-[13px] font-medium">新建群聊</span>
           <button onClick={onClose} className="ml-auto p-1 text-faint hover:text-ink">
@@ -155,7 +159,7 @@ function NewChatDialog({
           </button>
         </div>
 
-        <div className="space-y-4 p-4">
+        <div className="space-y-4 p-5">
           <div>
             <label className="label">群聊名称</label>
             <input

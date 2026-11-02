@@ -30,7 +30,7 @@ _DB_LOGGER = re.compile(r"^sqlalchemy(\.|$)")
 # 行首格式：2026-10-29 18:40:00 LEVEL [module] ...（与 logging_setup 的 FILE_FMT 对应）
 _LINE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
-    r"(?P<level>[A-Z]+)\s+pid=\d+ \[(?P<module>[^\]]+)\] "
+    r"(?P<level>[A-Z]+)\s+pid=(?P<pid>\d+) \[(?P<module>[^\]]+)\] "
     r"req=(?P<request_id>\S+) run=(?P<run_id>\S+) task=(?P<task_id>\S+) (?P<message>.*)$"
 )
 
@@ -81,34 +81,54 @@ def list_logs(
     matched: list[dict] = []
     hidden_sql = 0
     for path in reversed(_log_files()):
+        # 反向扫描时，堆栈/多行消息的续行出现在父行之前，先攒着，
+        # 等匹配到父行再拼回去——否则前端看到的报错只有第一行。
+        pending: list[str] = []
         for raw in reversed(_read_lines(path)):
             m = _LINE.match(raw)
             if not m:
-                # 多行堆栈 / SQL 的续行：如果上一条命中过滤，本行也属于它；这里简单跳过
+                if raw.strip():
+                    pending.append(raw)
                 continue
             if _DB_LOGGER.match(m["module"]):
                 hidden_sql += 1
+                pending.clear()
                 continue
             rank = level_rank.get(m["level"], 0)
             if min_rank and rank < min_rank:
+                pending.clear()
                 continue
             if module and m["module"] != module:
+                pending.clear()
                 continue
             if request_id and m["request_id"] != request_id:
+                pending.clear()
                 continue
             if run_id and m["run_id"] != run_id:
+                pending.clear()
                 continue
-            if needle and needle not in raw.lower():
+
+            message = m["message"]
+            if pending:
+                message += "\n" + "\n".join(reversed(pending))
+            pending.clear()
+
+            haystack = (
+                f'{m["ts"]} {m["level"]} pid={m["pid"]} [{m["module"]}] '
+                f'req={m["request_id"]} run={m["run_id"]} task={m["task_id"]} {message}'
+            )
+            if needle and needle not in haystack.lower():
                 continue
             matched.append(
                 {
                     "time": m["ts"],
                     "level": m["level"],
                     "module": m["module"],
+                    "pid": m["pid"],
                     "request_id": m["request_id"],
                     "run_id": m["run_id"],
                     "task_id": m["task_id"],
-                    "message": m["message"],
+                    "message": message,
                 }
             )
             if len(matched) >= offset + limit:

@@ -8,16 +8,17 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import ipaddress
 import json
 import re
 import socket
 from dataclasses import dataclass
 from typing import Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.sandbox import files as sandbox
 from app.core.config import (
@@ -29,7 +30,7 @@ from app.core.config import (
     WEB_READ_TRUNCATE,
 )
 from app.core.events import emit
-from app.core.models import FileRec
+from app.core.models import FileRec, Memory
 
 # 工具结果来自外部（网页、文件），按需求 8.4 明确标注为不可信数据，
 # 避免网页里的提示词被模型当成用户指令执行。
@@ -80,59 +81,174 @@ def register(tool: Tool) -> Tool:
 # --------------------------------------------------------------------------- #
 # 网页搜索
 # --------------------------------------------------------------------------- #
+# 搜索有两条路径：
+#   1) 设置页配置了搜索 Key（Tavily）—— 优先走它，结果稳定、带摘要；
+#   2) 没配 Key（或 Tavily 挂了）—— 自动回退 DuckDuckGo 的免密钥 HTML 接口。
+# 回退对用户是透明的，但结果末尾会注明来源，避免误以为是付费服务的结果。
+_DDG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+# 依次尝试：html 端点 POST → html 端点 GET → lite 端点 POST。
+# 只用一个端点时，DDG 偶发返回 202 反爬页就会整次搜索失败。
+_DDG_ENDPOINTS = (
+    ("https://html.duckduckgo.com/html/", "post"),
+    ("https://html.duckduckgo.com/html/", "get"),
+    ("https://lite.duckduckgo.com/lite/", "post"),
+)
+_ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.S | re.I)
+_HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
+# 摘要：html 端点用 result__snippet（a 或 div），lite 端点用 result-snippet（td）
+_SNIPPET_RE = re.compile(r'class="(?:result__snippet|result-snippet)"[^>]*>(.*?)</', re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _ddg_target(href: str) -> str | None:
+    """把 DDG 的结果链接还原成真实网址。
+
+    html 端点返回的是 `//duckduckgo.com/l/?uddg=<编码后的真实地址>&rut=...`
+    这样的跳转链接，直接给模型会让 web_read 去读 DDG 的跳转页。
+    """
+    href = html.unescape(href).strip()
+    if href.startswith("//"):
+        href = "https:" + href
+    if "duckduckgo.com/l/" in href:
+        target = parse_qs(urlparse(href).query).get("uddg")
+        return target[0] if target else None
+    return href if href.startswith("http") else None
+
+
+def _ddg_snippet(page: str, start: int) -> str:
+    """取当前结果块里的摘要；摘要总在标题链接之后不远处。"""
+    m = _SNIPPET_RE.search(page, start, start + 4000)
+    if not m:
+        return ""
+    text = html.unescape(_TAG_RE.sub("", m.group(1)))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _ddg_results(page: str, max_results: int) -> list[tuple[str, str, str]]:
+    """从 DDG 结果页里提取 (真实链接, 标题, 摘要)。"""
+    items: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    loose: list[tuple[str, str, str]] = []
+    for m in _ANCHOR_RE.finditer(page):
+        attrs, inner = m.group(1), m.group(2)
+        href = _HREF_RE.search(attrs)
+        if not href:
+            continue
+        url = _ddg_target(href.group(1))
+        title = html.unescape(_TAG_RE.sub("", inner)).strip()
+        if not url or not title or url in seen:
+            continue
+        snippet = _ddg_snippet(page, m.end())
+        # 结果标题链接带 result__a（html）/ result-link（lite）；
+        # 其余带 uddg 的链接先收着，主选择器没命中时兜底。
+        if "result__a" in attrs.lower() or "result-link" in attrs.lower():
+            seen.add(url)
+            items.append((url, title, snippet))
+        elif "uddg=" in attrs:
+            loose.append((url, title, snippet))
+        if len(items) >= max_results:
+            return items
+    for url, title, snippet in loose:
+        if len(items) >= max_results:
+            break
+        if url not in seen:
+            seen.add(url)
+            items.append((url, title, snippet))
+    return items
+
+
+async def _ddg_search(query: str, max_results: int) -> tuple[list[tuple[str, str, str]], str]:
+    """免密钥搜索；返回 (结果, 最后一次错误)。全部端点失败时结果为 []。"""
+    last_err = "DuckDuckGo 未返回可解析的结果"
+    async with httpx.AsyncClient(
+        timeout=15, follow_redirects=True, headers=_DDG_HEADERS
+    ) as client:
+        for url, method in _DDG_ENDPOINTS:
+            try:
+                if method == "post":
+                    r = await client.post(url, data={"q": query})
+                else:
+                    r = await client.get(url, params={"q": query})
+                if r.status_code >= 400:
+                    last_err = f"DuckDuckGo HTTP {r.status_code}"
+                    continue
+                items = _ddg_results(r.text, max_results)
+                if items:
+                    return items, ""
+                # 202/空页通常是反爬挑战页，换下一个端点再试
+                last_err = "DuckDuckGo 没有返回可解析的结果"
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"DuckDuckGo 请求失败：{exc}"
+    return [], last_err
+
+
+async def _tavily_search(key: str, query: str, max_results: int) -> list[str]:
+    """配置了 Key 时的主路径；失败直接抛异常，由调用方回退。"""
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": key,
+                "query": query,
+                "max_results": max_results,
+                "search_depth": "basic",
+                "include_answer": True,
+            },
+        )
+    if r.status_code >= 400:
+        raise ToolError(f"HTTP {r.status_code} {r.text[:200]}")
+    data = r.json()
+    lines = []
+    if data.get("answer"):
+        lines.append(f"摘要：{data['answer']}")
+    for i, item in enumerate(data.get("results") or [], 1):
+        lines.append(
+            f"{i}. {item.get('title')}\n   {item.get('url')}\n   {(item.get('content') or '')[:300]}"
+        )
+    return lines
+
+
 async def _web_search(ctx, query: str, max_results: int = 5) -> str:
-    key = ctx.search_key
+    query = (query or "").strip()
+    if not query:
+        return "搜索失败：查询内容为空"
+    try:
+        max_results = max(1, min(int(max_results or 5), 10))
+    except (TypeError, ValueError):
+        max_results = 5
+
+    key = getattr(ctx, "search_key", None)
+    note = ""
     if key:
         try:
-            async with httpx.AsyncClient(timeout=25) as client:
-                r = await client.post(
-                    "https://api.tavily.com/search",
-                    json={
-                        "api_key": key,
-                        "query": query,
-                        "max_results": max_results,
-                        "search_depth": "basic",
-                        "include_answer": True,
-                    },
-                )
-            if r.status_code >= 400:
-                return f"搜索失败：HTTP {r.status_code} {r.text[:200]}"
-            data = r.json()
-            lines = []
-            if data.get("answer"):
-                lines.append(f"摘要：{data['answer']}")
-            for i, item in enumerate(data.get("results") or [], 1):
-                lines.append(
-                    f"{i}. {item.get('title')}\n   {item.get('url')}\n   {(item.get('content') or '')[:300]}"
-                )
-            return UNTRUSTED_PREFIX + ("\n".join(lines) or "没有找到结果")
+            lines = await _tavily_search(key, query, max_results)
+            if lines:
+                return UNTRUSTED_PREFIX + "\n".join(lines)
+            note = "Tavily 没有返回结果，已自动回退 DuckDuckGo"
         except Exception as exc:  # noqa: BLE001
-            return f"搜索失败：{exc}"
+            note = f"Tavily 调用失败：{exc}；已自动回退 DuckDuckGo"
 
-    # 未配置 Key 时回退到 DuckDuckGo HTML（无需 Key，可能不可用）
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            r = await client.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 Botly/1.0"},
-            )
-        if r.status_code >= 400:
-            return f"搜索失败：HTTP {r.status_code}。可在设置页配置搜索服务 API Key。"
-        items = re.findall(
-            r'<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.*?)</a>',
-            r.text,
-            re.S,
-        )
-        if not items:
-            return "没有找到结果（建议在设置页配置搜索服务 API Key 以获得稳定结果）"
-        out = []
-        for i, (url, title) in enumerate(items[:max_results], 1):
-            title = re.sub(r"<[^>]+>", "", title).strip()
-            out.append(f"{i}. {title}\n   {url}")
-        return UNTRUSTED_PREFIX + "\n".join(out)
-    except Exception as exc:  # noqa: BLE001
-        return f"搜索失败：{exc}。可在设置页配置搜索服务 API Key。"
+    items, err = await _ddg_search(query, max_results)
+    if not items:
+        hint = "" if key else "可在设置页配置搜索服务 API Key 以获得稳定结果。"
+        previous = f"{note}；" if note else ""
+        return f"搜索失败：{previous}{err}。{hint}"
+    lines = []
+    for i, (url, title, snippet) in enumerate(items, 1):
+        line = f"{i}. {title}\n   {url}"
+        if snippet:
+            line += f"\n   {snippet[:200]}"
+        lines.append(line)
+    body = "\n".join(lines)
+    body += f"\n\n（{note}）" if note else "\n\n（未配置搜索 API Key，本次使用 DuckDuckGo 公共搜索）"
+    return UNTRUSTED_PREFIX + body
 
 
 # --------------------------------------------------------------------------- #
@@ -333,7 +449,7 @@ async def _file_delete(ctx, path: str) -> str:
 register(
     Tool(
         name="web_search",
-        description="搜索网页，返回标题、链接与摘要。用于获取实时信息。",
+        description="搜索网页，返回标题、链接与摘要。用于获取实时信息。未配置搜索 Key 时自动使用 DuckDuckGo。",
         parameters={
             "type": "object",
             "properties": {
@@ -568,7 +684,7 @@ DELEGATE_TOOL = Tool(
     name="delegate",
     description=(
         "把一项子任务派给群聊里的某个 Bot。被派 Bot 会在独立子线程里执行并把结果回给你。"
-        "检索、编程、写作、分析、审校等执行工作优先派给对应成员；只有一项工作也应派任务，无需先出计划。"
+        "检索、编程、写作、分析、终审等执行工作优先派给对应成员；只有一项工作也应派任务，无需先出计划。"
         "指令要具体，包含目标、范围和期望产出。"
     ),
     parameters={
@@ -641,6 +757,90 @@ ASK_TOOL = Tool(
     kind="control",
 )
 
+# 每次执行允许 Bot 自主保存的私有记忆条数上限（防刷屏/防注入污染）
+MEMORY_SAVE_LIMIT_PER_RUN = 3
+_MEMORY_CONTENT_MAX = 500
+
+
+async def _memory_save(ctx, content: str, title: str = "") -> str:
+    """MEM-03 修订：Bot 可以把长期有用的信息自主写进自己的私有记忆。
+
+    边界：只能写 scope=bot（本人私有记忆），共享记忆仍由用户在记忆页维护；
+    每次执行最多 3 条、内容去重，避免执行噪音或提示词注入刷爆记忆。
+    """
+    content = (content or "").strip()
+    if len(content) < 10:
+        return "保存失败：内容太短（至少 10 字）。请写具体、可长期使用的事实或约定。"
+    if len(content) > _MEMORY_CONTENT_MAX:
+        content = content[:_MEMORY_CONTENT_MAX]
+    title = (title or "").strip()[:60]
+    if not ctx.bot:
+        return "保存失败：当前执行没有绑定 Bot，无法定位私有记忆。"
+
+    used = (
+        ctx.db.scalar(
+            select(func.count(Memory.id)).where(
+                Memory.run_id == ctx.run.id, Memory.source == "bot"
+            )
+        )
+        or 0
+    )
+    if used >= MEMORY_SAVE_LIMIT_PER_RUN:
+        return (
+            f"保存失败：本次执行最多自动保存 {MEMORY_SAVE_LIMIT_PER_RUN} 条记忆，"
+            "请只保留最重要的信息。"
+        )
+    dup = ctx.db.scalar(
+        select(Memory).where(
+            Memory.user_id == ctx.user_id,
+            Memory.scope == "bot",
+            Memory.bot_id == ctx.bot.id,
+            Memory.content == content,
+        )
+    )
+    if dup:
+        return "这条内容已经在你的私有记忆里，无需重复保存。"
+
+    mem = Memory(
+        user_id=ctx.user_id,
+        scope="bot",
+        bot_id=ctx.bot.id,
+        title=title or content[:30],
+        content=content,
+        source="bot",
+        run_id=ctx.run.id,
+    )
+    ctx.db.add(mem)
+    ctx.db.flush()
+    return f"已保存到你的私有记忆（本次第 {used + 1} 条）：{mem.title}"
+
+
+register(
+    Tool(
+        name="memory_save",
+        description=(
+            "把值得长期记住的信息存进你自己的私有记忆（只注入给你，每次执行最多 3 条）。"
+            "适合记录用户的偏好、约定、项目背景等稳定事实；不要保存网页内容、工具返回"
+            "或一次性任务细节。共享记忆由用户在记忆页维护，本工具无法修改。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "要记住的内容，10–500 字，写具体、可长期使用的事实",
+                },
+                "title": {"type": "string", "description": "可选短标题，默认取内容开头"},
+            },
+            "required": ["content"],
+        },
+        level="L1",
+        kind="builtin",
+        executor=_memory_save,
+    )
+)
+MEMORY_TOOL = BUILTIN_TOOLS["memory_save"]
+
 
 def tools_for_bot(
     bot_tools: list[str],
@@ -668,6 +868,8 @@ def tools_for_bot(
     elif can_delegate:
         out.append(DELEGATE_TOOL)
     out.append(ASK_TOOL)
+    # MEM-03 修订：所有 Bot 都可以往自己的私有记忆里存信息（有去重与条数上限）
+    out.append(MEMORY_TOOL)
     return out
 
 

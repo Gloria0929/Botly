@@ -210,7 +210,7 @@ def _mock_decide(messages: list[dict], tools: list[dict], ctx: dict) -> tuple[st
 
     if role == "supervisor":
         if "propose_plan" in names and _called(messages, "propose_plan") == 0 and not ctx.get("plan_approved"):
-            targets = members or ["研究员", "写手"]
+            targets = members or ["研究员", "架构师"]
             steps = [
                 {
                     "title": f"资料收集：{q}",
@@ -219,14 +219,14 @@ def _mock_decide(messages: list[dict], tools: list[dict], ctx: dict) -> tuple[st
                 },
                 {
                     "title": "撰写成稿",
-                    "bot": targets[1] if len(targets) > 1 else (targets[0] if targets else "写手"),
+                    "bot": targets[1] if len(targets) > 1 else (targets[0] if targets else "架构师"),
                     "expected": "一份可直接交付的完整文档",
                 },
             ]
             return "propose_plan", {"steps": steps}
         if "delegate" in names:
             n = _called(messages, "delegate")
-            targets = members or ["研究员", "写手"]
+            targets = members or ["研究员", "架构师"]
             if n < len(targets):
                 bot = targets[n]
                 if n == 0:
@@ -242,7 +242,7 @@ def _mock_decide(messages: list[dict], tools: list[dict], ctx: dict) -> tuple[st
     if role == "worker":
         writer = "写" in (ctx.get("bot_name") or "")
         if writer:
-            # 写手：先读资料，再直接成稿，不重复写 research.md
+            # 架构师：先读资料，再直接成稿，不重复写 research.md
             if "file_read" in names and _called(messages, "file_read") == 0:
                 return "file_read", {"path": "research.md"}
             if "file_write" in names and _called(messages, "file_write") == 0:
@@ -312,7 +312,7 @@ async def _stream_mock(
     if role == "supervisor":
         text = (
             "已完成本轮拆解与汇总。\n\n"
-            "研究员产出了资料要点（research.md），写手据此完成了成稿（report.md）。"
+            "研究员产出了资料要点（research.md），架构师据此完成了成稿（report.md）。"
             "两份文件都在右侧文件面板，可直接预览或下载。\n\n"
             "结论：该方向已进入工程化竞争阶段，建议先验证接入成本，再评估长期总拥有成本。"
         )

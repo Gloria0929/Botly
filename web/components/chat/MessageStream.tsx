@@ -153,7 +153,7 @@ export default function MessageStream({
 
   return (
     <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-      <div className="mx-auto flex max-w-[1100px] flex-col gap-3">
+      <div className="flex w-full flex-col gap-3">
         {hasEarlier && onLoadEarlier && <button className="btn-ghost mx-auto text-[11.5px]" disabled={loadingEarlier} onClick={async () => {
           const el = scroller.current;
           if (el) prepending.current = { height: el.scrollHeight, top: el.scrollTop };
@@ -274,10 +274,10 @@ function MessageItem({
     const interjection = msg.meta?.kind === "interjection";
     return (
       <div className="group flex justify-end gap-2.5">
-        <div className="max-w-[85%]">
-          <div className="rounded-2xl rounded-br-md bg-accent px-3.5 py-2 text-[13.5px] leading-relaxed text-accentink">
+        <div className="max-w-[92%]">
+          <div className="rounded-lg rounded-br-sm border border-line bg-panel3 px-3.5 py-2 text-[13.5px] leading-relaxed text-ink">
             {interjection && (
-              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-accentink/65">
+              <div className="mb-1 text-[10px] font-medium font-mono uppercase tracking-wide text-faint">
                 插话 · 执行中补充
               </div>
             )}
@@ -325,8 +325,8 @@ function MessageItem({
       <Avatar value={botAvatar} size={32} alt={botName} className="mt-0.5" />
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-2">
-          <span className="text-[12.5px] font-medium">{botName}</span>
-          {botRole && <span className="text-[10.5px] text-faint">{botRole}</span>}
+          <span className="text-[12.5px] font-semibold">{botName}</span>
+          {botRole && <span className="font-mono text-[9.5px] uppercase tracking-wide text-faint">{botRole}</span>}
           {msg.meta?.parallel && (
             <span
               className="chip px-1 py-0 text-[10px] text-accent"
@@ -335,7 +335,7 @@ function MessageItem({
               并行 · 第 {msg.meta.batch} 批
             </span>
           )}
-          <span className="text-[10.5px] text-faint">{clock(msg.created_at)}</span>
+          <span className="font-mono text-[9.5px] text-faint">{clock(msg.created_at)}</span>
           {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
         </div>
         {streaming && !hasContent ? (
@@ -346,7 +346,7 @@ function MessageItem({
           </div>
         ) : hasContent ? (
           <div className="flex items-start gap-1.5">
-            <div className="max-w-[85%] rounded-2xl rounded-tl-md border border-line bg-panel px-3.5 py-2.5">
+            <div className="max-w-[92%] rounded-lg rounded-tl-sm border border-line bg-panel px-3.5 py-2.5">
               <Markdown text={msg.content} mention={mentionName} />
               {/* 输出中：气泡尾部用三点跳动，不再用竖线光标 */}
               {streaming && <TypingDots className="mt-1.5" />}
@@ -365,7 +365,7 @@ function MessageItem({
           </div>
         ) : null}
         {/* 任务概要与气泡使用同一个最大宽度，整条消息看起来是一列 */}
-        <div className="max-w-[85%]">
+        <div className="max-w-[92%]">
           {/* 子 agent 的任务详情：概要随 SSE 实时更新，可原地展开看完整信息 */}
           {(isDelegation || isSubtask) && (
             <TaskSummaryLine live={live} fallback={summaryFallback} onOpen={() => handlers.onOpenTask(msg.meta?.task_id, msg.meta?.thread_id)} />

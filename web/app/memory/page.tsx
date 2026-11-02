@@ -3,9 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Brain, Check, Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/ui/PageHeader";
 import Avatar from "@/components/ui/Avatar";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import type { Bot, Memory, MemoryCandidate } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
@@ -39,13 +40,17 @@ export default function MemoryPage() {
       load();
       api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
   const rejectCandidate = async (id: string) => {
-    await api.rejectMemoryCandidate(id).catch(() => {});
-    setCandidates((prev) => prev.filter((c) => c.id !== id));
+    try {
+      await api.rejectMemoryCandidate(id);
+      setCandidates((prev) => prev.filter((c) => c.id !== id));
+    } catch (e: any) {
+      toastError(e, "忽略失败，请稍后重试");
+    }
   };
 
   const load = () => {
@@ -59,7 +64,7 @@ export default function MemoryPage() {
         setTotalLength(d.total_length);
         setTruncated(d.truncated);
       })
-      .catch(() => {})
+      .catch((e) => toastError(e, "记忆加载失败"))
       .finally(() => setLoading(false));
   };
   useEffect(load, [tab]);
@@ -76,9 +81,9 @@ export default function MemoryPage() {
       setDraft({ title: "", content: "" });
       toast("已添加", "ok");
       load();
-      api.memoryStats().then((d) => setStats(d.bots));
+      api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -89,7 +94,7 @@ export default function MemoryPage() {
       load();
       api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -101,9 +106,13 @@ export default function MemoryPage() {
       danger: true,
     });
     if (!ok) return;
-    await api.deleteMemory(id).catch(() => {});
-    load();
-    api.memoryStats().then((d) => setStats(d.bots));
+    try {
+      await api.deleteMemory(id);
+      load();
+      api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
+    } catch (e: any) {
+      toastError(e, "删除失败，请稍后重试");
+    }
   };
 
   const over = truncated;
@@ -111,14 +120,14 @@ export default function MemoryPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-6 py-8">
-          <h1 className="text-[20px] font-semibold tracking-tight">记忆</h1>
-          <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
-            共享记忆对所有 Bot 可见；私有记忆只注入到对应 Bot。执行结束后会自动提取记忆候选，
-            确认后才写入；Bot 不会直接改记忆。
-          </p>
+        <div className="page">
+          <PageHeader
+            eyebrow="CONTEXT / MEMORY"
+            title="记忆"
+            description="共享记忆对所有 Bot 可见；私有记忆只注入到对应 Bot。Bot 执行中可以用 memory_save 把重要信息存进自己的私有记忆（每次执行最多 3 条）；执行结束后还会自动提取记忆候选，确认后才写入；共享记忆由你维护。"
+          />
 
-          <div className="mt-5 flex flex-wrap gap-1.5">
+          <div className="segmented mt-5 flex-wrap">
             <TabBtn active={tab === "shared"} onClick={() => setTab("shared")}>
               共享记忆
             </TabBtn>
@@ -129,14 +138,14 @@ export default function MemoryPage() {
             ))}
           </div>
 
-          <div className="mt-4 flex items-center gap-2 rounded-lg border border-line bg-panel px-3 py-2">
-            <Brain size={13} className="text-accent" />
+          <div className="card mt-4 flex items-center gap-2.5 px-3.5 py-2.5">
+            <Brain size={14} className="text-accent" />
             <span className="text-[11.5px] text-muted">
               当前注入长度 {injected.toLocaleString()} / {limit.toLocaleString()} 字
             </span>
-            <div className="ml-auto h-1.5 w-32 overflow-hidden rounded-full bg-panel2">
+            <div className="ml-auto h-1.5 w-32 overflow-hidden rounded-full bg-panel3">
               <div
-                className={`h-full ${over ? "bg-danger" : "bg-accent"}`}
+                className={`h-full rounded-full transition-all ${over ? "bg-danger" : "bg-accent"}`}
                 style={{ width: `${Math.min(100, (injected / limit) * 100)}%` }}
               />
             </div>
@@ -158,10 +167,17 @@ export default function MemoryPage() {
               </div>
               <div className="space-y-2">
                 {candidates.map((c) => (
-                  <div key={c.id} className="rounded-xl border border-accent/25 bg-accent/[0.04] p-3.5">
+                  <div key={c.id} className="rounded-lg border border-accent/25 bg-accent/[0.04] p-3.5">
                     <div className="flex flex-wrap items-start gap-3">
                       <div className="min-w-0 flex-1">
-                        {c.title && <div className="text-[12.5px] font-medium">{c.title}</div>}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {c.title && <div className="text-[12.5px] font-medium">{c.title}</div>}
+                          <span className="chip border-line text-faint">
+                            {c.scope === "bot"
+                              ? `${bots.find((b) => b.id === c.bot_id)?.name || "Bot"} 的私有记忆`
+                              : "共享记忆"}
+                          </span>
+                        </div>
                         <div className="mt-0.5 whitespace-pre-wrap text-[12.5px] leading-relaxed text-muted">
                           {c.content}
                         </div>
@@ -188,22 +204,32 @@ export default function MemoryPage() {
           )}
 
           <div className="card mt-4 p-3.5">
-            <div className="grid gap-2 sm:grid-cols-[160px_1fr]">
+            <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted">
+              <Sparkles size={13} className="text-accent" /> 添加一条记忆
+            </div>
+            <div className="mt-2.5 grid gap-2 sm:grid-cols-[180px_1fr]">
               <input
                 className="field"
                 placeholder="标题（可选）"
                 value={draft.title}
                 onChange={(e) => setDraft({ ...draft, title: e.target.value })}
               />
-              <input
-                className="field"
+              <textarea
+                rows={2}
+                className="field resize-none"
                 placeholder="例如：我偏好简洁的中文表达，不要使用感叹号。"
                 value={draft.content}
                 onChange={(e) => setDraft({ ...draft, content: e.target.value })}
-                onKeyDown={(e) => e.key === "Enter" && add()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    add();
+                  }
+                }}
               />
             </div>
-            <div className="mt-2 flex justify-end">
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span className="text-[10.5px] text-faint">Enter 添加 · Shift+Enter 换行</span>
               <button className="btn-primary" onClick={add}>
                 <Plus size={13} /> 添加
               </button>
@@ -213,10 +239,18 @@ export default function MemoryPage() {
           <div className="mt-4 space-y-2">
             {loading && <Loader2 size={15} className="animate-spin text-faint" />}
             {!loading && !items.length && (
-              <div className="py-10 text-center text-[12px] text-faint">还没有记忆条目</div>
+              <div className="empty-state py-10">
+                <div className="empty-icon">
+                  <Brain size={19} />
+                </div>
+                <div className="mt-3 text-[12.5px] font-medium">还没有记忆条目</div>
+                <p className="mt-1 text-[11.5px] text-muted">
+                  写下偏好、背景或约束，之后每次执行都会带上这些内容。
+                </p>
+              </div>
             )}
             {items.map((m) => (
-              <div key={m.id} className="card p-3.5">
+              <div key={m.id} className="card card-hover p-3.5">
                 {editing === m.id ? (
                   <div className="space-y-2">
                     <input
@@ -241,7 +275,12 @@ export default function MemoryPage() {
                 ) : (
                   <div className="flex items-start gap-3">
                     <div className="min-w-0 flex-1">
-                      {m.title && <div className="text-[12.5px] font-medium">{m.title}</div>}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {m.title && <div className="text-[12.5px] font-medium">{m.title}</div>}
+                        {m.source === "bot" && (
+                          <span className="chip border-accent/40 text-accent">Bot 自主保存</span>
+                        )}
+                      </div>
                       <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-muted">
                         {m.content}
                       </div>
@@ -266,14 +305,17 @@ export default function MemoryPage() {
 
           {stats.length > 0 && (
             <div className="mt-8">
-              <h2 className="text-[13px] font-medium text-muted">各 Bot 注入长度</h2>
-              <div className="mt-2 divide-y divide-line rounded-lg border border-line">
+              <div className="mb-2 flex items-end justify-between">
+                <h2 className="section-title">各 Bot 注入长度</h2>
+                <span className="text-[10.5px] text-faint">共享 + 私有记忆</span>
+              </div>
+              <div className="card divide-y divide-line/70 overflow-hidden">
                 {stats.map((s) => (
-                  <div key={s.bot_id} className="flex items-center gap-3 px-3 py-2 text-[11.5px]">
+                  <div key={s.bot_id} className="flex items-center gap-3 px-3.5 py-2.5 text-[11.5px]">
                     <span className="w-20 truncate">{s.bot_name}</span>
                     <span className="text-faint">共享 {s.shared_length}</span>
                     <span className="text-faint">私有 {s.private_length}</span>
-                    <span className={`ml-auto ${s.over_limit ? "text-danger" : "text-muted"}`}>
+                    <span className={`ml-auto tabular-nums ${s.over_limit ? "text-danger" : "text-muted"}`}>
                       {s.injected_length ?? s.total} / {limit}{s.over_limit ? " · 已截取" : ""}
                     </span>
                   </div>
@@ -299,11 +341,7 @@ function TabBtn({
   return (
     <button
       onClick={onClick}
-      className={`rounded-lg border px-2.5 py-1.5 text-[12px] transition-colors ${
-        active
-          ? "border-accent/50 bg-accent/10 text-accent"
-          : "border-line text-muted hover:text-ink"
-      }`}
+      className={`segmented-item ${active ? "segmented-item-active" : ""}`}
     >
       {children}
     </button>

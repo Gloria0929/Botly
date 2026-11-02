@@ -5,7 +5,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { GithubMark, GoogleMark } from "@/components/ui/BrandIcons";
-import { api } from "@/lib/api";
+import AuthMarketing from "@/components/AuthMarketing";
+import { LogoMark } from "@/components/ui/Logo";
+import { api, errText } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -35,143 +37,132 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await api.login(email, password);
+      // 中间件把未登录的目标页带在 ?next= 上，登录后原路回去
+      const next = new URLSearchParams(window.location.search).get("next");
+      if (next && next.startsWith("/") && !next.startsWith("//")) {
+        router.push(next);
+        return;
+      }
       // ACC-06：一个模型接入都没有时先去设置页引导，别让用户到群聊才撞到 409
       const providers = await api.providers().catch(() => null);
       router.push(providers && providers.length === 0 ? "/settings?welcome=1" : "/chat");
     } catch (e: any) {
-      setErr(e.message || "登录失败");
+      setErr(errText(e, "登录失败"));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
-      <div className="relative hidden flex-col justify-between overflow-hidden border-r border-white/10 bg-[#0b0e13] p-12 text-white lg:flex">
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{
-            background:
-              "radial-gradient(680px 420px at 10% 6%, rgba(124,140,255,.28), transparent 62%), radial-gradient(520px 380px at 90% 94%, rgba(52,211,153,.16), transparent 60%)",
-          }}
-        />
-        <div className="relative">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-[14px] font-bold text-accentink">
-              B
-            </div>
-            <span className="text-[15px] font-semibold tracking-tight text-white">Botly</span>
-          </div>
-          <h1 className="mt-16 max-w-md text-[34px] font-semibold leading-[1.25] tracking-tight text-white">
+    <div className="grid min-h-screen lg:grid-cols-[1.05fr_1fr]">
+      <AuthMarketing
+        title={
+          <>
             把多步骤工作
             <br />
             交给一支 AI 团队
-          </h1>
-          <p className="mt-4 max-w-sm text-[12.5px] leading-relaxed text-white/55">
-            总指挥拆解任务，子 Bot 在各自线程里执行，过程在同一个群聊里可见。
-            高风险动作会停下来等你审批。
-          </p>
-        </div>
-        <div className="relative grid grid-cols-3 gap-3">
-          {[
-            { k: "派任务", v: "总指挥拆解并调度" },
-            { k: "可见", v: "每个子任务独立线程" },
-            { k: "可控", v: "审批、限额与停止" },
-          ].map((i) => (
-            <div key={i.k} className="rounded-xl border border-white/10 bg-white/[0.04] p-3.5">
-              <div className="text-[12px] font-medium text-white/90">{i.k}</div>
-              <div className="mt-1 text-[11.5px] leading-relaxed text-white/40">{i.v}</div>
-            </div>
-          ))}
-        </div>
-      </div>
+          </>
+        }
+        description="总指挥拆解任务，子 Bot 在各自线程里执行，过程在同一个群聊里可见。高风险动作会停下来等你审批。"
+      />
 
-      <div className="flex items-center justify-center px-6 py-12">
-        <form onSubmit={submit} className="w-full max-w-[340px]">
-          <h2 className="text-[22px] font-semibold tracking-tight">登录</h2>
-          <p className="mt-1.5 text-[13px] text-muted">使用邮箱与密码进入工作台</p>
-
-          <div className="mt-7 space-y-4">
-            <div>
-              <label className="label">邮箱</label>
-              <input
-                className="field"
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                autoComplete="email"
-              />
-            </div>
-            <div>
-              <label className="label">密码</label>
-              <input
-                className="field"
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="至少 8 位"
-                autoComplete="current-password"
-              />
-              <Link href="/forgot-password" className="mt-1.5 inline-block text-[12px] text-accent hover:underline">
-                忘记密码？
-              </Link>
-            </div>
+      <div className="relative flex items-center justify-center px-5 py-12">
+        <form onSubmit={submit} className="w-full max-w-[372px] animate-rise">
+          <div className="mb-7 flex items-center gap-2.5 lg:hidden">
+            <LogoMark size={30} />
+            <span className="font-mono text-[14px] font-semibold uppercase tracking-[0.08em]">Botly</span>
           </div>
 
-          {resetDone && !err && (
-            <div className="mt-4 rounded-lg border border-ok/35 bg-ok/10 px-3 py-2 text-[12.5px] text-ok">
-              密码已重置，请用新密码登录。
+          <div className="card p-6 md:p-7">
+            <div className="page-eyebrow">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+              AUTH / SIGN IN
             </div>
-          )}
+            <h2 className="text-[26px] font-bold tracking-[-0.03em]">登录</h2>
+            <p className="mt-1.5 text-[12.5px] text-muted">使用邮箱与密码进入工作台</p>
 
-          {(oauthError || err) && (
-            <div className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12.5px] text-danger">
-              {oauthError || err}
+            <div className="mt-6 space-y-4">
+              <div>
+                <label className="label">邮箱</label>
+                <input
+                  className="field"
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                />
+              </div>
+              <div>
+                <label className="label">密码</label>
+                <input
+                  className="field"
+                  type="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="至少 8 位"
+                  autoComplete="current-password"
+                />
+                <Link href="/forgot-password" className="mt-1.5 inline-block text-[11.5px] text-accent hover:underline">
+                  忘记密码？
+                </Link>
+              </div>
             </div>
-          )}
 
-          <button className="btn-primary mt-6 w-full py-2.5" disabled={loading}>
-            {loading ? <Loader2 size={15} className="animate-spin" /> : <>登录 <ArrowRight size={15} /></>}
-          </button>
+            {resetDone && !err && (
+              <div className="mt-4 rounded-lg border border-ok/35 bg-ok/10 px-3 py-2 text-[12px] text-ok">
+                密码已重置，请用新密码登录。
+              </div>
+            )}
 
-          {(providers?.google || providers?.github) && (
-            <>
-              <div className="my-5 flex items-center gap-3 text-[11.5px] text-faint">
-                <span className="h-px flex-1 bg-line" />
-                或
-                <span className="h-px flex-1 bg-line" />
+            {(oauthError || err) && (
+              <div className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+                {oauthError || err}
               </div>
-              <div className="space-y-2">
-                {providers?.google && (
-                  <button
-                    type="button"
-                    className="btn-ghost w-full py-2.5"
-                    onClick={() => window.location.assign("/api/auth/oauth/google/start")}
-                  >
-                    <GoogleMark />
-                    使用 Google 登录
-                  </button>
-                )}
-                {providers?.github && (
-                  <button
-                    type="button"
-                    className="btn-ghost w-full py-2.5"
-                    onClick={() => window.location.assign("/api/auth/oauth/github/start")}
-                  >
-                    <GithubMark />
-                    使用 GitHub 登录
-                  </button>
-                )}
-              </div>
-            </>
-          )}
+            )}
+
+            <button className="btn-primary mt-6 w-full py-2.5" disabled={loading}>
+              {loading ? <Loader2 size={15} className="animate-spin" /> : <>登录 <ArrowRight size={15} /></>}
+            </button>
+
+            {(providers?.google || providers?.github) && (
+              <>
+                <div className="my-5 flex items-center gap-3 text-[11px] text-faint">
+                  <span className="h-px flex-1 bg-line" />
+                  或
+                  <span className="h-px flex-1 bg-line" />
+                </div>
+                <div className="space-y-2">
+                  {providers?.google && (
+                    <button
+                      type="button"
+                      className="btn-ghost w-full py-2.5"
+                      onClick={() => window.location.assign("/api/auth/oauth/google/start")}
+                    >
+                      <GoogleMark />
+                      使用 Google 登录
+                    </button>
+                  )}
+                  {providers?.github && (
+                    <button
+                      type="button"
+                      className="btn-ghost w-full py-2.5"
+                      onClick={() => window.location.assign("/api/auth/oauth/github/start")}
+                    >
+                      <GithubMark />
+                      使用 GitHub 登录
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
 
           <p className="mt-5 text-center text-[12.5px] text-muted">
             还没有账号？
-            <Link href="/register" className="ml-1 text-accent hover:underline">
+            <Link href="/register" className="ml-1 font-medium text-accent hover:underline">
               用邀请码注册
             </Link>
           </p>

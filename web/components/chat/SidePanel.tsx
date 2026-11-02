@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, errText } from "@/lib/api";
 import Avatar from "@/components/ui/Avatar";
 import type { Bot, ChatFile, Message, Task } from "@/lib/types";
 import { bytes, clock, num, timeAgo } from "@/lib/fmt";
@@ -335,7 +335,7 @@ function TaskThread({ chatId, task, onBack }: {
           if (p.task_id === task.id) setDetail((t) => ({ ...t, ...p, id: t.id }));
         });
       })
-      .catch((e) => alive && setError(e.message))
+      .catch((e) => alive && setError(errText(e, "任务详情加载失败")))
       .finally(() => alive && setLoading(false));
     return () => { alive = false; es?.close(); };
   }, [chatId, task.id, task.thread_id, retry]);
@@ -347,7 +347,7 @@ function TaskThread({ chatId, task, onBack }: {
       const page = await api.messages(chatId, { thread_id: task.thread_id, before: msgs[0].seq, limit: 200 });
       setMsgs((prev) => [...page.messages.filter((m) => !prev.some((p) => p.id === m.id)), ...prev]);
       setHasMore(page.has_more);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errText(e, "加载失败，请稍后重试")); }
     finally { setLoadingMore(false); }
   };
   const results: Record<string, Message> = {};
@@ -407,7 +407,7 @@ export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => 
     api
       .fileContent(file.id)
       .then(setContent)
-      .catch((e) => setErr(e.message))
+      .catch((e) => setErr(errText(e, "无法读取文件")))
       .finally(() => setLoading(false));
   }, [file.id]);
 
@@ -418,7 +418,7 @@ export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-card ${isHtml ? "max-w-5xl" : "max-w-2xl"}`}>
+      <div className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-card ${isHtml ? "max-w-5xl" : "max-w-2xl"}`}>
         <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
           <FileText size={14} className="text-accent" />
           <span className="font-mono text-[12.5px]">{file.path}</span>

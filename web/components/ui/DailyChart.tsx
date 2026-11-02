@@ -92,7 +92,7 @@ export default function DailyChart({ days, format, unit, legend, emptyText }: Da
   const dotClass = item?.segments.find((g) => g.value > 0)?.className || "bg-faint/50";
 
   return (
-    <div className="card px-4 pb-3 pt-3.5">
+    <div className="card px-4 pb-3.5 pt-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-faint">
         <span>
           合计 <span className="tabular-nums text-muted">{format(total)}</span>
@@ -168,7 +168,7 @@ export default function DailyChart({ days, format, unit, legend, emptyText }: Da
                     className="flex w-full flex-col-reverse overflow-hidden rounded-t-[2px] transition-[height,opacity] duration-150"
                     style={{
                       height: h,
-                      opacity: t ? (on ? 1 : 0.5) : on ? 1 : 0.7,
+                      opacity: t ? (on ? 1 : 0.62) : on ? 1 : 0.7,
                     }}
                   >
                     {t === 0 && <span className="h-full w-full" style={{ background: "var(--line)" }} />}
@@ -207,7 +207,7 @@ export default function DailyChart({ days, format, unit, legend, emptyText }: Da
       </div>
 
       {item && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-panel2 px-2.5 py-1.5 text-[11px]">
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-line/60 bg-panel2/60 px-2.5 py-1.5 text-[11px]">
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
           <span className="tabular-nums text-ink">
             {item.date.slice(5)} {weekday(item.date)}

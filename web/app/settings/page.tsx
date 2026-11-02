@@ -14,13 +14,14 @@ import {
   Zap,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/ui/PageHeader";
 import Avatar from "@/components/ui/Avatar";
 import AvatarPicker from "@/components/ui/AvatarPicker";
 import { GithubMark, GoogleMark } from "@/components/ui/BrandIcons";
 import Select from "@/components/ui/Select";
 import { useConfirm } from "@/components/ui/Confirm";
 import Modal from "@/components/ui/Modal";
-import { api } from "@/lib/api";
+import { api, toastError, errText } from "@/lib/api";
 import {
   isIOS,
   pushState as getPushState,
@@ -107,7 +108,7 @@ export default function SettingsPage() {
         toast("已没有第三方登录方式，请确认邮箱密码可以登录", "info");
       }
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -130,7 +131,7 @@ export default function SettingsPage() {
         toast(`验证邮件已发送到 ${r.email}`, "ok");
       }
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setSendingVerify(false);
     }
@@ -138,8 +139,8 @@ export default function SettingsPage() {
 
   const load = () => {
     api.me().then(setMe).catch(() => {});
-    api.providers().then(setProviders).catch(() => {}).finally(() => setProvidersLoading(false));
-    api.settings().then(setSettings).catch(() => {});
+    api.providers().then(setProviders).catch((e) => toastError(e, "厂商列表加载失败")).finally(() => setProvidersLoading(false));
+    api.settings().then(setSettings).catch((e) => toastError(e, "设置加载失败"));
   };
 
   useEffect(() => {
@@ -168,7 +169,7 @@ export default function SettingsPage() {
       toast(msg, "ok");
       return true;
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
       return false;
     } finally {
       setBusy(false);
@@ -186,7 +187,7 @@ export default function SettingsPage() {
       toast("账号已删除，正在退出", "ok");
       window.location.href = "/login";
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
       setDeleting(false);
     }
   };
@@ -199,7 +200,7 @@ export default function SettingsPage() {
       setPushSt("subscribed");
       toast("已开启 Web Push，关闭页面后也能收到提醒", "ok");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
       getPushState().then(setPushSt).catch(() => {});
     } finally {
       setPushBusy(false);
@@ -213,7 +214,7 @@ export default function SettingsPage() {
       setPushSt("idle");
       toast("已关闭 Web Push", "info");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setPushBusy(false);
     }
@@ -224,7 +225,7 @@ export default function SettingsPage() {
       await api.pushTest();
       toast("测试通知已发送：页面全部关闭时才会弹系统通知", "ok");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -235,7 +236,7 @@ export default function SettingsPage() {
     try {
       await fn();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setProviderBusy(null);
     }
@@ -297,7 +298,7 @@ export default function SettingsPage() {
       setDeleteAffected(affected);
       setDeleteTarget(p);
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -315,7 +316,7 @@ export default function SettingsPage() {
       setDeleteAffected([]);
       load();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setDeleteBusy(false);
     }
@@ -345,11 +346,12 @@ export default function SettingsPage() {
   return (
     <AppShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-6 py-8">
-          <h1 className="text-[20px] font-semibold tracking-tight">设置</h1>
-          <p className="mt-1 text-[12.5px] text-muted">
-            模型费用由你自带的 Key 承担，平台不提供统一额度。
-          </p>
+        <div className="page">
+          <PageHeader
+            eyebrow="SYSTEM / SETTINGS"
+            title="设置"
+            description="模型费用由你自带的 Key 承担，平台不提供统一额度。"
+          />
 
           {/* ACC-06：未配置模型接入时的引导。配好之前发起执行会被后端拒绝，
               与其让用户在建群聊时撞到 409，不如在这里说清楚下一步做什么。 */}
@@ -583,20 +585,20 @@ export default function SettingsPage() {
           {/* 搜索 */}
           <Section
             title="网页搜索"
-            desc="配置后 Bot 才能勾选 web_search。未配置时该工具在 Bot 编辑页禁用，已在用的老 Bot 会回退到免密钥公共搜索（稳定性较差）。"
+            desc="配置 Key 后优先使用该搜索服务，结果更稳定并带摘要；未配置时自动回退到 DuckDuckGo 免密钥搜索，web_search 依然可用。"
           >
             <div className="mb-1.5 flex items-center gap-1.5 text-[11px]">
               {settings?.search_configured ? (
                 <>
                   <Check size={12} className="text-ok" />
                   <span className="text-ok">已配置</span>
-                  <span className="text-faint">· web_search 可在 Bot 里选用</span>
+                  <span className="text-faint">· web_search 使用该服务</span>
                 </>
               ) : (
                 <>
                   <AlertTriangle size={12} className="text-warn" />
                   <span className="text-warn">未配置</span>
-                  <span className="text-faint">· Bot 编辑页的 web_search 暂不可选</span>
+                  <span className="text-faint">· web_search 自动回退 DuckDuckGo</span>
                 </>
               )}
             </div>
@@ -615,7 +617,7 @@ export default function SettingsPage() {
               }}
             />
             <p className="mt-1.5 text-[10.5px] text-faint">
-              回车保存；留空并回车可清除。目前支持 Tavily。
+              回车保存；留空并回车可清除。目前支持 Tavily；未配置时自动回退 DuckDuckGo。
             </p>
           </Section>
 
@@ -795,7 +797,7 @@ export default function SettingsPage() {
                     toast("密码已更新", "ok");
                     setPwd({ current: "", next: "" });
                   } catch (e: any) {
-                    toast(e.message, "error");
+                    toastError(e);
                   }
                 }}
               >
@@ -1066,7 +1068,7 @@ function PriceDialog({
       toast("单价已保存", "ok");
       onDone();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setSaving(false);
     }
@@ -1192,11 +1194,11 @@ function ProviderEditDialog({
         api
           .refreshProvider(provider.id)
           .then((r) => toast(r.message, r.detected ? "ok" : "error"))
-          .catch((e) => toast(e.message, "error"));
+          .catch((e) => toastError(e));
       }
     } catch (e: any) {
-      setError(e.message || "保存失败，请稍后重试");
-      toast(e.message, "error");
+      setError(errText(e, "保存失败，请稍后重试"));
+      toastError(e);
     } finally {
       setSaving(false);
     }
@@ -1297,8 +1299,8 @@ function VendorDialog({
         toast(r.message, "error");
       }
     } catch (e: any) {
-      setError(e.message || "添加失败，请稍后重试");
-      toast(e.message, "error");
+      setError(errText(e, "添加失败，请稍后重试"));
+      toastError(e);
     } finally {
       setLoading(false);
     }
@@ -1424,7 +1426,7 @@ function Section({
     <section className="mt-7">
       <div className="mb-2.5 flex items-end gap-3">
         <div>
-          <h2 className="text-[13.5px] font-medium">{title}</h2>
+          <h2 className="section-title">{title}</h2>
           {desc && <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{desc}</p>}
         </div>
         <div className="ml-auto">{action}</div>

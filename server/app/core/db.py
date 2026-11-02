@@ -251,6 +251,10 @@ def _light_migrate() -> None:
         "messages": {"reasoning_content": "TEXT"},
         "bots": {"skills": "JSON", "enabled": "BOOLEAN DEFAULT TRUE"},
         "tasks": {"step_key": "VARCHAR(200)", "batch": "INTEGER DEFAULT 0"},
+        "memories": {
+            "source": "VARCHAR(20) DEFAULT 'user'",
+            "run_id": "VARCHAR(32)",
+        },
         "runs": {
             "last_turn_message_id": "VARCHAR(32)",
             "last_interjection_seq": "INTEGER DEFAULT 0",

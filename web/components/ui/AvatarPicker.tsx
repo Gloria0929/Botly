@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { ImagePlus, Loader2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import { toast } from "@/lib/ui";
 import Avatar from "./Avatar";
 import { AVATAR_PICKER_OPTIONS } from "./avatarIcons";
@@ -28,7 +28,7 @@ export default function AvatarPicker({
       const r = await api.uploadImage(f);
       onChange(r.url);
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setBusy(false);
       if (file.current) file.current.value = "";

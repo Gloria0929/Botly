@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import { Braces, Loader2, Plug, RefreshCw, Trash2 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
+import PageHeader from "@/components/ui/PageHeader";
 import Select from "@/components/ui/Select";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, toastError, errText } from "@/lib/api";
 import type { McpServer } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
@@ -44,7 +45,7 @@ export default function McpSection() {
   const confirm = useConfirm();
 
   const load = () =>
-    api.mcpServers().then(setServers).catch(() => {}).finally(() => setLoading(false));
+    api.mcpServers().then(setServers).catch((e) => toastError(e, "MCP 服务加载失败")).finally(() => setLoading(false));
   useEffect(() => {
     load();
   }, []);
@@ -111,8 +112,8 @@ export default function McpSection() {
       setSaveError(null);
       load();
     } catch (e: any) {
-      setSaveError(e.message || "保存失败，请稍后重试");
-      toast(e.message, "error");
+      setSaveError(errText(e, "保存失败，请稍后重试"));
+      toastError(e);
     } finally {
       setSaving(false);
     }
@@ -138,7 +139,7 @@ export default function McpSection() {
       );
       load();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setImportBusy(false);
     }
@@ -157,8 +158,8 @@ export default function McpSection() {
       if (r.ok) toast("检测通过", "ok");
       load();
     } catch (e: any) {
-      setTestResult({ id: s.id, ok: false, text: e.message });
-      toast(e.message, "error");
+      setTestResult({ id: s.id, ok: false, text: errText(e, "连接测试失败") });
+      toastError(e);
     } finally {
       setTesting(null);
     }
@@ -177,7 +178,7 @@ export default function McpSection() {
       toast("已删除", "ok");
       load();
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -189,38 +190,42 @@ export default function McpSection() {
   };
 
   return (
-    <section className="mt-7">
-      <div className="mb-2.5 flex items-end gap-3">
-        <div>
-          <h1 className="text-[20px] font-medium">MCP 工具</h1>
-          <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted">
-            接入 MCP 服务（HTTP 或本地 stdio 进程）后，它的工具会出现在 Bot 与技能的「可用工具」里。
-            默认按 L3 处理：每次调用都要审批。
-          </p>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <button className="btn-ghost" onClick={() => { setImportOpen(true); setImportText(""); setImportResult(null); }}>
-            <Braces size={13} /> 从 JSON 导入
-          </button>
-          <button className="btn-primary" onClick={openNew}>
-            <Plug size={13} /> 添加服务
-          </button>
-        </div>
-      </div>
-      <div className="card p-3.5">
+    <section>
+      <PageHeader
+        eyebrow="INTEGRATIONS / MCP"
+        title="MCP 工具"
+        description="接入 MCP 服务（HTTP 或本地 stdio 进程）后，它的工具会出现在 Bot 与技能的「可用工具」里。默认按 L3 处理：每次调用都要审批。"
+        actions={
+          <>
+            <button className="btn-ghost" onClick={() => { setImportOpen(true); setImportText(""); setImportResult(null); }}>
+              <Braces size={13} /> 从 JSON 导入
+            </button>
+            <button className="btn-primary" onClick={openNew}>
+              <Plug size={13} /> 添加服务
+            </button>
+          </>
+        }
+      />
+      <div className="card mt-6 p-3.5">
         {loading ? (
           <div className="flex justify-center py-4">
             <Loader2 size={15} className="animate-spin text-faint" />
           </div>
         ) : servers.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-line px-3 py-6 text-center text-[11.5px] leading-relaxed text-faint">
-            还没有接入 MCP 服务。可接远程的 Streamable HTTP 端点，或本机的 stdio 进程，
-            例如把内部工具、数据库查询封装成 MCP 后接进来。
+          <div className="rounded-lg border border-dashed border-line px-4 py-10 text-center">
+            <div className="empty-icon">
+              <Plug size={19} />
+            </div>
+            <div className="mt-3 text-[12.5px] font-medium">还没有接入 MCP 服务</div>
+            <p className="mx-auto mt-1 max-w-md text-[11.5px] leading-relaxed text-muted">
+              可接远程的 Streamable HTTP 端点，或本机的 stdio 进程，
+              例如把内部工具、数据库查询封装成 MCP 后接进来。
+            </p>
           </div>
         ) : (
           <div className="space-y-2">
             {servers.map((s) => (
-              <div key={s.id} className="rounded-lg border border-line px-3 py-2.5">
+              <div key={s.id} className="rounded-lg border border-line bg-panel2/30 px-3.5 py-3 transition-colors hover:border-line2">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[12.5px] font-medium">{s.name}</span>
                   {statusChip(s)}

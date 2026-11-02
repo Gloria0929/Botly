@@ -1,7 +1,7 @@
 """RUN-09：多层委派（子 Bot 再向下派任务）。
 
 覆盖：
-1. 默认两层：总指挥 → 研究员 → 写手，结果逐层交回；
+1. 默认两层：总指挥 → 研究员 → 架构师，结果逐层交回；
 2. 委派深度上限：达到上限后不再下发 delegate，模型硬发也会被拒绝；
 3. 不能把任务派回总指挥或自己的上级；
 4. 嵌套子任务失败只交回上级，不结束整个执行。
@@ -53,13 +53,13 @@ def _delegate_call(call_id: str, bot: str, instruction: str) -> dict:
 
 
 def test_nested_delegation_runs_two_levels(client, invite, monkeypatch):
-    """总指挥 → 研究员 → 写手：两级子任务都要执行，结果逐层交回。"""
+    """总指挥 → 研究员 → 架构师：两级子任务都要执行，结果逐层交回。"""
     from app.agent import orchestrator
 
     register(client, invite, "nested-two-levels@test.dev")
     chat_id, bots = setup_workspace(client)
     researcher = _pick(bots, "研究员")
-    writer = _pick(bots, "写手")
+    writer = _pick(bots, "架构师")
     turns = {"supervisor": 0, "researcher": 0}
 
     async def fake_stream_chat(**kw):
@@ -93,12 +93,12 @@ def test_nested_delegation_runs_two_levels(client, invite, monkeypatch):
                 return
             assert any(
                 m["role"] == "tool" and "稿件完成" in m["content"] for m in kw["messages"]
-            ), "研究员必须拿到写手交回的结果"
+            ), "研究员必须拿到架构师交回的结果"
             yield {"type": "done", "content": "研究员汇总：稿件完成", "tool_calls": []}
             return
 
-        # 写手：最底层，不应该再拿到 delegate
-        assert bot_name == "写手"
+        # 架构师：最底层，不应该再拿到 delegate
+        assert bot_name == "架构师"
         assert "delegate" not in names, "到达深度上限的成员不应再下发 delegate"
         yield {"type": "done", "content": "稿件完成：report.md", "tool_calls": []}
 
@@ -134,9 +134,9 @@ def test_nested_delegation_runs_two_levels(client, invite, monkeypatch):
     msgs = messages(client, chat_id)
     notes = [m for m in msgs if (m["meta"] or {}).get("delegation")]
     assert len(notes) == 2
-    nested_note = next(m for m in notes if (m["meta"] or {}).get("mention_name") == "写手")
+    nested_note = next(m for m in notes if (m["meta"] or {}).get("mention_name") == "架构师")
     assert nested_note["sender_bot_id"] == researcher["id"], "嵌套派任务由上级成员发起"
-    assert nested_note["content"].startswith("@写手")
+    assert nested_note["content"].startswith("@架构师")
     assert any(m["content"] == "研究员汇总：稿件完成" for m in msgs)
     assert any(m["content"] == "全部完成" for m in msgs)
 
@@ -148,7 +148,7 @@ def test_depth_limit_rejects_further_delegation(client, invite, monkeypatch):
     register(client, invite, "nested-depth-limit@test.dev")
     chat_id, bots = setup_workspace(client)
     researcher = _pick(bots, "研究员")
-    writer = _pick(bots, "写手")
+    writer = _pick(bots, "架构师")
     assert client.patch(
         f"/api/chats/{chat_id}", json={"limits_override": {"delegation_depth": 1}}
     ).status_code == 200
@@ -240,14 +240,14 @@ def test_nested_delegation_cannot_target_supervisor(client, invite, monkeypatch)
 
 
 def test_nested_failure_returns_to_parent_worker(client, invite, monkeypatch):
-    """写手失败只交回研究员，由研究员继续收尾，整个执行不算失败。"""
+    """架构师失败只交回研究员，由研究员继续收尾，整个执行不算失败。"""
     from app.agent import orchestrator
     from app.agent.llm import LLMError
 
     register(client, invite, "nested-failure@test.dev")
     chat_id, bots = setup_workspace(client)
     researcher = _pick(bots, "研究员")
-    writer = _pick(bots, "写手")
+    writer = _pick(bots, "架构师")
     turns = {"supervisor": 0, "researcher": 0}
 
     async def fake_stream_chat(**kw):
@@ -279,7 +279,7 @@ def test_nested_failure_returns_to_parent_worker(client, invite, monkeypatch):
                 return
             assert any(
                 m["role"] == "tool" and "失败" in m["content"] for m in kw["messages"]
-            ), "写手失败的原因要交回研究员"
+            ), "架构师失败的原因要交回研究员"
             yield {"type": "done", "content": "研究员兜底完成", "tool_calls": []}
             return
 

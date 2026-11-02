@@ -35,7 +35,7 @@ import Avatar from "@/components/ui/Avatar";
 import ActionMenu from "@/components/ui/Menu";
 import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api } from "@/lib/api";
+import { api, toastError } from "@/lib/api";
 import type { Chat, ChatFile, ChatSummary, Message, PlanStep, Run, Task, Branch } from "@/lib/types";
 import { num } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
@@ -213,7 +213,7 @@ function ChatContent() {
     } catch (error: any) {
       if (chatIdRef.current === target.chatId) {
         focusRef.current = null;
-        toast(error.message, "error");
+        toastError(error);
       }
     }
   }, [loadAround]);
@@ -225,7 +225,7 @@ function ChatContent() {
         await loadAround(messageId);
       } catch (error: any) {
         focusRef.current = null;
-        toast(error.message, "error");
+        toastError(error);
       }
     },
     [loadAround]
@@ -254,7 +254,7 @@ function ChatContent() {
         const pick = cs.find((c) => c.id === requested)?.id || cs.find((c) => c.id === saved)?.id || cs[0]?.id || null;
         setChatId(pick);
       })
-      .catch(() => {})
+      .catch((e) => toastError(e, "群聊加载失败"))
       .finally(() => setChatsLoading(false));
   }, []);
 
@@ -338,7 +338,7 @@ function ChatContent() {
         }
       })
       .catch((e) => {
-        if (!canceled) toast(e.message, "error");
+        if (!canceled) toastError(e);
       })
       .finally(() => {
         if (!canceled && chatIdRef.current === chatId) setMessagesLoading(false);
@@ -579,7 +579,7 @@ function ChatContent() {
       toast("已停止", "ok");
       refreshChat(run.chat_id);
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     } finally {
       setBusy(false);
     }
@@ -614,7 +614,7 @@ function ChatContent() {
       api.chats().then(setChats).catch(() => {});
     } catch (e: any) {
       setMessages((p) => p.filter((m) => m.id !== temp.id));
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -631,7 +631,7 @@ function ChatContent() {
       setFocusMessage(null);
       toast(`已拉出分支「${b.title}」`, "ok");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -653,7 +653,7 @@ function ChatContent() {
       setBranches(list);
       setBranchesOpen(true);
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -691,7 +691,7 @@ function ChatContent() {
       }
       toast("分支已删除", "ok");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -722,7 +722,7 @@ function ChatContent() {
       toast("已送达，总指挥会在下一步前读到", "ok");
     } catch (e: any) {
       setMessages((p) => p.filter((m) => m.id !== temp.id));
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -734,7 +734,7 @@ function ChatContent() {
       if (chatId) refreshChat(chatId);
       return true;
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
       if (chatId) {
         refreshChat(chatId);
         reloadMessages(chatId);
@@ -770,7 +770,7 @@ function ChatContent() {
       setPanelPersist(true);
       if (window.innerWidth < 1024) setMobilePanel(true);
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -794,7 +794,7 @@ function ChatContent() {
         setMessages([]);
       }
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -812,7 +812,7 @@ function ChatContent() {
       URL.revokeObjectURL(url);
       toast("已导出 Markdown", "ok");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -827,7 +827,7 @@ function ChatContent() {
       api.chats().then(setChats).catch(() => {});
       toast("已重命名", "ok");
     } catch (e: any) {
-      toast(e.message, "error");
+      toastError(e);
     }
   };
 
@@ -860,7 +860,7 @@ function ChatContent() {
       if (chatIdRef.current !== id) return;
       setMessages((prev) => [...history.messages.filter((m) => !prev.some((old) => old.id === m.id)), ...prev]);
       setHasEarlier(history.has_more);
-    } catch (error: any) { toast(error.message, "error"); }
+    } catch (error: any) { toastError(error); }
     finally { if (chatIdRef.current === id) setLoadingEarlier(false); }
   };
   const returnToLatest = async () => {
@@ -874,7 +874,7 @@ function ChatContent() {
       if (chatIdRef.current !== id) return;
       setMessages(history.messages);
       setHasEarlier(history.has_more);
-    } catch (error: any) { toast(error.message, "error"); }
+    } catch (error: any) { toastError(error); }
   };
   const selectedTask = activeTask ? activeTasks.find((t) => t.id === activeTask.id) || activeTask : null;
 
@@ -922,7 +922,7 @@ function ChatContent() {
 
         {/* 中：消息流 */}
         <section className="flex min-w-0 flex-1 flex-col bg-canvas">
-          <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line bg-panel/60 px-3 backdrop-blur sm:px-4">
+          <header className="flex h-[56px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3 sm:px-4">
             <button
               onClick={() => setListOpen(true)}
               className="p-1.5 text-muted hover:text-ink lg:hidden"
@@ -952,7 +952,12 @@ function ChatContent() {
                   </button>
                 </div>
               ) : (
-                <div className="truncate text-[13px] font-medium">{chat?.name || "…"}</div>
+                <div className="min-w-0 leading-tight">
+                  <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-faint">
+                    Session
+                  </div>
+                  <div className="truncate text-[13px] font-semibold">{chat?.name || "…"}</div>
+                </div>
               )}
             </div>
 
@@ -1130,7 +1135,7 @@ function ChatContent() {
 
           {waiting && resumeKind === "step" && (
             <div className="border-t border-warn/25 bg-warn/[0.07] px-4 py-2">
-              <div className="mx-auto max-w-[1100px]">
+              <div className="w-full">
                 <div className="mb-2 text-[12px] text-warn">已暂停，确认结果或补充调整意见后继续</div>
                 <div className="flex items-end gap-2">
                   <textarea value={stepNote} onChange={(e) => setStepNote(e.target.value)} rows={2}
@@ -1339,7 +1344,7 @@ function ChatContent() {
 function NoChatState({ onOpenList }: { onOpenList: () => void }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-      <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-panel">
+      <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-panel">
         <MessageSquare size={20} />
       </div>
       <div className="text-[12.5px] font-medium">还没有群聊</div>
@@ -1393,7 +1398,7 @@ function EmptyState({ onPick }: { onPick: (t: string) => void }) {
     <div className="flex h-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-[560px]">
         <div className="mb-6 text-center">
-          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-panel">
+          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-panel">
             <Compass size={20} />
           </div>
           <h2 className="text-[17px] font-semibold tracking-tight">交代一件事，团队自己跑</h2>
@@ -1406,7 +1411,7 @@ function EmptyState({ onPick }: { onPick: (t: string) => void }) {
             <button
               key={s}
               onClick={() => onPick(s)}
-              className="w-full rounded-xl border border-line bg-panel px-3.5 py-2.5 text-left text-[12.5px] text-muted transition-colors hover:border-accent/40 hover:text-ink"
+              className="w-full rounded-lg border border-line bg-panel px-3.5 py-2.5 text-left text-[12.5px] text-muted transition-colors hover:border-accent/40 hover:text-ink"
             >
               {s}
             </button>

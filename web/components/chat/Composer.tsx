@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUp, AtSign, Loader2, Paperclip, Square, X, Zap } from "lucide-react";
 import type { Bot, ChatFile } from "@/lib/types";
 import Avatar from "@/components/ui/Avatar";
-import { toast } from "@/lib/ui";
+import { toastError } from "@/lib/api";
 
 export default function Composer({
   members,
@@ -51,6 +51,9 @@ export default function Composer({
   }, [text]);
 
   const filtered = members.filter((m) => m.name.toLowerCase().includes(mentionQuery.toLowerCase()));
+  // 停用的 Bot 只展示、不可选：键盘上下和回车也只在可用成员里走
+  const selectable = filtered.filter((m) => m.enabled !== false);
+  const activeMention = selectable[Math.min(mentionIndex, selectable.length - 1)];
 
   const insertMention = (b: Bot) => {
     const idx = text.lastIndexOf("@");
@@ -77,8 +80,8 @@ export default function Composer({
   };
 
   return (
-    <div className="border-t border-line bg-panel/80 px-4 py-3 backdrop-blur sm:px-6">
-      <div className="mx-auto max-w-[1100px]">
+    <div className="border-t border-line bg-panel px-4 py-3.5 sm:px-6">
+      <div className="w-full">
         {disabledReason && (
           <div className="mb-2 rounded-lg border border-warn/30 bg-warn/[0.08] px-3 py-1.5 text-[11.5px] text-warn">
             {disabledReason}
@@ -103,32 +106,46 @@ export default function Composer({
                 try {
                   const uploaded = await onUpload(file);
                   setAttachments((p) => [...p, uploaded]);
-                } catch (error: any) { toast(error.message, "error"); }
+                } catch (error: any) { toastError(error); }
               }
             } finally { setUploading(false); }
           }} />
           {mention && filtered.length > 0 && (
-            <div className="absolute bottom-full left-0 mb-1.5 w-56 overflow-hidden rounded-xl border border-line bg-panel shadow-card">
-              <div className="border-b border-line px-2.5 py-1.5 text-[10.5px] text-faint">
+            <div className="absolute bottom-full left-0 mb-1.5 w-56 overflow-hidden rounded-lg border border-line bg-panel p-1 shadow-pop">
+              <div className="border-b border-line/70 px-2 py-1.5 text-[10.5px] text-faint">
                 选择要 @ 的成员
               </div>
-              {filtered.map((b, i) => (
-                <button
-                  key={b.id}
-                  onClick={() => insertMention(b)}
-                  className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left ${
-                    i === Math.min(mentionIndex, filtered.length - 1) ? "bg-panel2" : "hover:bg-panel2"
-                  }`}
-                >
-                  <Avatar value={b.avatar} size={16} />
-                  <span className="text-[12.5px]">{b.name}</span>
-                  <span className="ml-auto text-[10.5px] text-faint">{b.role}</span>
-                </button>
-              ))}
+              {filtered.map((b) => {
+                // BOT-06：停用的 Bot 不参与新执行，@ 列表里置灰、不可选
+                const off = b.enabled === false;
+                const active = !off && activeMention?.id === b.id;
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    disabled={off}
+                    onClick={() => insertMention(b)}
+                    title={off ? "该 Bot 已停用，先到 Bot 页启用后再 @" : undefined}
+                    className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${
+                      off
+                        ? "cursor-not-allowed opacity-45"
+                        : active
+                          ? "bg-panel2"
+                          : "hover:bg-panel2"
+                    }`}
+                  >
+                    <Avatar value={b.avatar} size={16} />
+                    <span className={`text-[12.5px] ${off ? "text-faint" : ""}`}>{b.name}</span>
+                    <span className="ml-auto text-[10.5px] text-faint">
+                      {off ? "已停用" : b.role}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
 
-          <div className="flex items-end gap-2 rounded-xl border border-line bg-panel2 px-2.5 py-2 focus-within:border-accent/60">
+          <div className="flex items-end gap-2 rounded-lg border border-line bg-panel2 px-3 py-2 transition-colors focus-within:border-accent/70 focus-within:ring-2 focus-within:ring-accent/10">
             <textarea
               ref={ta}
               rows={1}
@@ -147,17 +164,17 @@ export default function Composer({
                 if (mention && filtered.length > 0) {
                   if (e.key === "ArrowDown") {
                     e.preventDefault();
-                    setMentionIndex((i) => (i + 1) % filtered.length);
+                    if (selectable.length) setMentionIndex((i) => (i + 1) % selectable.length);
                     return;
                   }
                   if (e.key === "ArrowUp") {
                     e.preventDefault();
-                    setMentionIndex((i) => (i - 1 + filtered.length) % filtered.length);
+                    if (selectable.length) setMentionIndex((i) => (i - 1 + selectable.length) % selectable.length);
                     return;
                   }
                   if (e.key === "Enter" || e.key === "Tab") {
                     e.preventDefault();
-                    insertMention(filtered[Math.min(mentionIndex, filtered.length - 1)]);
+                    if (activeMention) insertMention(activeMention);
                     return;
                   }
                 }
