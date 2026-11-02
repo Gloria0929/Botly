@@ -11,10 +11,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
-from ..db import SessionLocal
-from ..deps import current_user
-from ..models import Chat, Event, User
-from ..redis_bus import Waker
+from app.core.db import SessionLocal
+from app.core.deps import current_user
+from app.core.models import Chat, Event, User
+from app.core.redis_bus import Waker
 
 router = APIRouter(tags=["events"])
 

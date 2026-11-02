@@ -18,11 +18,11 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import SESSION_COOKIE
-from ..db import get_db
-from ..models import Approval, Question, Run, UsageLog, User
-from ..redis_bus import queue_depth
-from ..security import read_session
+from app.core.config import SESSION_COOKIE
+from app.core.db import get_db
+from app.core.models import Approval, Question, Run, UsageLog, User
+from app.core.redis_bus import queue_depth
+from app.core.security import read_session
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 

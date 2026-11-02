@@ -3,8 +3,8 @@ import asyncio
 from datetime import timedelta
 
 from app import worker
-from app.db import SessionLocal
-from app.models import Bot, Question, Run, now
+from app.core.db import SessionLocal
+from app.core.models import Bot, Question, Run, now
 from sqlalchemy import select
 from tests.conftest import register, setup_workspace
 
@@ -49,8 +49,8 @@ def test_worker_reconcile_expires_waiting_runs(client, invite):
 
 def test_empty_event_stream_opens_then_delivers_new_events(client, invite):
     from app.api.stream import _stream
-    from app.events import emit
-    from app.models import Chat
+    from app.core.events import emit
+    from app.core.models import Chat
 
     register(client, invite, "empty-sse-live@test.dev")
     chat_id, _ = setup_workspace(client)

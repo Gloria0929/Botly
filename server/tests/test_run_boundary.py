@@ -5,10 +5,10 @@ import json
 import pytest
 from sqlalchemy import select
 
-from app import orchestrator
-from app.db import SessionLocal
-from app.models import Chat, Run, Thread, now
-from app.orchestrator import add_message
+from app.agent import orchestrator
+from app.core.db import SessionLocal
+from app.core.models import Chat, Run, Thread, now
+from app.agent.orchestrator import add_message
 from app.worker import process_one
 from tests.conftest import register, setup_workspace
 

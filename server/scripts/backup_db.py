@@ -25,8 +25,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.config import DATA_DIR, DATABASE_URL
-from app.db import IS_SQLITE
+from app.core.config import DATA_DIR, DATABASE_URL
+from app.core.db import IS_SQLITE
 
 BACKUP_DIR = DATA_DIR / "backups"
 KEEP_DEFAULT = 7

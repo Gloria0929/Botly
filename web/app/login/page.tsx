@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Loader2 } from "lucide-react";
+import { GithubMark, GoogleMark } from "@/components/ui/BrandIcons";
 import { api } from "@/lib/api";
 
 export default function LoginPage() {
@@ -14,8 +15,18 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   // ACC-08：从重置密码页跳回来时给一条成功提示（用 location 读，避免整页套 Suspense）
   const [resetDone, setResetDone] = useState(false);
+  // 第三方登录：没配 client id/secret 的 provider 后端会返回 false，这里就不显示按钮
+  const [providers, setProviders] = useState<{ google: boolean; github: boolean; signup: boolean } | null>(null);
+  const [oauthError, setOauthError] = useState("");
   useEffect(() => {
-    setResetDone(new URLSearchParams(window.location.search).get("reset") === "1");
+    const q = new URLSearchParams(window.location.search);
+    setResetDone(q.get("reset") === "1");
+    const oauthErr = q.get("oauth_error");
+    if (oauthErr) setOauthError(oauthErr);
+    api
+      .oauthProviders()
+      .then(setProviders)
+      .catch(() => {});
   }, []);
 
   const submit = async (e: React.FormEvent) => {
@@ -116,15 +127,47 @@ export default function LoginPage() {
             </div>
           )}
 
-          {err && (
+          {(oauthError || err) && (
             <div className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12.5px] text-danger">
-              {err}
+              {oauthError || err}
             </div>
           )}
 
           <button className="btn-primary mt-6 w-full py-2.5" disabled={loading}>
             {loading ? <Loader2 size={15} className="animate-spin" /> : <>登录 <ArrowRight size={15} /></>}
           </button>
+
+          {(providers?.google || providers?.github) && (
+            <>
+              <div className="my-5 flex items-center gap-3 text-[11.5px] text-faint">
+                <span className="h-px flex-1 bg-line" />
+                或
+                <span className="h-px flex-1 bg-line" />
+              </div>
+              <div className="space-y-2">
+                {providers?.google && (
+                  <button
+                    type="button"
+                    className="btn-ghost w-full py-2.5"
+                    onClick={() => window.location.assign("/api/auth/oauth/google/start")}
+                  >
+                    <GoogleMark />
+                    使用 Google 登录
+                  </button>
+                )}
+                {providers?.github && (
+                  <button
+                    type="button"
+                    className="btn-ghost w-full py-2.5"
+                    onClick={() => window.location.assign("/api/auth/oauth/github/start")}
+                  >
+                    <GithubMark />
+                    使用 GitHub 登录
+                  </button>
+                )}
+              </div>
+            </>
+          )}
 
           <p className="mt-5 text-center text-[12.5px] text-muted">
             还没有账号？

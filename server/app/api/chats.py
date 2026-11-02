@@ -7,24 +7,41 @@ from pathlib import PurePosixPath
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import sandbox
-from ..capabilities import supervisor_block_reason
-from ..db import IS_SQLITE, get_db
-from ..config import DELEGATION_DEPTH, SANDBOX_FILE_MAX_MB
-from ..deps import current_user, owned_or_404
-from ..events import emit
-from ..execution_config import capture_bots
-from ..graph import open_checkpointer
-from ..models import (Approval, Bot, Chat, ChatMember, Event, FileRec, Message, Notification, Provider,
-                      Question, Run, Task, Thread, UsageLog, User, UserSettings, now)
-from ..orchestrator import add_message
-from ..redis_bus import enqueue
-from ..serializers import bot_out, chat_out, iso, message_out, run_out, task_out
+from app.sandbox import files as sandbox
+from app.agent.capabilities import supervisor_block_reason
+from app.core.db import IS_SQLITE, get_db
+from app.core.config import DELEGATION_DEPTH, SANDBOX_FILE_MAX_MB
+from app.core.deps import current_user, owned_or_404
+from app.core.events import emit
+from app.agent.execution_config import capture_bots
+from app.agent.graph import open_checkpointer
+from app.core.models import (
+    Approval,
+    Bot,
+    Chat,
+    ChatMember,
+    Event,
+    FileRec,
+    Message,
+    Notification,
+    Provider,
+    Question,
+    Run,
+    Task,
+    Thread,
+    UsageLog,
+    User,
+    UserSettings,
+    now,
+)
+from app.agent.orchestrator import add_message
+from app.core.redis_bus import enqueue
+from app.agent.serializers import bot_out, chat_out, iso, message_out, run_out, task_out
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -189,7 +206,12 @@ def list_chats(user: User = Depends(current_user), db: Session = Depends(get_db)
 
 
 @router.post("", status_code=201)
-def create_chat(payload: ChatIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def create_chat(
+    payload: ChatIn,
+    background: BackgroundTasks,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     bots = db.scalars(
         select(Bot).where(Bot.user_id == user.id, Bot.deleted_at.is_(None))
     ).all()
@@ -230,6 +252,11 @@ def create_chat(payload: ChatIn, user: User = Depends(current_user), db: Session
         db.add(ChatMember(chat_id=chat.id, bot_id=bid, user_id=user.id))
     db.add(Thread(user_id=user.id, chat_id=chat.id, type="main", title="主线程"))
     db.flush()
+    # 建群就把这台 Ubuntu 起起来：后台执行，不拖慢建群；首次拉镜像失败也只是
+    # 记日志，之后用到工具时 ensure_container 还会再兜底一次。
+    from app.sandbox import linux as linux_sandbox
+
+    background.add_task(linux_sandbox.warm_container, user.id, chat.id)
     return chat_out(chat, by_id.get(sup_id), _members(db, chat.id))
 
 
@@ -562,6 +589,13 @@ async def delete_chat(chat_id: str, user: User = Depends(current_user), db: Sess
     try:
         sandbox.delete_chat_dir(user.id, chat.id)
     except sandbox.SandboxError:
+        pass
+    # 常驻 Linux 环境也一并清掉（best-effort）
+    try:
+        from app.sandbox import linux as linux_sandbox
+
+        linux_sandbox.stop_container_sync(chat.id)
+    except Exception:  # noqa: BLE001
         pass
     return {"ok": True}
 

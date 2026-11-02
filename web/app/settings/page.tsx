@@ -16,6 +16,7 @@ import {
 import AppShell from "@/components/AppShell";
 import Avatar from "@/components/ui/Avatar";
 import AvatarPicker from "@/components/ui/AvatarPicker";
+import { GithubMark, GoogleMark } from "@/components/ui/BrandIcons";
 import Select from "@/components/ui/Select";
 import { useConfirm } from "@/components/ui/Confirm";
 import Modal from "@/components/ui/Modal";
@@ -72,6 +73,11 @@ export default function SettingsPage() {
   const [sendingVerify, setSendingVerify] = useState(false);
   const [pushSt, setPushSt] = useState<PushSupport | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
+  // 第三方登录绑定状态：available 是「后端配了这个 provider」，linked 是「当前账号已绑」
+  const [oauth, setOauth] = useState<{
+    available: { google: boolean; github: boolean };
+    linked: Record<string, { name?: string | null; email?: string | null }>;
+  } | null>(null);
 
   // ACC-08：发一封验证邮件；本地没配 SMTP 时后端会回 dev_link，直接复制给用户
   const sendVerify = async () => {
@@ -100,11 +106,18 @@ export default function SettingsPage() {
   useEffect(() => {
     load();
     api.vendors().then(setVendors).catch(() => {});
+    api.oauthAccounts().then(setOauth).catch(() => {});
     if (typeof Notification !== "undefined") setNotifyPerm(Notification.permission);
     getPushState().then(setPushSt).catch(() => {});
     // ACC-06：注册 / 首次登录会带 ?welcome=1
     if (typeof window !== "undefined") {
-      setWelcome(new URLSearchParams(window.location.search).get("welcome") === "1");
+      const q = new URLSearchParams(window.location.search);
+      setWelcome(q.get("welcome") === "1");
+      // 第三方登录绑定回来
+      const bound = q.get("oauth_bound");
+      if (bound) toast(`已绑定 ${bound === "google" ? "Google" : "GitHub"} 账号`, "ok");
+      const oauthErr = q.get("oauth_error");
+      if (oauthErr) toast(oauthErr, "error");
     }
   }, []);
 
@@ -660,6 +673,50 @@ export default function SettingsPage() {
                 </>
               )}
             </div>
+            {/* ACC-09：第三方登录绑定 */}
+            {oauth &&
+              (oauth.available.google ||
+                oauth.available.github ||
+                Object.keys(oauth.linked).length > 0) && (
+                <div className="mb-3 space-y-1.5">
+                  {(["google", "github"] as const).map((p) => {
+                    const bound = oauth.linked[p];
+                    if (!bound && !oauth.available[p]) return null;
+                    const label = p === "google" ? "Google" : "GitHub";
+                    return (
+                      <div
+                        key={p}
+                        className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-line bg-panel2/40 px-3 py-2"
+                      >
+                        <span className="shrink-0 text-muted">
+                          {p === "google" ? <GoogleMark size={13} /> : <GithubMark size={13} />}
+                        </span>
+                        <span className="text-[11.5px] text-muted">{label}</span>
+                        {bound ? (
+                          <>
+                            <span className="text-[11px] text-ok">已绑定</span>
+                            <span className="min-w-0 truncate text-[10.5px] text-faint">
+                              {bound.email || bound.name || ""}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-[11px] text-faint">未绑定</span>
+                            <button
+                              className="btn-ghost ml-auto"
+                              onClick={() =>
+                                window.location.assign(`/api/auth/oauth/${p}/bind/start`)
+                              }
+                            >
+                              绑定
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
               <input
                 className="field"

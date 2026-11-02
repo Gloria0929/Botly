@@ -11,9 +11,9 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 
-from app.config import DATA_DIR, ENCRYPTION_KEY
-from app.db import SessionLocal
-from app.models import Provider, Run, UserSettings
+from app.core.config import DATA_DIR, ENCRYPTION_KEY
+from app.core.db import SessionLocal
+from app.core.models import Provider, Run, UserSettings
 
 
 def main():

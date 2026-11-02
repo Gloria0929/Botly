@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.db import SessionLocal
-from app.models import Bot, Chat, Message, Run, Task, Thread, User
-from app.orchestrator import RunExecutor
+from app.core.db import SessionLocal
+from app.core.models import Bot, Chat, Message, Run, Task, Thread, User
+from app.agent.orchestrator import RunExecutor
 from tests.conftest import register, setup_workspace
 
 

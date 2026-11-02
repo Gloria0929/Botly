@@ -5,11 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..config import DELEGATION_DEPTH
-from ..db import get_db
-from ..deps import current_user
-from ..models import User, UserSettings
-from ..security import encrypt_secret
+from app.core.config import DELEGATION_DEPTH
+from app.core.db import get_db
+from app.core.deps import current_user
+from app.core.models import User, UserSettings
+from app.core.security import encrypt_secret
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 

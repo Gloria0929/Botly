@@ -86,7 +86,7 @@ cd server && ./venv/bin/python -m pytest tests -q     # 端到端验收与上下
 
 ### 执行与恢复
 
-编排跑在 **LangGraph StateGraph** 上（`server/app/graph.py`），总指挥与子 Bot 共用同一张图：
+编排跑在 **LangGraph StateGraph** 上（`server/app/agent/graph.py`），总指挥与子 Bot 共用同一张图：
 
 ```
 START → model ──有工具调用──→ tool ──还有未执行的调用──→ tool
@@ -132,7 +132,7 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
 
 | 模块 | 覆盖 |
 | --- | --- |
-| 账号 ACC-01~06 | 邀请码注册（次数/有效期/使用记录）、邮箱密码登录、HttpOnly Cookie 7 天、登录失败限流字段、用户级数据隔离（越权 404）、未配模型接入时禁止发起执行 |
+| 账号 ACC-01~06 | 邀请码注册（次数/有效期/使用记录）、邮箱密码登录、Google/GitHub 第三方登录、HttpOnly Cookie 7 天、登录失败限流字段、用户级数据隔离（越权 404）、未配模型接入时禁止发起执行 |
 | 模型接入 MOD-01~04 | 预置 25 家厂商、只填 Key、自动探测模型、连通性/流式/工具调用能力探测、Key 对称加密只回显末 4 位、删除时校验占用 |
 | Bot BOT-01~05 | 增删改查、同账号名称唯一（用于 @）、默认总指挥+研究员+写手、软删除（管理列表不再显示、历史消息标注「已删除」、名字可复用）、删除保护、执行使用配置快照、6 个内置角色模板（总指挥/研究员/写手/程序员/数据分析师/审校）一键套用 |
 | 群聊 CHT-01~06 | 建群、随时增减成员、总指挥交接（先交接再移出旧总指挥，执行中的成员受保护）、@Bot 直连（支持中文标点紧邻）、单群单执行、流式输出、消息类型渲染、历史列表、重命名、解散（二次确认，连带清理消息/子任务/产物/通知/沙箱文件） |
@@ -140,7 +140,8 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
 | 调度 RUN-01~11 | 自动模式、计划卡片（可编辑步骤）、执行中调整以系统提示呈现、逐步确认、delegate 子线程、ask_user、停止、子 Bot 在群里回话、委派深度可配置（默认 2 层，支持子 Bot 再派任务）、子任务失败回写上级、改派上限按稳定的 `step` 键判断（RUN-10） |
 | 审批 APV-01~05 | 三级权限判定、审批卡片（参数可展开）、拒绝原因回传、24h 过期、参数哈希校验不可绕过 |
 | 记忆 MEM-01~03 | 共享/私有分离、按更新时间注入并受 4000 字上限约束、仅用户可编辑 |
-| 工具 TOL-01~05 | 网页搜索、网页读取（SSRF 防护）、沙箱文件读写列删、JSON Schema 校验、三级权限；MCP Streamable HTTP 接入（TOL-05，服务级权限级别，审批联动） |
+| 工具 TOL-01~06 | 网页搜索、网页读取（SSRF 防护）、沙箱文件读写列删、JSON Schema 校验、三级权限；MCP 接入（TOL-05，HTTP/stdio 两种传输，服务级权限级别，审批联动）；代码执行 `code_exec`（TOL-06，跑在群聊的 Ubuntu 容器里，python/node/bash/sh） |
+| 常驻 Linux 环境 | 每个群聊一个 Ubuntu 容器（root + 联网，可 pip/apt 装包），**建群时后台预热**，`run_command`（L3 每次审批）执行 shell 命令，`code_exec` 也跑在里面，`/workspace` 挂载群聊沙箱目录，状态与文件持久 |
 | 技能 | 提示词 + 工具包，绑定到 Bot 注入提示词并合并工具；支持导入外部技能包（ZIP / SKILL.md / GitHub 仓库精准查找 / URL / ClawHub owner-slug 或技能名），带参考文件时提供 skill_file_read |
 | 通知 NTF-01~05 | 后台队列、页面内通知中心、浏览器通知（用户点击才申请授权）、拒绝后回退、当前群聊不打扰 |
 | 限额 LIM-01~04 | 步数与运行时长均不设上限（只统计步数/记录起止时间）；token 预算可选无限制，有限预算保留 80% 提示；委派深度默认 2 层、可改 1–5（设置页默认 + 群聊覆盖）、单用户并发 2 |
@@ -177,10 +178,15 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
   （60 分钟、只能用一次）→ 设置新密码，**旧会话立即失效**；注册后自动发一封验证邮件，
   设置页「账号」显示验证状态并可补发。邮件走 `BOTLY_SMTP_*` 配置；没配 SMTP 时默认开发模式，
   邮件写日志、接口回一个可点链接，本地能走完整流程（生产需配 SMTP 并把 `BOTLY_MAIL_DEV` 设为 0）。
+- **ACC-09 第三方登录（Google / GitHub）**：登录页出现「使用 Google / GitHub 登录」，
+  client id/secret 没配的一律不显示。回调走 `state + HttpOnly nonce` 校验；已绑定的直接登录，
+  未绑定但**邮箱已验证且与现有账号一致**的自动绑定，其余按 `BOTLY_OAUTH_ALLOW_SIGNUP`
+  决定是建号（默认允许）还是提示先用邀请码注册。已有账号可在设置页「账号」里点「绑定」，
+  走 `/api/auth/oauth/{provider}/bind/start`，对方邮箱与本站不同也能绑上。
 
 ### 未实现（P2 / 后续规划，主动搁置）
 
-第三方登录、Bot 启停与版本回滚、代码执行沙箱、邮件/短信等其他审批与通知渠道、
+Bot 启停与版本回滚、邮件/短信等其他审批与通知渠道、
 团队空间与共享群聊、计费套餐、每个 Bot 持久云电脑、移动原生 App。
 
 完整的缺口清单、P0 偏差、验收标准对照与建议排期见
@@ -369,19 +375,45 @@ RUN-13 没有新建执行：`POST /chats/{id}/messages` 带 `interject=true` 时
 ```
 server/
   app/
-    main.py            FastAPI 入口与路由挂载
-    graph.py           LangGraph 编排：StateGraph(model ⇄ tool → after) + 检查点
-    orchestrator.py    节点实现：模型调用、派任务、审批闸门、限额、收尾
-    signals.py         PauseSignal（interrupt 的载体）
-    worker.py          独立 Worker：Redis 队列消费 + 僵尸执行回收
-    llm.py             OpenAI 兼容流式客户端 + mock provider
-    tools.py           工具注册表（Schema / 权限级别 / 执行器）
-    sandbox.py         沙箱路径校验与配额
-    redis_bus.py       队列、事件广播、SSE 唤醒
-    models.py          数据模型（第 10 节）
-    accounts.py        账号停用、保留期与彻底清除（ACC-07）
-    alerts.py          队列积压 / 执行卡死 / 失败率告警
-    api/               各模块路由（含 usage.py 用量、metrics.py 指标、stats.py 看板）
+    main.py              FastAPI 入口与路由挂载
+    worker.py            独立 Worker：Redis 队列消费 + 僵尸执行回收
+    core/                全局内核（谁都可以依赖，自己不依赖业务）
+      config.py          环境变量与默认参数
+      db.py              引擎、会话、轻量迁移
+      models.py          数据模型（第 10 节）
+      deps.py            依赖注入：当前用户、归属校验
+      security.py        密码哈希、API Key 加密、会话与 OAuth state 签名
+      logging_setup.py   日志格式、追踪 id、脱敏
+      events.py          事件落库与订阅广播
+      redis_bus.py       队列、事件广播、SSE 唤醒
+      http_logging.py    请求日志中间件
+      commit_middleware.py  响应发出前提交事务
+    api/                 各模块路由（auth / bots / chats / runs / usage / metrics / stats …）
+    agent/               执行引擎
+      orchestrator.py    节点实现：模型调用、派任务、审批闸门、限额、收尾
+      graph.py           LangGraph 编排：StateGraph(model ⇄ tool → after) + 检查点
+      llm.py             OpenAI 兼容流式客户端 + mock provider
+      memory_context.py  记忆注入
+      capabilities.py    模型能力判定（工具调用 / 流式）
+      execution_config.py 执行配置快照
+      signals.py         PauseSignal（interrupt 的载体）
+      serializers.py     对外 JSON 序列化
+    sandbox/             执行环境
+      files.py           沙箱路径校验与配额
+      linux.py           每群一个 Ubuntu 容器（run_command / code_exec）
+    tools/               工具与扩展
+      registry.py        工具注册表（Schema / 权限级别 / 执行器）
+      mcp.py             MCP 客户端（HTTP / stdio）
+      skills.py          技能包解析与提示词注入
+    services/            业务服务与外部集成
+      accounts.py        账号停用、保留期与彻底清除（ACC-07）
+      alerts.py          队列积压 / 执行卡死 / 失败率告警
+      maintenance.py     定期清理与回收
+      templates.py       默认 Bot 模板
+      vendors.py         厂商与模型目录
+      mail.py            邮件发送
+      push.py            Web Push
+      oauth.py           Google / GitHub 登录
   scripts/
     make_invite.py     生成邀请码
     purge_accounts.py  已删除账号的恢复与清理
@@ -432,8 +464,33 @@ web/
 | `BOTLY_BASE_URL` | 邮件里链接的前缀（留空按请求头推导） | 未设置 |
 | `BOTLY_RESET_TOKEN_TTL_MINUTES` | 重置密码链接有效期 | 60 |
 | `BOTLY_VERIFY_TOKEN_TTL_HOURS` | 邮箱验证链接有效期 | 24 |
+| `BOTLY_LINUX_SANDBOX_ENABLED` | 是否启用常驻 Linux 环境（建群时预热容器） | `1` |
+| `BOTLY_LINUX_SANDBOX_IMAGE` | Linux 环境镜像 | `ubuntu:24.04` |
+| `BOTLY_LINUX_SANDBOX_TIMEOUT` | 单条命令超时秒数 | 60 |
+| `BOTLY_LINUX_SANDBOX_MEMORY` / `_CPUS` | 环境资源限制 | `1g` / `1.0` |
+| `BOTLY_LINUX_SANDBOX_AUTO_INSTALL` | 缺 python3/node 时自动 apt 安装 | `1` |
+| `BOTLY_CODE_EXEC_LEVEL` | `code_exec` 的权限级别（`L2` 免审批 / `L3` 每次审批） | `L2` |
+| `BOTLY_GOOGLE_CLIENT_ID` / `_SECRET` | Google 登录（留空则不显示该按钮） | 未设置 |
+| `BOTLY_GITHUB_CLIENT_ID` / `_SECRET` | GitHub 登录（留空则不显示该按钮） | 未设置 |
+| `BOTLY_OAUTH_REDIRECT_BASE` | 回调地址前缀，必须与 OAuth 后台登记一致 | 按请求头推导 |
+| `BOTLY_OAUTH_ALLOW_SIGNUP` | 陌生账号能否用第三方登录直接建号 | `1` |
 
-限额、重试、超时等默认值集中在 `server/app/config.py`，对应文档附录 A。
+限额、重试、超时等默认值集中在 `server/app/core/config.py`，对应文档附录 A。
+
+## 数据迁移（Alembic）
+
+从 2026-11 起，复杂 schema 变更走 Alembic。`server/alembic/versions/0001_baseline.py` 是
+当前 schema 的标记点（不执行 DDL）；老库首次启动会自动 `stamp head` 建立版本表，
+之后在 `server/` 目录下：
+
+```bash
+./venv/bin/alembic revision --autogenerate -m "加 xx 列"   # 生成迁移
+./venv/bin/alembic upgrade head                            # 应用
+./venv/bin/alembic downgrade -1                            # 回退一步
+```
+
+轻量的「加列」仍由启动时的 `_light_migrate()` 兜底（幂等），两者不冲突。
+
 运行时长与步数已不作为停止条件，只保留统计。
 
 **从 SQLite 迁移到 Postgres**：
@@ -497,3 +554,5 @@ Web 默认 3200（3000/3100 常被其他服务占）。改 `web/package.json` �
 5. `docker-compose.yml` 是部署参考，本次未在本机跑通整条容器链路。
 6. 上传的图片存在 `data/uploads/{user_id}/`，通过带鉴权的 `/api/uploads/{id}` 读取（不同账号互相看不到）；
    尚未做图片压缩与 CDN，头像请控制在 2 MB 以内。
+7. `run_command` 是 root + 联网的真机（Ubuntu 容器），能装包也能连外网，靠 L3 审批约束；
+   首次使用会自动拉取 `ubuntu:24.04` 镜像（约 80MB），可能稍慢。

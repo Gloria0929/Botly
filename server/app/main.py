@@ -5,10 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from . import redis_bus
-from .commit_middleware import CommitBeforeResponseMiddleware
-from .http_logging import RequestLogMiddleware, unhandled_error
-from .logging_setup import LOG_DIR, get_logger, setup_logging
+from app.core import redis_bus
 from .api import (
     auth,
     bots,
@@ -29,7 +26,10 @@ from .api import (
     uploads,
     usage,
 )
-from .db import init_db
+from app.core.commit_middleware import CommitBeforeResponseMiddleware
+from app.core.db import init_db
+from app.core.http_logging import RequestLogMiddleware, unhandled_error
+from app.core.logging_setup import LOG_DIR, get_logger, setup_logging
 
 
 @asynccontextmanager

@@ -7,14 +7,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..deps import current_user, owned_or_404
-from ..events import emit
-from ..models import Approval, Bot, Chat, Message, Question, Run, Task, Thread, User, now
-from ..maintenance import expire_approval, expire_question
-from ..orchestrator import emit_run_status, emit_task_status, settle_run_tasks, stop_child_runs
-from ..redis_bus import enqueue
-from ..serializers import message_out, run_out, task_out
+from app.core.db import get_db
+from app.core.deps import current_user, owned_or_404
+from app.core.events import emit
+from app.core.models import Approval, Bot, Chat, Message, Question, Run, Task, Thread, User, now
+from app.services.maintenance import expire_approval, expire_question
+from app.agent.orchestrator import emit_run_status, emit_task_status, settle_run_tasks, stop_child_runs
+from app.core.redis_bus import enqueue
+from app.agent.serializers import message_out, run_out, task_out
 
 router = APIRouter(tags=["runs"])
 
@@ -75,7 +75,7 @@ def stop_run(run_id: str, user: User = Depends(current_user), db: Session = Depe
     _invalidate_pending(db, run)
     main = db.scalar(select(Thread).where(Thread.chat_id == run.chat_id, Thread.type == "main"))
     if main:
-        from ..orchestrator import add_message
+        from app.agent.orchestrator import add_message
 
         add_message(
             db,
@@ -107,7 +107,7 @@ def continue_run(
     if resume.get("kind") != "step":
         raise HTTPException(400, "当前暂停点不是逐步确认")
     if payload.note and payload.note.strip():
-        from ..orchestrator import add_message
+        from app.agent.orchestrator import add_message
         main = db.scalar(select(Thread).where(Thread.chat_id == run.chat_id, Thread.type == "main"))
         if main:
             add_message(db, thread=main, run_id=run.id, sender_type="user", type_="text",

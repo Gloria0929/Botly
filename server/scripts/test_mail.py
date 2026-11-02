@@ -16,8 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import mail  # noqa: E402
-from app.config import (  # noqa: E402
+from app.services import mail  # noqa: E402
+from app.core.config import (
     MAIL_DEV,
     MAIL_FROM,
     SMTP_HOST,

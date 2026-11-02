@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
-from .. import sandbox
-from ..db import get_db
-from ..deps import current_user, owned_or_404
-from ..models import FileRec, User
+from app.sandbox import files as sandbox
+from app.core.db import get_db
+from app.core.deps import current_user, owned_or_404
+from app.core.models import FileRec, User
 
 router = APIRouter(prefix="/files", tags=["files"])
 

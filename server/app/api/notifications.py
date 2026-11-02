@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..deps import current_user
-from ..models import Notification, User, now
+from app.core.db import get_db
+from app.core.deps import current_user
+from app.core.models import Notification, User, now
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -67,3 +67,11 @@ def mark_read(payload: ReadIn, user: User = Depends(current_user), db: Session =
         n.read_at = now()
     db.flush()
     return {"ok": True, "count": len(rows)}
+
+
+@router.delete("")
+def clear_notifications(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """清空当前用户的所有通知。"""
+    result = db.execute(delete(Notification).where(Notification.user_id == user.id))
+    db.flush()
+    return {"ok": True, "count": result.rowcount or 0}

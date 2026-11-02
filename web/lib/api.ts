@@ -91,6 +91,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ token }),
     }),
+  /** 第三方登录：哪些 provider 配好了（没配的不显示按钮） */
+  oauthProviders: () =>
+    req<{ google: boolean; github: boolean; signup: boolean }>("/auth/oauth/providers"),
+  /** 当前账号绑定了哪些第三方账号 */
+  oauthAccounts: () =>
+    req<{
+      available: { google: boolean; github: boolean };
+      linked: Record<
+        string,
+        { name?: string | null; email?: string | null; avatar?: string | null; last_login_at?: string | null }
+      >;
+    }>("/auth/oauth/accounts"),
   /** ACC-07：删除账号（立即停用，30 天后彻底清除） */
   deleteAccount: (password: string, confirm_email: string) =>
     req<{ ok: boolean; purge_after: string | null; retention_days: number }>("/auth/account", {
@@ -235,6 +247,11 @@ export const api = {
       { method: "POST" }
     ),
   deleteMcpServer: (id: string) => req(`/mcp/servers/${id}`, { method: "DELETE" }),
+  importMcpServers: (body: any) =>
+    req<{ created: any[]; skipped: { name: string; reason: string }[]; errors: { name: string; reason: string }[] }>(
+      "/mcp/import",
+      { method: "POST", body: JSON.stringify(body) }
+    ),
 
   // 群聊
   chats: () => req<import("./types").ChatSummary[]>("/chats"),
@@ -351,6 +368,8 @@ export const api = {
   // 运行状况看板（8.6）
   statsOverview: (days = 7) =>
     req<import("./types").StatsOverview>(`/stats/overview?days=${days}`),
+  acknowledgeAlert: (id: string) =>
+    req<{ ok: boolean }>(`/stats/alerts/${id}/acknowledge`, { method: "POST" }),
 
   // 执行
   run: (id: string) => req<import("./types").Run>(`/runs/${id}`),
@@ -414,6 +433,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  clearNotifications: () =>
+    req<{ ok: boolean; count: number }>("/notifications", { method: "DELETE" }),
   /** NTF-06：Web Push 配置与订阅管理 */
   pushConfig: () => req<{ enabled: boolean; public_key: string }>("/push/config"),
   pushSubscriptions: () =>

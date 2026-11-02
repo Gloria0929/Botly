@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
-from app.db import SessionLocal
-from app.models import Chat, Event, FileRec, UsageLog, now
+from app.core.db import SessionLocal
+from app.core.models import Chat, Event, FileRec, UsageLog, now
 from tests.conftest import register, setup_workspace
 
 
@@ -74,7 +74,7 @@ def test_retention_prune_keeps_token_stats(client):
         db.commit()
         event_id, log_id = event.id, log.id
 
-    from app.maintenance import prune_expired
+    from app.services.maintenance import prune_expired
 
     with SessionLocal() as db:
         prune_expired(db)
@@ -91,8 +91,8 @@ def test_retention_prune_keeps_token_stats(client):
 def test_file_delete_removes_file_record(client, invite):
     register(client, invite, "file-delete@test.dev")
     chat_id, _ = setup_workspace(client)
-    from app import sandbox
-    from app.tools import _file_delete
+    from app.sandbox import files as sandbox
+    from app.tools.registry import _file_delete
 
     with SessionLocal() as db:
         user_id = db.get(Chat, chat_id).user_id

@@ -15,9 +15,9 @@ import argparse
 
 from sqlalchemy import select
 
-from app.accounts import purge_due_accounts, purge_user
-from app.db import init_db, session_scope
-from app.models import User, now
+from app.services.accounts import purge_due_accounts, purge_user
+from app.core.db import init_db, session_scope
+from app.core.models import User, now
 
 
 def _fmt(value) -> str:

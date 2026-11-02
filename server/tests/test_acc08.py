@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from app.db import SessionLocal
-from app.models import EmailToken, User, now
-from app.security import random_token, token_hash
+from app.core.db import SessionLocal
+from app.core.models import EmailToken, User, now
+from app.core.security import random_token, token_hash
 
 from .conftest import login, register
 

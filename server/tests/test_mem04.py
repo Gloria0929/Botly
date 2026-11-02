@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 
-from app.db import SessionLocal
-from app.models import Run
-from app.orchestrator import RunExecutor, _parse_memory_candidates
+from app.core.db import SessionLocal
+from app.core.models import Run
+from app.agent.orchestrator import RunExecutor, _parse_memory_candidates
 from tests.conftest import register, setup_workspace
 
 

@@ -5,9 +5,9 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from app.accounts import purge_due_accounts
-from app.db import SessionLocal
-from app.models import Chat, User, now
+from app.services.accounts import purge_due_accounts
+from app.core.db import SessionLocal
+from app.core.models import Chat, User, now
 from scripts.purge_accounts import _restore
 from tests.conftest import register, setup_workspace
 

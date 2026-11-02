@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from app.db import SessionLocal
-from app.models import Run, now
+from app.core.db import SessionLocal
+from app.core.models import Run, now
 from tests.conftest import register
 
 

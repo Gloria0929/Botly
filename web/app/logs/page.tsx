@@ -26,6 +26,11 @@ const LEVEL_CLS: Record<string, string> = {
 
 const PAGE = 300;
 
+/** SQLAlchemy 的 SQL 回显属于实现细节，日志页不展示（后端读取时也会跳过） */
+const isDbLog = (module: string) => module.startsWith("sqlalchemy");
+/** 超过这个长度的消息先折成两行，避免一条超长指令把整页撑开 */
+const CLAMP_AT = 180;
+
 export default function LogsPage() {
   // 默认只看 WARNING 及以上：先看到真正需要处理的事；
   // 要追踪某次执行时再切回“全部”或按 run 编号过滤。
@@ -82,7 +87,15 @@ export default function LogsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, limit, level, module, q, requestId, runId]);
 
-  const items = data?.items || [];
+  const items = useMemo(
+    () => (data?.items || []).filter((r) => !isDbLog(r.module)),
+    [data]
+  );
+  // 后端已折叠数据库语句；前端再兜一层，保证接口没重启时也不会看到 SQL 刷屏
+  const hiddenSql = Math.max(
+    data?.hidden_sql || 0,
+    (data?.items || []).filter((r) => isDbLog(r.module)).length
+  );
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     items.forEach((it) => (c[it.level] = (c[it.level] || 0) + 1));
@@ -121,12 +134,13 @@ export default function LogsPage() {
             </div>
           </div>
 
-          {data && (
-            <div className="mt-2 text-[11px] text-faint">
-              日志目录 <code className="font-mono">{data.log_dir}</code>
-              {data.files.length > 0 && ` · ${data.files.length} 个文件（单文件上限 ${data.max_file_mb} MB）`}
-            </div>
-          )}
+          {/*{data && (*/}
+          {/*  <div className="mt-2 text-[11px] text-faint">*/}
+          {/*    日志目录 <code className="font-mono">{data.log_dir}</code>*/}
+          {/*    {data.files.length > 0 && ` · ${data.files.length} 个文件（单文件上限 ${data.max_file_mb} MB）`}*/}
+          {/*    {hiddenSql > 0 && " · 数据库语句已折叠"}*/}
+          {/*  </div>*/}
+          {/*)}*/}
 
           {/* 筛选 */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -254,6 +268,8 @@ export default function LogsPage() {
 function LogRow({ row, onRequest, onRun }: { row: LogEntry; onRequest: (id: string) => void; onRun: (id: string) => void }) {
   const isError = row.level === "ERROR" || row.level === "CRITICAL";
   const isWarn = row.level === "WARNING";
+  const [open, setOpen] = useState(false);
+  const long = row.message.length > CLAMP_AT;
   return (
     <div
       className={`flex gap-2 px-3 py-1.5 font-mono text-[11.5px] leading-relaxed ${
@@ -265,8 +281,18 @@ function LogRow({ row, onRequest, onRun }: { row: LogEntry; onRequest: (id: stri
       <span className="w-[76px] shrink-0 truncate text-accent/80" title={row.module}>
         {row.module}
       </span>
-      <div className="min-w-0 flex-1 break-words text-ink/90">
-        <span>{row.message}</span>
+      <div className="min-w-0 flex-1 text-ink/90">
+        <div className={long && !open ? "line-clamp-2 break-words" : "whitespace-pre-wrap break-words"}>
+          {row.message}
+        </div>
+        {long && (
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="mt-0.5 text-[10.5px] text-accent/80 hover:text-accent"
+          >
+            {open ? "收起" : `展开（${row.message.length} 字）`}
+          </button>
+        )}
         <div className="mt-0.5 flex flex-wrap gap-2 text-[10.5px] text-faint">
           {row.request_id !== "-" && (
             <button onClick={() => onRequest(row.request_id)} className="hover:text-accent" title="只看这个请求">

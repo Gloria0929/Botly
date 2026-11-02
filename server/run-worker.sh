@@ -11,4 +11,9 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
+./venv/bin/python -c "import app.worker" || {
+  echo "Worker 导入失败，先单独跑：./venv/bin/python -c \"import app.worker\""
+  exit 1
+}
+
 exec ./venv/bin/python -m app.worker "$@"

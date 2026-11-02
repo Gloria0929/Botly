@@ -4,10 +4,10 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from app.db import SessionLocal
-from app.models import Approval, Chat, Event, Message, Run, Thread, now
-from app.orchestrator import RunExecutor, add_message
-from app.security import args_hash
+from app.core.db import SessionLocal
+from app.core.models import Approval, Chat, Event, Message, Run, Thread, now
+from app.agent.orchestrator import RunExecutor, add_message
+from app.core.security import args_hash
 from tests.conftest import register, setup_workspace
 
 

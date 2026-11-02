@@ -14,8 +14,8 @@ import json
 import pytest
 from sqlalchemy import select
 
-from app.db import SessionLocal
-from app.models import Message, Run, Task
+from app.core.db import SessionLocal
+from app.core.models import Message, Run, Task
 from app.worker import _wake_waiting_parents, process_one
 from tests.conftest import login, register, setup_workspace
 
@@ -135,7 +135,7 @@ def make_stream(parallel: bool, worker_results: dict[str, str], calls: dict):
 
 @pytest.mark.parametrize("parallel", [True, False])
 def test_same_batch_runs_in_parallel(client, invite, monkeypatch, parallel):
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, f"parallel-{parallel}@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -210,7 +210,7 @@ def test_same_batch_runs_in_parallel(client, invite, monkeypatch, parallel):
 
 
 def test_stop_parent_stops_children(client, invite, monkeypatch):
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, "parallel-stop@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -258,7 +258,7 @@ def test_child_executions_really_run_concurrently(client, invite, monkeypatch):
     """两条子执行在同一个 Worker 进程里同时跑，而不是排队串行。"""
     import time
 
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, "parallel-concurrent@test.dev")
     chat_id, _ = setup_workspace(client)

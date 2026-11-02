@@ -13,14 +13,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..capabilities import CAPABILITY_KEYS, apply_capability, hard_save_block_reason
-from ..db import get_db
-from ..deps import current_user, owned_or_404
-from ..llm import list_models, probe_capabilities
-from ..models import Bot, Provider, User, now
-from ..security import decrypt_secret, encrypt_secret
-from ..serializers import provider_out
-from ..vendors import BY_ID, VENDORS, out as vendor_out, preset_price
+from app.agent.capabilities import CAPABILITY_KEYS, apply_capability, hard_save_block_reason
+from app.core.db import get_db
+from app.core.deps import current_user, owned_or_404
+from app.agent.llm import list_models, probe_capabilities
+from app.core.models import Bot, Provider, User, now
+from app.core.security import decrypt_secret, encrypt_secret
+from app.agent.serializers import provider_out
+from app.services.vendors import BY_ID, VENDORS, out as vendor_out, preset_price
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 

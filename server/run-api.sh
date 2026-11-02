@@ -12,4 +12,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
+# 目录结构调整后先做一次导入自检，报错比 uvicorn 的堆栈更好读
+./venv/bin/python -c "import app.main" || {
+  echo "后端导入失败，先单独跑：./venv/bin/python -c \"import app.main\""
+  exit 1
+}
+
 exec ./venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8100}" "$@"

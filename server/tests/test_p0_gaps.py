@@ -7,11 +7,11 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from app.db import SessionLocal
-from app.maintenance import expire_overdue
-from app.models import Approval, Chat, Message, Notification, Run, Thread, now
-from app.orchestrator import add_message
-from app.security import args_hash
+from app.core.db import SessionLocal
+from app.services.maintenance import expire_overdue
+from app.core.models import Approval, Chat, Message, Notification, Run, Thread, now
+from app.agent.orchestrator import add_message
+from app.core.security import args_hash
 from app.worker import process_one
 from tests.conftest import register, setup_workspace
 

@@ -20,15 +20,26 @@ os.environ["BOTLY_MAIL_DEV"] = "1"
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import SessionLocal  # noqa: E402
+from app.core.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import InviteCode  # noqa: E402
+from app.core.models import InviteCode  # noqa: E402
 
 
 @pytest.fixture(scope="session")
 def client():
     with TestClient(app, headers={"X-Botly-Client": "web"}) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _no_container_warm(monkeypatch):
+    """建群聊会在后台预热 Docker 容器；测试里不碰真实 Docker。"""
+    from app.sandbox import linux as linux_sandbox
+
+    async def noop(user_id: str, chat_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(linux_sandbox, "warm_container", noop)
 
 
 @pytest.fixture(scope="session")

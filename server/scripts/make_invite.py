@@ -11,8 +11,8 @@ import secrets
 import string
 from datetime import timedelta
 
-from app.db import init_db, session_scope
-from app.models import InviteCode, User, now
+from app.core.db import init_db, session_scope
+from app.core.models import InviteCode, User, now
 from sqlalchemy import select
 
 ALPHABET = string.ascii_uppercase + string.digits

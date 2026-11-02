@@ -18,9 +18,9 @@ import time
 
 import pytest
 
-import app.push as push
-from app.db import SessionLocal
-from app.events import notify
+import app.services.push as push
+from app.core.db import SessionLocal
+from app.core.events import notify
 from .conftest import register
 
 MAIL_SUFFIX = "@test.dev"

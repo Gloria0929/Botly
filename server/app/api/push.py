@@ -6,10 +6,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..deps import current_user
-from ..models import PushSubscription, User, now
-from ..push import keys, push_notification
+from app.core.db import get_db
+from app.core.deps import current_user
+from app.core.models import PushSubscription, User, now
+from app.services.push import keys, push_notification
 
 router = APIRouter(prefix="/push", tags=["push"])
 
@@ -110,7 +110,7 @@ def unsubscribe(
 @router.post("/test")
 def test_push(user: User = Depends(current_user), db: Session = Depends(get_db)):
     """发一条测试通知，走完整链路（落库 + SSE + Web Push）。"""
-    from ..events import notify
+    from app.core.events import notify
 
     n = notify(
         db,

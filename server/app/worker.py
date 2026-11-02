@@ -11,20 +11,20 @@ import sys
 from datetime import timedelta
 
 from sqlalchemy import delete, func, select, text, update
-from . import redis_bus
-from .alerts import check_alerts
-from .config import (
+from app.core import redis_bus
+from app.services.alerts import check_alerts
+from app.core.config import (
     ALERT_CHECK_INTERVAL,
     MAX_CONCURRENT_RUNS,
     MAX_CONCURRENT_RUNS_PER_USER,
     WORKER_CONCURRENCY,
     WORKER_LEASE_SECONDS,
 )
-from .db import IS_SQLITE, init_db, session_scope
-from .maintenance import expire_overdue, prune_expired
-from .logging_setup import get_logger, run_id_var, setup_logging
-from .models import Approval, LoginAttempt, Run, now
-from .orchestrator import RunExecutor, emit_run_status, execute_run
+from app.core.db import IS_SQLITE, init_db, session_scope
+from app.services.maintenance import expire_overdue, prune_expired
+from app.core.logging_setup import get_logger, run_id_var, setup_logging
+from app.core.models import Approval, LoginAttempt, Run, now
+from app.agent.orchestrator import RunExecutor, emit_run_status, execute_run
 
 log = get_logger("worker")
 

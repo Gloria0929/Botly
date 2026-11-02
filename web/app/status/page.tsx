@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   ServerCrash,
+  X,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import DailyChart from "@/components/ui/DailyChart";
@@ -35,6 +36,8 @@ export default function StatusPage() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState<StatsOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  // 已关闭的告警：先本地隐藏再回写，点 X 立刻消失，不用等下一次刷新
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
   const load = (d = days) => {
     setLoading(true);
@@ -50,9 +53,35 @@ export default function StatusPage() {
   }, [days]);
 
   const alerts = useMemo(
-    () => (data?.alerts || []).filter((a) => !a.acknowledged),
-    [data]
+    () => (data?.alerts || []).filter((a) => !a.acknowledged && !dismissed.has(a.id)),
+    [data, dismissed]
   );
+
+  const markDismissed = (ids: string[], on: boolean) =>
+    setDismissed((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => (on ? next.add(id) : next.delete(id)));
+      return next;
+    });
+
+  /** 关闭一条告警：先乐观隐藏，接口失败再放回来（失败原因由 api 统一提示） */
+  const dismiss = async (id: string) => {
+    markDismissed([id], true);
+    try {
+      await api.acknowledgeAlert(id);
+    } catch {
+      markDismissed([id], false);
+    }
+  };
+
+  const dismissAll = async () => {
+    const ids = alerts.map((a) => a.id);
+    if (!ids.length) return;
+    markDismissed(ids, true);
+    const results = await Promise.allSettled(ids.map((id) => api.acknowledgeAlert(id)));
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    if (failed.length) markDismissed(failed, false);
+  };
   const maxFail = Math.max(1, ...(data?.failures || []).map((f) => f.count));
   const activeDays = (data?.daily || []).filter(
     (d) => d.completed + d.failed + d.stopped + d.other > 0
@@ -92,37 +121,61 @@ export default function StatusPage() {
           </div>
 
           {alerts.length > 0 && (
-            <div className="mt-4 space-y-2">
-              {alerts.map((a) => (
-                <div
-                  key={a.id}
-                  className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 ${
-                    a.level === "critical"
-                      ? "border-danger/35 bg-danger/[0.07]"
-                      : "border-warn/35 bg-warn/[0.07]"
-                  }`}
-                >
-                  <AlertTriangle
-                    size={15}
-                    className={`mt-0.5 shrink-0 ${
-                      a.level === "critical" ? "text-danger" : "text-warn"
+            <div className="mt-4">
+              {alerts.length > 1 && (
+                <div className="mb-2 flex items-center justify-end">
+                  <button
+                    onClick={dismissAll}
+                    className="text-[11px] text-faint transition-colors hover:text-ink"
+                  >
+                    全部忽略（{alerts.length}）
+                  </button>
+                </div>
+              )}
+              <div className="space-y-2">
+                {alerts.map((a) => (
+                  <div
+                    key={a.id}
+                    className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 ${
+                      a.level === "critical"
+                        ? "border-danger/35 bg-danger/[0.07]"
+                        : "border-warn/35 bg-warn/[0.07]"
                     }`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className={`text-[12.5px] font-medium ${
+                  >
+                    <AlertTriangle
+                      size={15}
+                      className={`mt-0.5 shrink-0 ${
                         a.level === "critical" ? "text-danger" : "text-warn"
                       }`}
-                    >
-                      {a.title}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`text-[12.5px] font-medium ${
+                          a.level === "critical" ? "text-danger" : "text-warn"
+                        }`}
+                      >
+                        {a.title}
+                      </div>
+                      <div className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{a.body}</div>
                     </div>
-                    <div className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{a.body}</div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <span className="text-[10.5px] text-faint">
+                        {a.created_at ? timeAgo(a.created_at) : ""}
+                      </span>
+                      <button
+                        onClick={() => dismiss(a.id)}
+                        title="关闭这条告警"
+                        aria-label="关闭这条告警"
+                        className={`rounded-md p-1 text-faint transition-colors hover:bg-panel hover:text-ink ${
+                          a.level === "critical" ? "hover:text-danger" : ""
+                        }`}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
                   </div>
-                  <span className="shrink-0 text-[10.5px] text-faint">
-                    {a.created_at ? timeAgo(a.created_at) : ""}
-                  </span>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           )}
 

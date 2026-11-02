@@ -5,10 +5,10 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 
-from app.db import SessionLocal
-from app.graph import build_graph, run_config
-from app.models import Bot, Chat, Message, Run, Thread, UserSettings
-from app.orchestrator import LimitExceeded, RunExecutor
+from app.core.db import SessionLocal
+from app.agent.graph import build_graph, run_config
+from app.core.models import Bot, Chat, Message, Run, Thread, UserSettings
+from app.agent.orchestrator import LimitExceeded, RunExecutor
 from tests.conftest import register, setup_workspace
 
 

@@ -17,9 +17,9 @@ import argparse
 
 from sqlalchemy import create_engine, func, select, text
 
-from app import models  # noqa: F401  注册所有表
-from app.config import DATA_DIR, DATABASE_URL
-from app.db import Base
+from app.core import models  # noqa: F401  注册所有表
+from app.core.config import DATA_DIR, DATABASE_URL
+from app.core.db import Base
 
 
 def _counts(engine) -> dict[str, int]:

@@ -7,14 +7,14 @@ from __future__ import annotations
 from collections import Counter
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..deps import current_user
-from ..models import Alert, Chat, Run, User, now
-from ..redis_bus import queue_depth
+from app.core.db import get_db
+from app.core.deps import current_user
+from app.core.models import Alert, Chat, Run, User, now
+from app.core.redis_bus import queue_depth
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
@@ -28,6 +28,22 @@ def _reason_bucket(reason: str) -> str:
             if head:
                 return head[:40]
     return text[:60]
+
+
+@router.post("/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(
+    alert_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """确认（关闭）一条系统告警。告警是部署级、不含隐私，任意登录用户可确认。"""
+    alert = db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(404, "告警不存在")
+    if not alert.acknowledged_at:
+        alert.acknowledged_at = now()
+        db.flush()
+    return {"ok": True}
 
 
 @router.get("/overview")

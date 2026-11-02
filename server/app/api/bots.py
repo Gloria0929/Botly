@@ -7,13 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import mcp
-from ..db import get_db
-from ..deps import current_user, owned_or_404
-from ..models import Bot, Chat, ChatMember, Provider, Run, Skill, Task, User, UserSettings, now
-from ..serializers import bot_out
-from ..templates import BOT_TEMPLATES, out as template_out
-from ..tools import BUILTIN_TOOLS
+from app.tools import mcp
+from app.core.db import get_db
+from app.core.deps import current_user, owned_or_404
+from app.core.models import Bot, Chat, ChatMember, Provider, Run, Skill, Task, User, UserSettings, now
+from app.agent.serializers import bot_out
+from app.services.templates import BOT_TEMPLATES, out as template_out
+from app.tools.registry import BUILTIN_TOOLS
 
 router = APIRouter(prefix="/bots", tags=["bots"])
 

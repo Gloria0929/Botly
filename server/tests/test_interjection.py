@@ -5,9 +5,9 @@ import asyncio
 
 from sqlalchemy import func, select
 
-from app.db import SessionLocal
-from app.models import Bot, Chat, Message, Run, Task, Thread
-from app.orchestrator import RunExecutor
+from app.core.db import SessionLocal
+from app.core.models import Bot, Chat, Message, Run, Task, Thread
+from app.agent.orchestrator import RunExecutor
 from tests.conftest import register, setup_workspace
 
 

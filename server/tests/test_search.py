@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
-from app.db import SessionLocal
-from app.models import Chat, Message, Thread
+from app.core.db import SessionLocal
+from app.core.models import Chat, Message, Thread
 from tests.conftest import register
 
 

@@ -45,7 +45,11 @@ export type McpServer = {
   id: string;
   name: string;
   slug: string;
+  transport: "http" | "stdio" | string;
   url: string;
+  command: string | null;
+  args: string[];
+  env: Record<string, string>;
   level: "L1" | "L2" | "L3" | string;
   enabled: boolean;
   status: "unchecked" | "ok" | "error";
@@ -413,6 +417,8 @@ export type LogPage = {
   files: string[];
   log_dir: string;
   max_file_mb: number;
+  /** 被后端折叠掉的数据库语句条数（历史日志里残留的 SQL 回显） */
+  hidden_sql?: number;
 };
 
 export type LogModule = { module: string; count: number };

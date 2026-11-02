@@ -6,11 +6,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import MEMORY_INJECT_LIMIT
-from ..db import get_db
-from ..deps import current_user, owned_or_404
-from ..models import Bot, Memory, MemoryCandidate, User, now
-from ..memory_context import memory_context
+from app.core.config import MEMORY_INJECT_LIMIT
+from app.core.db import get_db
+from app.core.deps import current_user, owned_or_404
+from app.core.models import Bot, Memory, MemoryCandidate, User, now
+from app.agent.memory_context import memory_context
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 

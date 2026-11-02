@@ -40,9 +40,9 @@ def build_main_history(run_id: str, chat_id: str) -> list[dict]:
     """重建总指挥这一轮真正发给模型的消息。"""
     from sqlalchemy import select
 
-    from app.db import SessionLocal
-    from app.models import Bot, Chat, Run, Thread
-    from app.orchestrator import RunExecutor
+    from app.core.db import SessionLocal
+    from app.core.models import Bot, Chat, Run, Thread
+    from app.agent.orchestrator import RunExecutor
 
     with SessionLocal() as db:
         run = db.get(Run, run_id)
@@ -148,8 +148,8 @@ def test_invalid_and_exhausted_invite(client, invite):
     )
     assert r.status_code == 400 and "无效" in r.json()["detail"]
 
-    from app.db import SessionLocal
-    from app.models import InviteCode
+    from app.core.db import SessionLocal
+    from app.core.models import InviteCode
 
     with SessionLocal() as db:
         db.add(InviteCode(code="USED-UP-0001", max_uses=1, used_count=1))
@@ -286,9 +286,9 @@ def test_reasoning_content_is_echoed_back(client, invite):
     """推理模型的 reasoning_content 必须在下一轮原样回传，且不下发前端。"""
     from sqlalchemy import select
 
-    from app.db import SessionLocal
-    from app.models import Bot, Chat, Thread
-    from app.orchestrator import add_message
+    from app.core.db import SessionLocal
+    from app.core.models import Bot, Chat, Thread
+    from app.agent.orchestrator import add_message
 
     register(client, invite, "reasoning@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -330,9 +330,9 @@ def test_reasoning_content_on_all_tool_calls_of_a_turn(client, invite, monkeypat
     """一轮返回多个 tool_call 时，每条都要带思维链，否则下一轮接口报 400。"""
     from sqlalchemy import select
 
-    from app import orchestrator
-    from app.db import SessionLocal
-    from app.models import Message
+    from app.agent import orchestrator
+    from app.core.db import SessionLocal
+    from app.core.models import Message
 
     register(client, invite, "multireason@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -380,7 +380,7 @@ def test_delegate_preserves_reasoning_and_passes_worker_instruction(client, invi
     """派任务展示消息不能破坏思考链，子 Bot 必须收到指令和期望产出。"""
     import json
 
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, f"delegate-reasoning-{'full' if reasoning else 'empty'}@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -431,9 +431,9 @@ def test_new_run_ignores_old_control_messages_and_keeps_named_bot_replies(client
     """新任务不能沿用旧计划、报错和预算；其他 Bot 的结果必须可见且署名。"""
     from sqlalchemy import select
 
-    from app.db import SessionLocal
-    from app.models import Bot, Chat, Run, Thread
-    from app.orchestrator import add_message
+    from app.core.db import SessionLocal
+    from app.core.models import Bot, Chat, Run, Thread
+    from app.agent.orchestrator import add_message
 
     register(client, invite, "new-run-context@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -482,9 +482,9 @@ def test_current_request_survives_long_running_text_history(client, invite):
     """裁剪历史不能把本轮用户目标和插话挤掉。"""
     from sqlalchemy import select
 
-    from app.db import SessionLocal
-    from app.models import Chat, Thread
-    from app.orchestrator import add_message
+    from app.core.db import SessionLocal
+    from app.core.models import Chat, Thread
+    from app.agent.orchestrator import add_message
 
     register(client, invite, "long-current-context@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -507,7 +507,7 @@ def test_multiple_delegates_keep_their_own_results(client, invite, monkeypatch):
     """同轮两次派任务都要执行，第一项结果不能代替第二项结果。"""
     import json
 
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, "multiple-delegates@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -554,8 +554,8 @@ def test_worker_failure_returns_to_supervisor_for_final_reply(client, invite, mo
     """子 Bot 失败后仍需总指挥读取失败结果并回复用户。"""
     import json
 
-    from app import orchestrator
-    from app.llm import LLMError
+    from app.agent import orchestrator
+    from app.agent.llm import LLMError
 
     register(client, invite, "worker-failure-reply@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -595,9 +595,9 @@ def test_plan_resume_keeps_tool_history_valid(client, invite):
     """计划恢复必须回答 propose_plan 的 tool_call，且历史里不能有悬空调用。"""
     from sqlalchemy import select
 
-    from app.db import SessionLocal
-    from app.models import Thread
-    from app.orchestrator import add_message
+    from app.core.db import SessionLocal
+    from app.core.models import Thread
+    from app.agent.orchestrator import add_message
 
     register(client, invite, "toolhist@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -655,7 +655,7 @@ def test_approved_plan_returns_edited_assignments_to_supervisor(client, invite, 
     """计划被用户修改后，恢复调用必须读到最终分工而不是原计划。"""
     import json
 
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, "edited-plan-delegation@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -697,9 +697,9 @@ def test_history_cursor_replays_only_events_after_snapshot(client, invite):
     from sqlalchemy import func, select
 
     from app.api.stream import _stream
-    from app.db import SessionLocal
-    from app.events import emit
-    from app.models import Chat, Event
+    from app.core.db import SessionLocal
+    from app.core.events import emit
+    from app.core.models import Chat, Event
 
     register(client, invite, "history-cursor@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -784,7 +784,7 @@ def test_sandbox_escape_rejected(client, invite):
     register(client, invite, "sandbox@test.dev")
     chat_id, _ = setup_workspace(client)
 
-    from app import sandbox
+    from app.sandbox import files as sandbox
 
     with pytest.raises(sandbox.SandboxError):
         sandbox.safe_path("u1", chat_id, "../../etc/passwd")
@@ -891,8 +891,8 @@ def test_langgraph_checkpoint_holds_the_pause(client, invite):
     run = wait_status(client, run_id, {"waiting"})
     assert run["resume"]["kind"] == "plan"
 
-    from app.graph import build_graph, open_checkpointer, run_config
-    from app.orchestrator import RunExecutor
+    from app.agent.graph import build_graph, open_checkpointer, run_config
+    from app.agent.orchestrator import RunExecutor
 
     async def read_pending():
         async with open_checkpointer() as saver:
@@ -912,8 +912,8 @@ def test_interjection_joins_the_running_execution(client, invite):
     """RUN-13：执行中补充不新建执行，总指挥在下一轮模型调用前读到。"""
     from sqlalchemy import func, select
 
-    from app.db import SessionLocal
-    from app.models import Run
+    from app.core.db import SessionLocal
+    from app.core.models import Run
 
     register(client, invite, "interject@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -1038,7 +1038,7 @@ def test_usage_summary_and_cost(client, invite):
 def test_long_delegation_loop_and_historical_task_status(client, invite, monkeypatch):
     """超过 25 个图节点仍能完成；下一轮不应丢掉旧任务状态和详情。"""
     import json
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, "long-loop@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -1084,7 +1084,7 @@ def test_long_delegation_loop_and_historical_task_status(client, invite, monkeyp
 @pytest.mark.parametrize("failure", ["limit", "exception"])
 def test_aborted_worker_settles_task_and_stream(client, invite, monkeypatch, failure):
     import json
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, f"aborted-worker-{failure}@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -1118,9 +1118,9 @@ def test_aborted_worker_settles_task_and_stream(client, invite, monkeypatch, fai
 
 def test_completed_checkpoint_reconciles_run_without_replaying(client, invite, monkeypatch):
     """图已结束、业务状态被租约恢复时，只补收尾，不重跑模型。"""
-    from app import orchestrator
-    from app.db import SessionLocal
-    from app.models import Run
+    from app.agent import orchestrator
+    from app.core.db import SessionLocal
+    from app.core.models import Run
 
     register(client, invite, "finished-checkpoint@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -1150,7 +1150,7 @@ def test_event_reconnect_uses_latest_cursor():
 
 def test_model_timeout_has_a_visible_reason(monkeypatch):
     import httpx
-    from app import llm
+    from app.agent import llm
 
     async def timed_out(**kw):
         raise httpx.ReadTimeout("")
@@ -1169,7 +1169,7 @@ def test_model_timeout_has_a_visible_reason(monkeypatch):
 def test_approval_resume_counts_each_tool_once(client, invite, monkeypatch):
     """审批前后重放工具节点，不能把同一次调用算成多步。"""
     import json
-    from app import orchestrator
+    from app.agent import orchestrator
 
     register(client, invite, "resume-step-count@test.dev")
     chat_id, _ = setup_workspace(client)
@@ -1199,7 +1199,7 @@ def test_approval_resume_counts_each_tool_once(client, invite, monkeypatch):
 
 
 def test_batch_tool_calls_ignore_old_step_budget(client, invite, monkeypatch):
-    from app import orchestrator
+    from app.agent import orchestrator
     register(client, invite, "batch-step-count@test.dev")
     chat_id, _ = setup_workspace(client)
     client.patch(f"/api/chats/{chat_id}", json={"limits_override": {"max_steps": 3}})

@@ -3,6 +3,9 @@
 日志由 logging_setup 写入 `data/logs/app.log`；这里按行读取并做过滤，
 供前端「日志」页展示。只读，不提供删除或清空；也只会读固定目录下的
 轮转文件，不接收任意路径。
+
+数据库引擎的 SQL 回显（sqlalchemy.engine）属于实现细节，历史文件里还
+残留着大量多行 SQL，读取时一律跳过——否则日志页会被 SQL 刷屏。
 """
 from __future__ import annotations
 
@@ -11,15 +14,19 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
 
-from ..config import LOG_FILE_MAX_MB
-from ..deps import current_user
-from ..logging_setup import LOG_DIR
-from ..models import User
+from app.core.config import LOG_FILE_MAX_MB
+from app.core.deps import current_user
+from app.core.logging_setup import LOG_DIR
+from app.core.models import User
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
 # 单次最多读取的字节数，避免大文件一次性读进内存
 _MAX_BYTES = 8 * 1024 * 1024
+# 数据库引擎的 SQL 回显（sqlalchemy.engine.Engine）是实现细节，不属于
+# 「API 请求 / 执行链路 / 安全事件」这三类，历史日志文件里还残留着大量
+# 多行 SQL，读取时统一跳过，避免把日志页刷成 SQL 编辑器。
+_DB_LOGGER = re.compile(r"^sqlalchemy(\.|$)")
 # 行首格式：2026-10-29 18:40:00 LEVEL [module] ...（与 logging_setup 的 FILE_FMT 对应）
 _LINE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
@@ -72,11 +79,15 @@ def list_logs(
     needle = (q or "").strip().lower()
 
     matched: list[dict] = []
+    hidden_sql = 0
     for path in reversed(_log_files()):
         for raw in reversed(_read_lines(path)):
             m = _LINE.match(raw)
             if not m:
-                # 多行堆栈的续行：如果上一条命中过滤，本行也属于它；这里简单跳过
+                # 多行堆栈 / SQL 的续行：如果上一条命中过滤，本行也属于它；这里简单跳过
+                continue
+            if _DB_LOGGER.match(m["module"]):
+                hidden_sql += 1
                 continue
             rank = level_rank.get(m["level"], 0)
             if min_rank and rank < min_rank:
@@ -116,6 +127,8 @@ def list_logs(
         "files": files,
         "log_dir": str(LOG_DIR),
         "max_file_mb": LOG_FILE_MAX_MB,
+        # 本次读取时跳过的数据库语句条数（填满一页就停，所以是下限而非总数）
+        "hidden_sql": hidden_sql,
     }
 
 
@@ -126,6 +139,6 @@ def list_modules(user: User = Depends(current_user)):
     for path in reversed(_log_files()):
         for raw in _read_lines(path):
             m = _LINE.match(raw)
-            if m:
+            if m and not _DB_LOGGER.match(m["module"]):
                 seen[m["module"]] = seen.get(m["module"], 0) + 1
     return [{"module": k, "count": v} for k, v in sorted(seen.items(), key=lambda kv: -kv[1])]

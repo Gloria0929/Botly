@@ -6,9 +6,9 @@ import json
 
 from sqlalchemy import func, select
 
-from app.db import SessionLocal
-from app.models import Chat, Message, Run, Task, Thread, UsageLog
-from app.orchestrator import RunExecutor, _step_key, add_message
+from app.core.db import SessionLocal
+from app.core.models import Chat, Message, Run, Task, Thread, UsageLog
+from app.agent.orchestrator import RunExecutor, _step_key, add_message
 from tests.conftest import register, setup_workspace
 
 

@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..deps import current_user
-from ..models import Bot, Chat, Provider, Run, UsageLog, User, now
+from app.core.db import get_db
+from app.core.deps import current_user
+from app.core.models import Bot, Chat, Provider, Run, UsageLog, User, now
 
 router = APIRouter(prefix="/usage", tags=["usage"])
 
@@ -310,7 +310,7 @@ def usage_summary(
 def _trigger_preview(db: Session, run: Run) -> str:
     if not run.trigger_message_id:
         return ""
-    from ..models import Message
+    from app.core.models import Message
 
     msg = db.get(Message, run.trigger_message_id)
     if not msg:

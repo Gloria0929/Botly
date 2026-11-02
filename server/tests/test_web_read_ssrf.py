@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from app import tools
+from app.tools import registry as tools
 
 
 def test_literal_private_addresses_rejected():
