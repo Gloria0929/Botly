@@ -55,6 +55,30 @@ export const api = {
   logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   changePassword: (current_password: string, new_password: string) =>
     req("/auth/password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
+  /** ACC-08：申请重置密码。不区分邮箱是否存在，避免被用来枚举账号 */
+  forgotPassword: (email: string) =>
+    req<{ ok: boolean; dev_link?: string }>("/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  /** ACC-08：用邮件里的令牌设置新密码（成功后所有旧会话失效） */
+  resetPassword: (token: string, password: string) =>
+    req<{ ok: boolean; email: string }>("/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
+  /** ACC-08：给当前账号发验证邮件 */
+  sendVerification: () =>
+    req<{ ok: boolean; already: boolean; email: string; dev_link?: string }>(
+      "/auth/send-verification",
+      { method: "POST" }
+    ),
+  /** ACC-08：消费验证邮件里的令牌 */
+  verifyEmail: (token: string) =>
+    req<{ ok: boolean; email: string }>("/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
   /** ACC-07：删除账号（立即停用，30 天后彻底清除） */
   deleteAccount: (password: string, confirm_email: string) =>
     req<{ ok: boolean; purge_after: string | null; retention_days: number }>("/auth/account", {
@@ -321,6 +345,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  /** NTF-06：Web Push 配置与订阅管理 */
+  pushConfig: () => req<{ enabled: boolean; public_key: string }>("/push/config"),
+  pushSubscriptions: () =>
+    req<{ items: { id: string; endpoint: string; user_agent: string; created_at: string | null }[] }>(
+      "/push/subscriptions"
+    ),
+  pushSubscribe: (body: { endpoint: string; keys: { p256dh: string; auth: string }; user_agent?: string }) =>
+    req<{ ok: boolean }>("/push/subscriptions", { method: "POST", body: JSON.stringify(body) }),
+  pushUnsubscribe: (endpoint: string) =>
+    req<{ ok: boolean }>("/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) }),
+  pushTest: () => req<{ ok: boolean; id: string }>("/push/test", { method: "POST" }),
 
   // 设置
   settings: () => req<any>("/settings"),

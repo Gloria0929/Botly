@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .config import EVENT_RETENTION_DAYS, LOG_RETENTION_DAYS
 from .accounts import purge_due_accounts
 from .events import emit, notify
-from .models import Approval, Event, Message, Question, Run, UsageLog, now
+from .models import Approval, Chat, EmailToken, Event, Message, Question, Run, UsageLog, now
 from .logging_setup import get_logger
 from .orchestrator import emit_run_status, settle_run_tasks
 
@@ -43,6 +43,14 @@ def _fail_waiting_run(db: Session, run: Run, reason: str) -> None:
     run.end_reason = reason
     run.resume_payload = None
     settle_run_tasks(db, run, "failed", reason)
+    # RUN-12：并行子执行超时失败时，它对应的任务和 delegate 结果也要收尾，
+    # 否则父执行会一直等一个永远不会再变化的子任务。
+    if run.parent_task_id:
+        from .orchestrator import RunExecutor
+
+        ex = RunExecutor(run.id)
+        main = ex._main_thread(db, db.get(Chat, run.chat_id))
+        ex._child_task_aborted(db, run, main, "failed", reason)
     db.flush()
     emit_run_status(db, run)
 
@@ -131,6 +139,7 @@ def prune_expired(db: Session) -> dict[str, int]:
     - 调用日志保留 30 天；到期后只清掉错误详情与耗时，token
       统计继续保留，用量页仍能按历史聚合。
     - 已删除账号超过 30 天保留期后彻底清除（ACC-07）。
+    - 邮件令牌（ACC-08）过期 7 天后删除，只保留最近的可追溯记录。
     """
     removed_events = db.execute(
         delete(Event).where(Event.created_at < now() - timedelta(days=EVENT_RETENTION_DAYS))
@@ -143,11 +152,15 @@ def prune_expired(db: Session) -> dict[str, int]:
         )
         .values(error=None, latency_ms=0)
     ).rowcount or 0
+    removed_tokens = db.execute(
+        delete(EmailToken).where(EmailToken.created_at < now() - timedelta(days=7))
+    ).rowcount or 0
     purged_accounts = purge_due_accounts(db)
     if purged_accounts:
         log.warning("已彻底清除到期账号 %d 个", len(purged_accounts))
     return {
         "events": removed_events,
         "usage_details": scrubbed_logs,
+        "email_tokens": removed_tokens,
         "accounts": len(purged_accounts),
     }

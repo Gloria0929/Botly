@@ -124,19 +124,24 @@ def message_out(m: Message, sender_bot: Bot | None = None) -> dict:
     return data
 
 
-def run_out(run: Run) -> dict:
+def run_out(run: Run, extra_tokens: int = 0, extra_steps: int = 0) -> dict:
+    # RUN-12：并行子执行单独记账，展示时把它们的消耗合并到父执行上，
+    # 否则群聊底部的「tokens / 步数」会明显偏低。
     return {
         "id": run.id,
         "chat_id": run.chat_id,
         "status": run.status,
-        "steps_used": run.steps_used,
-        "tokens_used": run.tokens_used,
+        "steps_used": run.steps_used + extra_steps,
+        "tokens_used": run.tokens_used + extra_tokens,
         "started_at": iso(run.started_at),
         "ended_at": iso(run.ended_at),
         "end_reason": run.end_reason,
         "mode": run.mode,
         "target_bot_id": run.target_bot_id,
         "resume": run.resume_payload,
+        # RUN-12：并行子执行对前端透明，只有调度/排障时才需要区分
+        "parent_run_id": run.parent_run_id,
+        "parent_task_id": run.parent_task_id,
     }
 
 
@@ -153,6 +158,7 @@ def task_out(task: Task, bot: Bot | None) -> dict:
         "status": task.status,
         "result": task.result,
         "attempt": task.attempt,
+        "batch": task.batch or 0,
         "tokens_used": task.tokens_used,
         "started_at": iso(task.started_at),
         "ended_at": iso(task.ended_at),

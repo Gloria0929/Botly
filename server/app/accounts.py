@@ -25,6 +25,7 @@ from .models import (
     Bot,
     Chat,
     ChatMember,
+    EmailToken,
     Event,
     FileRec,
     LoginAttempt,
@@ -32,6 +33,7 @@ from .models import (
     Message,
     Notification,
     Provider,
+    PushSubscription,
     Question,
     Run,
     Task,
@@ -44,7 +46,7 @@ from .models import (
 )
 
 RETENTION_DAYS = 30
-ACTIVE_RUN_STATUSES = ("queued", "running", "waiting")
+ACTIVE_RUN_STATUSES = ("queued", "running", "waiting", "waiting_children")
 OPEN_TASK_STATUSES = ("queued", "running", "waiting_approval", "waiting_reply")
 
 # 彻底清除的顺序：先子表后主表，满足外键约束。
@@ -63,7 +65,9 @@ _PURGE_ORDER = (
     Memory,
     Notification,
     Upload,
+    EmailToken,
     Provider,
+    PushSubscription,
     Bot,
     UserSettings,
 )

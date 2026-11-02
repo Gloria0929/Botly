@@ -5,6 +5,8 @@ import {
   Check,
   ChevronDown,
   Loader2,
+  Mail,
+  MailCheck,
   Plus,
   Save,
   Trash2,
@@ -17,6 +19,13 @@ import Select from "@/components/ui/Select";
 import { useConfirm } from "@/components/ui/Confirm";
 import Modal from "@/components/ui/Modal";
 import { api } from "@/lib/api";
+import {
+  isIOS,
+  pushState as getPushState,
+  subscribePush,
+  unsubscribePush,
+  type PushSupport,
+} from "@/lib/push";
 import { capLabel, modelCapability } from "@/lib/fmt";
 import type { Me, Provider, Vendor } from "@/lib/types";
 import { toast } from "@/lib/ui";
@@ -39,6 +48,27 @@ export default function SettingsPage() {
   const [del, setDel] = useState({ password: "", email: "" });
   const [deleting, setDeleting] = useState(false);
   const [notifyPerm, setNotifyPerm] = useState("default");
+  const [sendingVerify, setSendingVerify] = useState(false);
+  const [pushSt, setPushSt] = useState<PushSupport | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+
+  // ACC-08：发一封验证邮件；本地没配 SMTP 时后端会回 dev_link，直接复制给用户
+  const sendVerify = async () => {
+    setSendingVerify(true);
+    try {
+      const r = await api.sendVerification();
+      if (r.dev_link) {
+        await navigator.clipboard?.writeText(r.dev_link).catch(() => {});
+        toast("开发模式：验证链接已复制，粘贴到浏览器打开", "ok");
+      } else {
+        toast(`验证邮件已发送到 ${r.email}`, "ok");
+      }
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setSendingVerify(false);
+    }
+  };
 
   const load = () => {
     api.me().then(setMe).catch(() => {});
@@ -50,6 +80,7 @@ export default function SettingsPage() {
     load();
     api.vendors().then(setVendors).catch(() => {});
     if (typeof Notification !== "undefined") setNotifyPerm(Notification.permission);
+    getPushState().then(setPushSt).catch(() => {});
   }, []);
 
   const saveSettings = async (patch: any, msg = "已保存") => {
@@ -80,6 +111,43 @@ export default function SettingsPage() {
     } catch (e: any) {
       toast(e.message, "error");
       setDeleting(false);
+    }
+  };
+
+  // NTF-06：Web Push（页面关闭后由 Service Worker 接收推送）
+  const enablePush = async () => {
+    setPushBusy(true);
+    try {
+      await subscribePush();
+      setPushSt("subscribed");
+      toast("已开启 Web Push，关闭页面后也能收到提醒", "ok");
+    } catch (e: any) {
+      toast(e.message, "error");
+      getPushState().then(setPushSt).catch(() => {});
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const disablePush = async () => {
+    setPushBusy(true);
+    try {
+      await unsubscribePush();
+      setPushSt("idle");
+      toast("已关闭 Web Push", "info");
+    } catch (e: any) {
+      toast(e.message, "error");
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const testPush = async () => {
+    try {
+      await api.pushTest();
+      toast("测试通知已发送：页面全部关闭时才会弹系统通知", "ok");
+    } catch (e: any) {
+      toast(e.message, "error");
     }
   };
 
@@ -355,6 +423,8 @@ export default function SettingsPage() {
                   if (typeof Notification === "undefined") return toast("当前浏览器不支持", "error");
                   const p = await Notification.requestPermission();
                   setNotifyPerm(p);
+                  setPushSt(null);
+                  getPushState().then(setPushSt).catch(() => {});
                   toast(
                     p === "granted" ? "已开启" : "已拒绝，将回退到页面内通知中心",
                     p === "granted" ? "ok" : "info"
@@ -375,10 +445,65 @@ export default function SettingsPage() {
               </label>
               <span className="text-[10.5px] text-faint">页面内通知中心不受此开关影响</span>
             </div>
+
+            {/* NTF-06：Web Push */}
+            <div className="mt-3 border-t border-line pt-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-[12px] font-medium text-muted">关闭页面后仍提醒（Web Push）</span>
+                {pushSt === "subscribed" ? (
+                  <>
+                    <button className="btn-ghost" disabled={pushBusy} onClick={disablePush}>
+                      关闭推送
+                    </button>
+                    <button className="btn-ghost" onClick={testPush}>
+                      发测试推送
+                    </button>
+                  </>
+                ) : pushSt === "denied" ? (
+                  <span className="text-[11px] text-warn">
+                    通知权限被拒绝，请先在浏览器站点设置里允许通知
+                  </span>
+                ) : pushSt === "unsupported" ? (
+                  <span className="text-[11px] text-faint">当前浏览器不支持 Web Push</span>
+                ) : pushSt === "insecure" ? (
+                  <span className="text-[11px] text-faint">
+                    Web Push 需要 HTTPS（本机 localhost 可直接开启）
+                  </span>
+                ) : (
+                  <button className="btn-ghost" disabled={pushBusy || pushSt === null} onClick={enablePush}>
+                    {pushSt === null ? "检查中…" : "开启推送"}
+                  </button>
+                )}
+              </div>
+              <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
+                页面开着时不会重复弹窗，仍由页面内的通知负责；全部页面关闭后，系统通知由推送服务送达。
+                {isIOS() && " iOS / iPadOS 需先把站点添加到主屏幕，并从主屏幕打开。"}
+              </p>
+            </div>
           </Section>
 
           {/* 账号 */}
           <Section title="账号" desc={me?.email}>
+            {/* ACC-08：邮箱验证状态 */}
+            <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-line bg-panel2/40 px-3 py-2">
+              {me?.email_verified ? (
+                <MailCheck size={13} className="shrink-0 text-ok" />
+              ) : (
+                <Mail size={13} className="shrink-0 text-warn" />
+              )}
+              <span className="text-[11.5px] text-muted">{me?.email}</span>
+              {me?.email_verified ? (
+                <span className="text-[11px] text-ok">已验证</span>
+              ) : (
+                <>
+                  <span className="text-[11px] text-warn">未验证</span>
+                  <span className="text-[10.5px] text-faint">不影响使用，但没法用邮箱找回密码</span>
+                  <button className="btn-ghost ml-auto" disabled={sendingVerify} onClick={sendVerify}>
+                    {sendingVerify ? <Loader2 size={12} className="animate-spin" /> : "发送验证邮件"}
+                  </button>
+                </>
+              )}
+            </div>
             <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
               <input
                 className="field"

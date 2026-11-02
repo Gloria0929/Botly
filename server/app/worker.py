@@ -24,7 +24,7 @@ from .db import IS_SQLITE, init_db, session_scope
 from .maintenance import expire_overdue, prune_expired
 from .logging_setup import get_logger, run_id_var, setup_logging
 from .models import Approval, LoginAttempt, Run, now
-from .orchestrator import RunExecutor, execute_run
+from .orchestrator import RunExecutor, emit_run_status, execute_run
 
 log = get_logger("worker")
 
@@ -38,6 +38,33 @@ _last_alert_check = 0.0
 def _handle_stop(*_args):
     global _stop
     _stop = True
+
+
+def _wake_waiting_parents() -> list[str]:
+    """RUN-12：并行子执行全部结束后，把 waiting_children 的父执行重新排队。
+
+    子执行结束时也会主动唤醒父执行，但进程崩溃/停机可能错过那一次；这里是
+    兜底，保证父执行不会永远停在等待状态（最多晚一个 reconcile 周期）。
+    """
+    woke: list[str] = []
+    with session_scope() as db:
+        parents = db.scalars(
+            select(Run).where(Run.status == "waiting_children")
+        ).all()
+        for parent in parents:
+            active = db.scalar(
+                select(func.count(Run.id)).where(
+                    Run.parent_run_id == parent.id,
+                    Run.status.in_(("queued", "running", "waiting")),
+                )
+            )
+            if active:
+                continue
+            parent.status = "queued"
+            db.flush()
+            emit_run_status(db, parent)
+            woke.append(parent.id)
+    return woke
 
 
 def _recover_and_collect() -> list[str]:
@@ -83,9 +110,16 @@ def _recover_and_collect() -> list[str]:
             select(Run).where(Run.status == "queued").order_by(Run.created_at).limit(50)
         ).all()
         for r in queued:
+            if r.parent_run_id:
+                # 子执行不受「每用户并发数」限制：一次并行派活本来就会有多个
+                # 子任务同时跑，按顶层执行的上限卡住会让批次永远起不来。
+                picked.append(r.id)
+                continue
             running = db.scalar(
                 select(func.count(Run.id)).where(
-                    Run.user_id == r.user_id, Run.status == "running"
+                    Run.user_id == r.user_id,
+                    Run.status == "running",
+                    Run.parent_run_id.is_(None),
                 )
             )
             if (running or 0) >= MAX_CONCURRENT_RUNS_PER_USER:
@@ -106,9 +140,19 @@ def _claim(run_id: str) -> bool:
         if not run or run.status != "queued":
             return False
         total = db.scalar(select(func.count(Run.id)).where(Run.status == "running")) or 0
-        personal = db.scalar(select(func.count(Run.id)).where(Run.status == "running", Run.user_id == run.user_id)) or 0
-        if total >= MAX_CONCURRENT_RUNS or personal >= MAX_CONCURRENT_RUNS_PER_USER:
+        if total >= MAX_CONCURRENT_RUNS:
             return False
+        # 子执行只受全局并发限制，不再占「每用户并发」的名额（RUN-12）
+        if not run.parent_run_id:
+            personal = db.scalar(
+                select(func.count(Run.id)).where(
+                    Run.status == "running",
+                    Run.user_id == run.user_id,
+                    Run.parent_run_id.is_(None),
+                )
+            ) or 0
+            if personal >= MAX_CONCURRENT_RUNS_PER_USER:
+                return False
         res = db.execute(
             update(Run)
             .where(Run.id == run_id, Run.status == "queued")
@@ -170,6 +214,7 @@ async def main(once: bool = False) -> None:
     import time
 
     if once:
+        _wake_waiting_parents()
         run_id = await redis_bus.dequeue(timeout=2)
         pending = [run_id] if run_id else _recover_and_collect()
         if pending:
@@ -202,6 +247,8 @@ async def main(once: bool = False) -> None:
                 # 直接认领数据库里的 queued 执行，而不是往 Redis 再塞一份。
                 # 之前每 5 秒重复 LPUSH 会让队列无限膨胀，Redis 断开时
                 # 还依赖出队失败才走数据库路径；_claim 本身是原子的，直接跑更稳。
+                # RUN-12：先唤醒「子任务都跑完」的父执行，否则它会一直等下去。
+                _wake_waiting_parents()
                 for rid in _recover_and_collect():
                     if rid in running:
                         continue

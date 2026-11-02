@@ -69,7 +69,9 @@ export default function ChatList({
             <div className="flex items-center gap-2">
               <span
                 className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  c.run_status === "running" || c.run_status === "queued"
+                  c.run_status === "running" ||
+                  c.run_status === "queued" ||
+                  c.run_status === "waiting_children"
                     ? "animate-pulseSoft bg-accent"
                     : c.run_status === "waiting"
                       ? "bg-warn"

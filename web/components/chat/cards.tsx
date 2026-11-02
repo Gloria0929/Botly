@@ -21,7 +21,6 @@ import {
   ShieldAlert,
   Target,
   Terminal,
-  Wrench,
   X,
 } from "lucide-react";
 import type { Bot, Message, PlanStep, Task } from "@/lib/types";
@@ -60,20 +59,43 @@ export function PlanCard({
     if (!pending) setEditing(false);
   }, [pending]);
 
+  // RUN-12：同一个 batch 的步骤会并行执行，卡片上直接标出来
+  const batchCounts = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const s of steps) {
+      if (typeof s.batch === "number" && s.batch > 0) {
+        counts.set(s.batch, (counts.get(s.batch) || 0) + 1);
+      }
+    }
+    return counts;
+  }, [steps]);
+  const parallelBatches = [...batchCounts.values()].filter((n) => n >= 2).length;
+
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center gap-2 border-b border-line bg-panel2/50 px-4 py-2.5">
         <ListChecks size={15} className="text-accent" />
         <span className="text-[13px] font-medium">执行计划</span>
         <span className="chip ml-1">{steps.length} 步</span>
+        {parallelBatches > 0 && (
+          <span className="chip text-accent" title="同一批次的步骤会同时派给不同成员">
+            {parallelBatches} 批并行
+          </span>
+        )}
         <span className="ml-auto text-[11.5px] text-faint">
           {status === "pending" ? "等待确认" : status === "approved" ? "已确认" : "已取消"}
         </span>
       </div>
 
       <div className="divide-y divide-line">
-        {steps.map((s, i) => (
-          <div key={i} className="flex items-start gap-3 px-4 py-3">
+        {steps.map((s, i) => {
+          const batch = typeof s.batch === "number" && s.batch > 0 ? s.batch : 0;
+          const parallel = batch > 0 && (batchCounts.get(batch) || 0) >= 2;
+          return (
+          <div
+            key={i}
+            className={`flex items-start gap-3 px-4 py-3 ${parallel ? "bg-accent/[0.04]" : ""}`}
+          >
             <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line bg-panel2 text-[11px] text-muted">
               {i + 1}
             </div>
@@ -115,7 +137,14 @@ export function PlanCard({
                 </div>
               ) : (
                 <>
-                  <div className="text-[13px] leading-snug">{s.title}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[13px] leading-snug">{s.title}</span>
+                    {parallel && (
+                      <span className="chip shrink-0 text-accent" title="同一批次并行执行">
+                        并行 · 第 {batch} 批
+                      </span>
+                    )}
+                  </div>
                   <div className="mt-1 flex items-center gap-2 text-[11.5px] text-faint">
                     <span className="chip">{s.bot}</span>
                     {s.expected && <span className="truncate">产出：{s.expected}</span>}
@@ -124,7 +153,8 @@ export function PlanCard({
               )}
             </div>
           </div>
-        ))}
+          );
+        })}
         {editing && (
           <div className="px-4 py-2">
             <button
@@ -326,32 +356,17 @@ export function TaskSummaryLine({
 export function TaskInlineDetail({
   msg,
   live,
-  messages,
   open,
   onToggle,
   tokensFallback = 0,
 }: {
   msg: Message;
   live?: Task;
-  messages: Message[];
   open: boolean;
   onToggle: () => void;
   tokensFallback?: number;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  const threadId = live?.thread_id || msg.meta?.thread_id || msg.meta?.task_id;
-  const taskId = live?.id || msg.meta?.task_id;
-  const mine = useMemo(
-    () =>
-      messages.filter(
-        (m) =>
-          (threadId && m.thread_id === threadId) ||
-          // 群聊里的工具调用是镜像消息，thread_id 仍是主线程，靠 meta.task_id 关联
-          (taskId && m.meta?.task_id === taskId)
-      ),
-    [messages, threadId, taskId]
-  );
-  const toolCount = mine.filter((m) => m.type === "tool_call").length;
   const instruction = live?.instruction || msg.meta?.delegation_instruction || "";
   const expected = live?.expected_output || msg.meta?.expected_output || "";
   const status = live?.status || msg.meta?.task_status;
@@ -396,12 +411,11 @@ export function TaskInlineDetail({
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-faint">
             {st && <span className={st.cls}>{st.label}</span>}
             <span className="flex items-center gap-1"><Coins size={10} /> {num(live?.tokens_used || tokensFallback)} tokens</span>
-            <span className="flex items-center gap-1"><Wrench size={10} /> {toolCount} 次工具调用</span>
             {!!live?.attempt && <span>第 {live.attempt} 次执行</span>}
             {live?.started_at && <span className="flex items-center gap-1"><Clock3 size={10} /> {elapsedText(live, now) || "—"}</span>}
           </div>
           <div className="flex items-center gap-1 text-[10.5px] text-faint">
-            <Info size={10} /> 执行过程逐条显示在群聊里，完整任务面板在右侧「任务」
+            <Info size={10} /> 完整执行过程（含工具调用）在右侧「任务」面板查看
           </div>
         </div>
       )}

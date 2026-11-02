@@ -41,7 +41,12 @@ def overview(
     runs = list(
         db.scalars(
             select(Run)
-            .where(Run.user_id == user.id, Run.created_at >= since)
+            .where(
+                Run.user_id == user.id,
+                Run.created_at >= since,
+                # RUN-12：并行子执行不计入用户看到的执行量/成功率
+                Run.parent_run_id.is_(None),
+            )
             .order_by(Run.created_at)
         ).all()
     )
@@ -105,7 +110,11 @@ def overview(
         select(Alert).order_by(Alert.created_at.desc()).limit(10)
     ).all()
     queued_now = db.scalar(
-        select(func.count(Run.id)).where(Run.user_id == user.id, Run.status == "queued")
+        select(func.count(Run.id)).where(
+            Run.user_id == user.id,
+            Run.status == "queued",
+            Run.parent_run_id.is_(None),
+        )
     ) or 0
 
     return {

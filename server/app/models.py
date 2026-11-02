@@ -41,9 +41,32 @@ class User(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default="active")
     invite_code_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # ACC-08：邮箱验证时间；为空表示未验证（第一版不阻断使用，只在设置页提示）
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 会话代数：重置/修改密码时 +1，让所有旧 Cookie 立即失效
+    session_epoch: Mapped[int] = mapped_column(Integer, default=0)
     # ACC-07：删除账号先停用、数据保留 30 天供管理员恢复，到期后彻底清除。
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     purge_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class EmailToken(Base, TimestampMixin):
+    """ACC-08：一次性邮件令牌（找回密码 / 邮箱验证）。
+
+    只存 SHA-256 摘要，泄库也拿不到可用链接；用完置 used_at，不物理删除，
+    便于排查“链接为什么失效”。
+    """
+
+    __tablename__ = "email_tokens"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)  # reset_password | verify_email
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
 
 
 class LoginAttempt(Base):
@@ -159,6 +182,9 @@ class Thread(Base, TimestampMixin):
     # MEM-05：主线程长对话的自动摘要与覆盖到的 seq，避免上下文无限增长。
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary_upto_seq: Mapped[int] = mapped_column(Integer, default=0)
+    # 消息序号计数器：并行子任务会同时往同一个线程写消息，用数据库自增
+    # 分配 seq 才能保证不重号（max(seq)+1 在并发下会算出同一个值）。
+    seq_counter: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Run(Base, TimestampMixin):
@@ -170,7 +196,7 @@ class Run(Base, TimestampMixin):
     chat_id: Mapped[str] = mapped_column(String(32), ForeignKey("chats.id"), index=True)
     trigger_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
-    # queued | running | waiting | completed | failed | stopped
+    # queued | running | waiting | waiting_children（等并行子任务）| completed | failed | stopped
     steps_used: Mapped[int] = mapped_column(Integer, default=0)
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -192,6 +218,10 @@ class Run(Base, TimestampMixin):
     # CHT-07：分支线程里的执行。为空表示跑在主线程；否则 supervisor 的上下文
     # 与回复都落在该分支线程，不打断主线程。
     thread_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # RUN-12：并行的子任务各自是一条独立执行（有自己的检查点、审批、停止与
+    # token 统计），用 parent_run_id 指回总指挥那次执行。为空表示顶层执行。
+    parent_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    parent_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class Task(Base, TimestampMixin):
@@ -210,6 +240,8 @@ class Task(Base, TimestampMixin):
     # 同一子任务的稳定标识（计划步骤标题或指令的归一化文本）。改派换个说法
     # 也要算作同一个子任务，所以不能用指令原文做判断（RUN-10）
     step_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # RUN-12：所属计划批次。同一批次（>0）的步骤并行执行；0 表示未按批次调度。
+    batch: Mapped[int] = mapped_column(Integer, default=0)
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -332,6 +364,18 @@ class Notification(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(200), default="")
     body: Mapped[str] = mapped_column(Text, default="")
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PushSubscription(Base, TimestampMixin):
+    """NTF-06：Web Push 订阅（Service Worker PushManager 生成）。"""
+
+    __tablename__ = "push_subscriptions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
+    user_agent: Mapped[str] = mapped_column(String(300), default="")
 
 
 class Event(Base):

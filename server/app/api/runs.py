@@ -12,13 +12,14 @@ from ..deps import current_user, owned_or_404
 from ..events import emit
 from ..models import Approval, Bot, Chat, Message, Question, Run, Task, Thread, User, now
 from ..maintenance import expire_approval, expire_question
-from ..orchestrator import emit_run_status, emit_task_status, settle_run_tasks
+from ..orchestrator import emit_run_status, emit_task_status, settle_run_tasks, stop_child_runs
 from ..redis_bus import enqueue
 from ..serializers import message_out, run_out, task_out
 
 router = APIRouter(tags=["runs"])
 
-ACTIVE = ("queued", "running", "waiting")
+# RUN-12：waiting_children 表示总指挥在等并行子任务，仍然属于「进行中」
+ACTIVE = ("queued", "running", "waiting", "waiting_children")
 
 
 def _load_run(db: Session, run_id: str, user_id: str) -> Run:
@@ -69,6 +70,8 @@ def stop_run(run_id: str, user: User = Depends(current_user), db: Session = Depe
     run.end_reason = "用户停止"
     run.resume_payload = None
     db.flush()
+    # RUN-12：并行子执行是独立的 Run，必须一起停，否则后台还在继续跑
+    stop_child_runs(db, run, "用户停止")
     _invalidate_pending(db, run)
     main = db.scalar(select(Thread).where(Thread.chat_id == run.chat_id, Thread.type == "main"))
     if main:

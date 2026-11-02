@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, X } from "lucide-react";
 import { api } from "@/lib/api";
 import Avatar from "@/components/ui/Avatar";
-import type { ChatFile, Message, Task } from "@/lib/types";
+import type { Bot, ChatFile, Message, Task } from "@/lib/types";
 import { bytes, clock, num, timeAgo } from "@/lib/fmt";
 
 import { ToolBlock } from "./cards";
@@ -30,6 +30,8 @@ export default function SidePanel({
   onSelectTask,
   pendingApprovals = [],
   onOpenApproval,
+  messages = [],
+  supervisor = null,
 }: {
   chatId: string;
   tasks: Task[];
@@ -40,12 +42,37 @@ export default function SidePanel({
   onSelectTask: (t: Task | null) => void;
   pendingApprovals?: { id: string; tool: string; bot_name: string }[];
   onOpenApproval?: (id: string) => void;
+  /** 主线程消息：总指挥自己的工具调用留在这里，群聊不展示 */
+  messages?: Message[];
+  supervisor?: Bot | null;
 }) {
   const [tab, setTab] = useState<"tasks" | "files">("tasks");
   const [preview, setPreview] = useState<ChatFile | null>(null);
+  // 总指挥执行过程（工具调用）单独一屏；子任务线程由 activeTask 控制
+  const [supervisorOpen, setSupervisorOpen] = useState(false);
   // 任务面板只列进行中的任务；已完成/失败的细节通过群聊消息下的「查看过程」打开
   const ACTIVE_TASK = new Set(["queued", "running", "waiting_approval", "waiting_reply"]);
   const activeTasks = tasks.filter((t) => ACTIVE_TASK.has(t.status));
+
+  // 总指挥在主线程里的工具调用：群聊只显示聊天记录，过程统一收进面板
+  const supervisorTools = useMemo(
+    () =>
+      messages.filter((m) => {
+        if (m.meta?.task_id) return false;
+        if (m.type === "tool_call") {
+          const name = m.meta?.tool_calls?.[0]?.function?.name;
+          // 派活、计划、提问在群聊里都有专门的卡片，不在这里重复
+          return name !== "delegate" && name !== "propose_plan" && name !== "ask_user";
+        }
+        return m.type === "tool_result";
+      }),
+    [messages]
+  );
+  const supervisorCalls = supervisorTools.filter((m) => m.type === "tool_call");
+
+  useEffect(() => {
+    if (activeTask) setSupervisorOpen(false);
+  }, [activeTask?.id]);
 
   useEffect(() => {
     if (activeTask) setTab("tasks");
@@ -101,13 +128,34 @@ export default function SidePanel({
       {tab === "tasks" ? (
         activeTask ? (
           <TaskThread key={activeTask.id} chatId={chatId} task={activeTask} onBack={() => onSelectTask(null)} />
+        ) : supervisorOpen ? (
+          <SupervisorThread
+            msgs={supervisorTools}
+            supervisor={supervisor}
+            onBack={() => setSupervisorOpen(false)}
+          />
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto p-2">
-            {activeTasks.length === 0 && (
+            {supervisorCalls.length > 0 && (
+              <button
+                onClick={() => setSupervisorOpen(true)}
+                className="mb-1 w-full rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-line hover:bg-panel2"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Avatar value={supervisor?.avatar || "🧭"} size={16} />
+                  <span className="text-[12px] font-medium">{supervisor?.name || "总指挥"}</span>
+                  <span className="ml-auto text-[10.5px] text-faint">{supervisorCalls.length} 次工具调用</span>
+                </div>
+                <div className="mt-1 flex items-center gap-1 text-[11.5px] leading-relaxed text-muted">
+                  <Terminal size={11} className="shrink-0 text-faint" /> 工具调用与返回
+                </div>
+              </button>
+            )}
+            {activeTasks.length === 0 && supervisorCalls.length === 0 && (
               <div className="px-3 py-8 text-center text-[12px] leading-relaxed text-faint">
                 当前没有进行中的任务
                 <br />
-                已完成的过程可点群聊消息下的「查看过程」
+                已完成的过程可点群聊消息下的「详情」
               </div>
             )}
             {activeTasks.map((t) => (
@@ -119,6 +167,11 @@ export default function SidePanel({
                 <div className="flex items-center gap-1.5">
                   <Avatar value={t.bot_avatar} size={16} />
                   <span className="text-[12px] font-medium">{t.bot_name}</span>
+                  {!!t.batch && (
+                    <span className="chip px-1 py-0 text-[10px] text-accent" title="和其它步骤并行执行">
+                      并行 {t.batch}
+                    </span>
+                  )}
                   <span
                     className={`ml-auto text-[10.5px] ${
                       t.status === "completed"
@@ -174,6 +227,52 @@ export default function SidePanel({
       )}
 
       {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
+    </div>
+  );
+}
+
+function SupervisorThread({ msgs, supervisor, onBack }: {
+  msgs: Message[];
+  supervisor: Bot | null;
+  onBack: () => void;
+}) {
+  const scroller = useRef<HTMLDivElement>(null);
+  const calls = msgs.filter((m) => m.type === "tool_call");
+  const results: Record<string, Message> = {};
+  msgs.forEach((m) => {
+    if (m.type === "tool_result" && m.meta?.tool_call_id) results[m.meta.tool_call_id] = m;
+  });
+  // 新的调用追加在末尾，跟随滚动；用户往上翻时不做强制
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 160) el.scrollTop = el.scrollHeight;
+  }, [calls.length]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
+        <button onClick={onBack} title="返回任务列表" className="p-1 text-faint hover:text-ink"><ChevronLeft size={15} /></button>
+        <Avatar value={supervisor?.avatar || "🧭"} size={20} />
+        <span className="text-[12px] font-medium">{supervisor?.name || "总指挥"}</span>
+        <span className="ml-auto text-[10.5px] text-faint">{calls.length} 次工具调用</span>
+      </div>
+      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto p-3">
+        <div className="mb-3 rounded-lg bg-panel2 p-2.5 text-[11.5px] leading-relaxed text-muted">
+          群聊只展示对话，总指挥自己的工具调用与返回都收在这里，失败原因也在这里看。
+        </div>
+        {!calls.length && <div className="text-[11px] text-faint">这段对话里总指挥还没有调用工具</div>}
+        {calls.map((m) => (
+          <div key={m.id} className="mb-3 min-w-0">
+            <div className="mb-1 text-[10px] text-faint">{clock(m.created_at)}</div>
+            <ToolBlock
+              msg={{ ...m, content: "" }}
+              result={results[m.meta?.tool_calls?.[0]?.id]}
+              defaultOpen
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

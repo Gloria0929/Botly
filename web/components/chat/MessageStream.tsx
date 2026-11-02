@@ -17,7 +17,6 @@ import {
   TaskDoneCard,
   TaskInlineDetail,
   TaskSummaryLine,
-  ToolBlock,
 } from "./cards";
 
 type Handlers = {
@@ -44,7 +43,6 @@ export default function MessageStream({
   onLoadEarlier,
   focusMessageId,
   onOpenTaskDetail,
-  allMessages,
   onBranch,
 }: {
   messages: Message[];
@@ -60,8 +58,6 @@ export default function MessageStream({
   onLoadEarlier?: () => Promise<void>;
   focusMessageId?: string | null;
   onOpenTaskDetail?: (taskId: string, threadId: string) => void;
-  /** 交给内联详情统计工具调用次数；未传时用当前消息列表 */
-  allMessages?: Message[];
   /** CHT-07：从某条消息拉出分支；分支视图里不传 */
   onBranch?: (msg: Message) => void;
 }) {
@@ -87,38 +83,18 @@ export default function MessageStream({
     return m;
   }, [members]);
 
-  // tool_result 挂到对应的 tool_call 上；delegate 的过程由任务卡承载，不再重复展示
-  const { items, results, toolGroups } = useMemo(() => {
-    const results: Record<string, Message> = {};
-    const toolGroups: Record<string, Message[]> = {};
-    const items: Message[] = [];
+  // 群聊只展示聊天记录：工具调用与返回留在任务线程里，通过任务面板查看
+  const items = useMemo(() => {
+    const out: Message[] = [];
     const seen = new Set<string>();
     messages.forEach((m) => {
-      if (m.type === "tool_result") {
-        const id = m.meta?.tool_call_id;
-        if (id) results[`${m.run_id}:${id}`] = m;
-        return;
-      }
+      if (m.type === "tool_call" || m.type === "tool_result") return;
       // 兜底去重：SSE 推送与本地乐观插入可能产生同一条消息
       if (seen.has(m.id)) return;
       seen.add(m.id);
-      if (m.type === "tool_call") {
-        const name = m.meta?.tool_calls?.[0]?.function?.name;
-        // 这三类控制工具都有专门的卡片承载，不再重复展示原始调用
-        if (name === "delegate" || name === "propose_plan" || name === "ask_user") return;
-        const previous = items[items.length - 1];
-        if (previous?.sender_type === "bot" && previous.sender_bot_id === m.sender_bot_id
-          && previous.run_id === m.run_id && previous.thread_id === m.thread_id
-          && ["text", "tool_call"].includes(previous.type)
-          && !previous.meta?.delegation && !previous.meta?.subtask) {
-          (toolGroups[previous.id] ||= []).push(m);
-          return;
-        }
-        toolGroups[m.id] = [m];
-      }
-      items.push(m);
+      out.push(m);
     });
-    return { items, results, toolGroups };
+    return out;
   }, [messages]);
 
   useLayoutEffect(() => {
@@ -182,12 +158,9 @@ export default function MessageStream({
             bot={m.sender_bot_id ? botMap[m.sender_bot_id] : undefined}
             me={me}
             members={members}
-            results={results}
-            tools={toolGroups[m.id] || []}
             files={files}
             taskMap={taskMap}
             handlers={handlers}
-            detailMessages={allMessages || messages}
             detailOpen={!!openDetails[m.id]}
             onToggleDetail={() => toggleDetail(m.id)}
             onOpenTaskDetail={onOpenTaskDetail}
@@ -206,12 +179,9 @@ function MessageItem({
   bot,
   me,
   members,
-  results,
-  tools,
   taskMap,
   handlers,
   files,
-  detailMessages,
   detailOpen,
   onToggleDetail,
   onOpenTaskDetail,
@@ -221,12 +191,9 @@ function MessageItem({
   bot?: Bot;
   me: { name: string } | null;
   members: Bot[];
-  results: Record<string, Message>;
-  tools: Message[];
   files: ChatFile[];
   taskMap: Record<string, Task>;
   handlers: Handlers;
-  detailMessages: Message[];
   detailOpen: boolean;
   onToggleDetail: () => void;
   onOpenTaskDetail?: (taskId: string, threadId: string) => void;
@@ -244,21 +211,6 @@ function MessageItem({
       </div>
     );
   if (msg.type === "limit") return <LimitNotice text={msg.content} />;
-  if (msg.type === "tool_call") {
-    return (
-      <div className="flex gap-2.5">
-        <Avatar value={bot?.avatar || msg.sender_bot_avatar || "bot"} size={32} className="mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <div className="mb-1 flex items-center gap-2">
-            <span className="text-[12.5px] font-medium">{bot?.name || msg.sender_bot_name || "Bot"}</span>
-            <span className="text-[10.5px] text-faint">{bot?.role || msg.sender_bot_role}</span>
-            <span className="text-[10.5px] text-faint">{clock(msg.created_at)}</span>
-          </div>
-          <AgentTools tools={tools} results={results} />
-        </div>
-      </div>
-    );
-  }
   if (msg.type === "plan")
     return (
       <div className="pl-11">
@@ -367,27 +319,26 @@ function MessageItem({
         <div className="mb-1 flex items-center gap-2">
           <span className="text-[12.5px] font-medium">{botName}</span>
           {botRole && <span className="text-[10.5px] text-faint">{botRole}</span>}
+          {msg.meta?.parallel && (
+            <span
+              className="chip px-1 py-0 text-[10px] text-accent"
+              title={`计划第 ${msg.meta.batch} 批，与其他步骤同时执行`}
+            >
+              并行 · 第 {msg.meta.batch} 批
+            </span>
+          )}
           <span className="text-[10.5px] text-faint">{clock(msg.created_at)}</span>
           {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
         </div>
         {streaming && !hasContent ? (
-          // 模型还没吐字：不显示空气泡和光标，只显示三点跳动
-          <div className="flex items-center gap-1 py-1.5" aria-label="正在输入">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={i}
-                className="h-1.5 w-1.5 animate-bounce rounded-full bg-faint"
-                style={{ animationDelay: `${i * 0.15}s` }}
-              />
-            ))}
-          </div>
+          // 模型还没吐字：不显示空气泡，只显示三点跳动
+          <TypingDots className="py-1.5" />
         ) : hasContent ? (
           <div className="flex items-start gap-1.5">
             <div className="max-w-[85%] rounded-2xl rounded-tl-md border border-line bg-panel px-3.5 py-2.5">
               <Markdown text={msg.content} mention={mentionName} />
-              {streaming && (
-                <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulseSoft bg-accent align-middle" />
-              )}
+              {/* 输出中：气泡尾部用三点跳动，不再用竖线光标 */}
+              {streaming && <TypingDots className="mt-1.5" />}
             </div>
             {/* 分支入口贴在气泡右侧，避免飘到整行最右边、看不出属于哪条消息 */}
             {onBranch && (
@@ -402,19 +353,20 @@ function MessageItem({
             )}
           </div>
         ) : null}
-        {tools.length > 0 && <AgentTools tools={tools} results={results} />}
-        {/* 子 agent 的任务详情：概要随 SSE 实时更新，可原地展开看完整信息 */}
-        {(isDelegation || isSubtask) && (
-          <TaskSummaryLine live={live} fallback={summaryFallback} onOpen={() => handlers.onOpenTask(msg.meta?.task_id, msg.meta?.thread_id)} />
-        )}
-        <TaskInlineDetail
-          msg={msg}
-          live={live}
-          messages={detailMessages}
-          open={detailOpen}
-          onToggle={onToggleDetail}
-          tokensFallback={summaryFallback.tokens_used || 0}
-        />
+        {/* 任务概要与气泡使用同一个最大宽度，整条消息看起来是一列 */}
+        <div className="max-w-[85%]">
+          {/* 子 agent 的任务详情：概要随 SSE 实时更新，可原地展开看完整信息 */}
+          {(isDelegation || isSubtask) && (
+            <TaskSummaryLine live={live} fallback={summaryFallback} onOpen={() => handlers.onOpenTask(msg.meta?.task_id, msg.meta?.thread_id)} />
+          )}
+          <TaskInlineDetail
+            msg={msg}
+            live={live}
+            open={detailOpen}
+            onToggle={onToggleDetail}
+            tokensFallback={summaryFallback.tokens_used || 0}
+          />
+        </div>
         {files.filter((file) => msg.content.includes(file.path)).map((file) => (
           <button key={file.id} onClick={() => handlers.onOpenFile(file)}
             className="mt-2 flex max-w-full items-center gap-2 rounded-lg border border-line bg-panel px-2.5 py-2 text-left hover:border-accent/40">
@@ -428,14 +380,17 @@ function MessageItem({
   );
 }
 
-function AgentTools({ tools, results }: { tools: Message[]; results: Record<string, Message> }) {
-  return <div className="mt-1.5 space-y-2">
-    {tools.map((m) => <div key={m.id}>
-      {m.content && <div className="mb-1"><Markdown text={m.content} size="sm" /></div>}
-      {/* 群聊里默认展开：子 Bot 的执行过程要能直接看到，不用再点进任务面板 */}
-      <ToolBlock msg={m} result={results[`${m.run_id}:${m.meta?.tool_calls?.[0]?.id}`]}
-        defaultOpen
-        ended={["completed", "failed", "stopped"].includes(m.meta?.run_status)} />
-    </div>)}
-  </div>;
+/** 三点跳动：模型还没吐字、以及流式输出中的「正在说」都用它。 */
+function TypingDots({ className = "" }: { className?: string }) {
+  return (
+    <span className={`flex items-center gap-1 ${className}`} role="status" aria-label="正在输出">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="h-1.5 w-1.5 animate-bounce rounded-full bg-faint"
+          style={{ animationDelay: `${i * 0.15}s` }}
+        />
+      ))}
+    </span>
+  );
 }

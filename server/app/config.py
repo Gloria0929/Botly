@@ -61,6 +61,9 @@ LLM_TIMEOUT_SECONDS = 120
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = (2, 4, 8)
 MAX_REASSIGN = 1
+# RUN-12：一个计划批次最多并行几个子任务。超过上限的批次会被拆成多轮，
+# 避免一次把 Worker 的并发名额占满。
+MAX_PARALLEL_SUBTASKS = max(2, int(os.getenv("BOTLY_MAX_PARALLEL_SUBTASKS", "4")))
 APPROVAL_TTL_HOURS = 24
 MEMORY_INJECT_LIMIT = 4000
 # MEM-05：主线程历史超过该 token 估算值时，用总指挥模型生成摘要替换更早的历史。
@@ -70,7 +73,33 @@ HISTORY_KEEP_RECENT = 40  # 摘要后仍保留在上下文里的最近消息条�
 WEB_READ_TRUNCATE = 20_000
 # 网页读取先按字节截断，避免恶意/超大响应把进程内存打满（需求 8.4）
 WEB_READ_MAX_BYTES = 5 * 1024 * 1024
+# 转成纯文本后短于该长度，视为只拿到页面框架（脚本渲染或反爬拦截），不算读取成功
+WEB_READ_MIN_TEXT = 120
+
+# ---- ACC-08 邮件（找回密码、邮箱验证）----
+SMTP_HOST = os.getenv("BOTLY_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("BOTLY_SMTP_PORT", "587"))
+SMTP_USER = os.getenv("BOTLY_SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("BOTLY_SMTP_PASSWORD", "")
+# starttls（587，默认）/ ssl（465）/ none（内网中继）
+SMTP_SECURITY = os.getenv("BOTLY_SMTP_SECURITY", "starttls").strip().lower()
+MAIL_FROM = os.getenv("BOTLY_MAIL_FROM", "").strip() or (SMTP_USER or "no-reply@botly.local")
+# 没配 SMTP 时：1 = 把邮件写进日志并在接口里回一个可点的 dev 链接（本地/测试），0 = 直接报“邮件服务未配置”
+MAIL_DEV = os.getenv("BOTLY_MAIL_DEV", "1").lower() in ("1", "true", "yes")
+# 邮件里的链接前缀。留空则按请求头推导（同域反向代理下是正确的）
+PUBLIC_BASE_URL = os.getenv("BOTLY_BASE_URL", "").rstrip("/")
+RESET_TOKEN_TTL_MINUTES = max(5, int(os.getenv("BOTLY_RESET_TOKEN_TTL_MINUTES", "60")))
+VERIFY_TOKEN_TTL_HOURS = max(1, int(os.getenv("BOTLY_VERIFY_TOKEN_TTL_HOURS", "24")))
 SANDBOX_QUOTA_MB = 200
+
+# ---- NTF-06 Web Push（Service Worker + VAPID）----
+# VAPID 私钥：PEM 文本或 32 字节原始私钥的 base64url。不配置时首次运行自动生成，
+# 持久化到 DATA_DIR/vapid.json（多实例部署请显式配置，保证各实例用同一把公钥）。
+VAPID_PRIVATE_KEY = os.getenv("BOTLY_VAPID_PRIVATE_KEY", "").strip()
+# VAPID sub 声明，要求是 mailto: 或 https: 开头
+VAPID_SUBJECT = os.getenv("BOTLY_VAPID_SUBJECT", "mailto:no-reply@botly.local")
+# 推送消息在推送服务里的存活秒数；页面关闭期间的消息超时后不再投递
+PUSH_TTL = max(60, int(os.getenv("BOTLY_PUSH_TTL", str(24 * 3600))))
 SANDBOX_FILE_MAX_MB = 10
 LOG_RETENTION_DAYS = 30
 EVENT_RETENTION_DAYS = 7  # 需求第 10 节：events 保留 7 天用于断线补发

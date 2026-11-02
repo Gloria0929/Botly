@@ -18,6 +18,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { registerSW } from "@/lib/push";
 import type { Me } from "@/lib/types";
 
 const NAV = [
@@ -63,6 +64,8 @@ export default function AppShell({
     const load = () => api.notifications().then((d) => setUnread(d.unread_count)).catch(() => {});
     load();
     const t = setInterval(load, 15000);
+    // NTF-06：提前注册 Service Worker，订阅在设置页开启推送时完成
+    registerSW().catch(() => {});
     return () => clearInterval(t);
   }, []);
 

@@ -27,12 +27,13 @@ def current_user(
     x_botly_client: str | None = Header(default=None),
 ) -> User:
     token = request.cookies.get(SESSION_COOKIE)
-    user_id = read_session(token)
-    if not user_id:
+    session = read_session(token)
+    if not session:
         # 未带会话的常规请求（退出登录后打开页面、会话过期后的轮询等）：
         # 记 INFO 即可；真正的攻击信号看登录失败/限流那几条 WARNING，不在这里。
         security_log.info("鉴权失败：未登录 %s %s ip=%s", request.method, request.url.path, _ip(request))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
+    user_id, epoch = session
     user = db.get(User, user_id)
     if not user or user.status != "active":
         security_log.warning(
@@ -40,6 +41,13 @@ def current_user(
             fingerprint(user_id), request.method, request.url.path, _ip(request),
         )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
+    # ACC-08：密码被重置后（epoch +1）旧 Cookie 立即失效
+    if epoch != (user.session_epoch or 0):
+        security_log.warning(
+            "鉴权失败：会话已失效 uid=%s %s %s ip=%s",
+            fingerprint(user.id), request.method, request.url.path, _ip(request),
+        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
     # 写操作校验自定义请求头（配合 SameSite=Lax 防 CSRF）
     if request.method not in ("GET", "HEAD", "OPTIONS") and x_botly_client != CSRF_VALUE:
         security_log.warning(

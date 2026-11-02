@@ -71,7 +71,13 @@ export type Vendor = {
   requires_endpoint: boolean;
 };
 
-export type PlanStep = { title: string; bot: string; expected?: string };
+export type PlanStep = {
+  title: string;
+  bot: string;
+  expected?: string;
+  /** RUN-12：同一个 batch 的步骤并行执行；不填表示单独一批（串行） */
+  batch?: number;
+};
 
 export type Message = {
   id: string;
@@ -128,6 +134,8 @@ export type Task = {
   status: string;
   result: string | null;
   attempt: number;
+  /** RUN-12：计划批次，>0 表示和其他步骤并行执行 */
+  batch?: number;
   tokens_used: number;
   started_at: string | null;
   ended_at: string | null;
@@ -136,7 +144,14 @@ export type Task = {
 export type Run = {
   id: string;
   chat_id: string;
-  status: "queued" | "running" | "waiting" | "completed" | "failed" | "stopped";
+  status:
+    | "queued"
+    | "running"
+    | "waiting"
+    | "waiting_children"
+    | "completed"
+    | "failed"
+    | "stopped";
   steps_used: number;
   tokens_used: number;
   started_at: string | null;
@@ -144,6 +159,8 @@ export type Run = {
   end_reason: string | null;
   mode: string;
   target_bot_id: string | null;
+  parent_run_id?: string | null;
+  parent_task_id?: string | null;
   resume: {
     kind?: "plan" | "approval" | "question" | "step";
     phase?: string;
@@ -235,6 +252,9 @@ export type Me = {
   email: string;
   name: string;
   has_provider: boolean;
+  /** ACC-08：邮箱是否已验证（未验证不影响使用，但不能用邮箱找回密码） */
+  email_verified: boolean;
+  email_verified_at: string | null;
   settings: {
     max_steps: number;
     token_budget: number;

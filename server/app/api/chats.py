@@ -28,7 +28,8 @@ from ..serializers import bot_out, chat_out, iso, message_out, run_out, task_out
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
-ACTIVE = ("queued", "running", "waiting")
+# RUN-12：waiting_children 也属于进行中，群聊仍然「忙」，不允许再起新执行
+ACTIVE = ("queued", "running", "waiting", "waiting_children")
 
 
 class ChatIn(BaseModel):
@@ -77,11 +78,30 @@ def _members(db: Session, chat_id: str) -> list[Bot]:
 
 
 def _active_run(db: Session, chat_id: str) -> Run | None:
+    # 只看顶层执行：并行子执行也是 Run，但它不应该成为「当前群聊在执行什么」
+    # 的答案，否则插话会写进子任务线程、停止也停错对象（RUN-12）。
     return db.scalar(
         select(Run)
-        .where(Run.chat_id == chat_id, Run.status.in_(ACTIVE))
+        .where(
+            Run.chat_id == chat_id,
+            Run.status.in_(ACTIVE),
+            Run.parent_run_id.is_(None),
+        )
         .order_by(Run.created_at.desc())
     )
+
+
+def _run_children_totals(db: Session, run: Run | None) -> tuple[int, int]:
+    """RUN-12：并行子执行的 token/步数，展示时合并到父执行。"""
+    if not run or run.parent_run_id:
+        return 0, 0
+    row = db.execute(
+        select(
+            func.coalesce(func.sum(Run.tokens_used), 0),
+            func.coalesce(func.sum(Run.steps_used), 0),
+        ).where(Run.parent_run_id == run.id)
+    ).one()
+    return int(row[0] or 0), int(row[1] or 0)
 
 
 def _main_thread(db: Session, chat: Chat) -> Thread:
@@ -226,7 +246,11 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
     if not panel_run:
         panel_run = db.scalar(
             select(Run)
-            .where(Run.chat_id == chat.id, select(Task.id).where(Task.run_id == Run.id).exists())
+            .where(
+                Run.chat_id == chat.id,
+                Run.parent_run_id.is_(None),
+                select(Task.id).where(Task.run_id == Run.id).exists(),
+            )
             .order_by(Run.created_at.desc())
         )
     if panel_run:
@@ -255,9 +279,15 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
     data["members"] = [
         {**bot_out(m), "status": status_map.get(m.id, "idle")} for m in members
     ]
-    data["active_run"] = run_out(active) if active else None
-    latest_run = active or db.scalar(select(Run).where(Run.chat_id == chat.id).order_by(Run.created_at.desc()))
-    data["last_run"] = run_out(latest_run) if latest_run else None
+    data["active_run"] = run_out(active, *_run_children_totals(db, active)) if active else None
+    latest_run = active or db.scalar(
+        select(Run)
+        .where(Run.chat_id == chat.id, Run.parent_run_id.is_(None))
+        .order_by(Run.created_at.desc())
+    )
+    data["last_run"] = (
+        run_out(latest_run, *_run_children_totals(db, latest_run)) if latest_run else None
+    )
     data["tasks"] = tasks
     pending = db.scalars(select(Approval).join(Run, Run.id == Approval.run_id).where(
         Run.chat_id == chat.id, Run.status.in_(ACTIVE), Approval.status == "pending",

@@ -147,7 +147,11 @@ def usage_summary(
     chat_runs = dict(
         db.execute(
             select(Run.chat_id, func.count(Run.id))
-            .where(Run.user_id == user.id, Run.created_at >= since)
+            .where(
+                Run.user_id == user.id,
+                Run.created_at >= since,
+                Run.parent_run_id.is_(None),
+            )
             .group_by(Run.chat_id)
         ).all()
     )
@@ -204,7 +208,13 @@ def usage_summary(
             func.sum(Run.steps_used),
             func.sum(Run.tokens_used),
         )
-        .where(Run.user_id == user.id, Run.created_at >= since)
+        .where(
+            Run.user_id == user.id,
+            Run.created_at >= since,
+            # 子执行的 token/费用仍然计入总量（真实调用），但「执行数」按用户
+            # 发起的任务数统计，避免并行派活把一次任务算成好几次
+            Run.parent_run_id.is_(None),
+        )
         .group_by(Run.status)
     ).all()
     status_count = {s: int(n or 0) for s, n, _, _ in run_rows}
@@ -246,7 +256,11 @@ def usage_summary(
 
     recent = db.scalars(
         select(Run)
-        .where(Run.user_id == user.id, Run.created_at >= since)
+        .where(
+            Run.user_id == user.id,
+            Run.created_at >= since,
+            Run.parent_run_id.is_(None),
+        )
         .order_by(Run.created_at.desc())
         .limit(12)
     ).all()

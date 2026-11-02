@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import re
@@ -19,7 +20,7 @@ import httpx
 from sqlalchemy import select
 
 from . import sandbox
-from .config import WEB_READ_MAX_BYTES, WEB_READ_TRUNCATE
+from .config import WEB_READ_MAX_BYTES, WEB_READ_MIN_TEXT, WEB_READ_TRUNCATE
 from .events import emit
 from .models import FileRec
 
@@ -176,6 +177,28 @@ def _check_url(url: str) -> None:
                 raise ToolError("禁止访问内网或本机地址")
 
 
+# 读取网页时用常见浏览器的标识：Reddit、Medium 这类站点对非浏览器 UA 直接 429/403。
+# 这里只是读取公开页面，不带 Cookie、不模拟登录态。
+_READ_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+_RETRY_AFTER_CAP = 3.0
+
+
+def _retry_after(headers) -> float:
+    """429 时按 Retry-After 等待，最多 3 秒，避免把执行卡在这里。"""
+    raw = (headers.get("retry-after") or "").strip()
+    try:
+        return max(0.0, min(float(raw), _RETRY_AFTER_CAP))
+    except ValueError:
+        return 1.5
+
+
 def _html_to_text(html: str) -> str:
     try:
         from bs4 import BeautifulSoup
@@ -194,8 +217,10 @@ def _html_to_text(html: str) -> str:
 async def _web_read(ctx, url: str) -> str:
     try:
         current = url
+        hops = 0
+        retried_429 = False
         async with httpx.AsyncClient(timeout=25) as client:
-            for _ in range(5):
+            while hops < 5:
                 _check_url(current)
                 # 用流式读取并限制字节数：需求 8.4 要求限制响应大小，
                 # 不能把一个超大页面整体读进内存。
@@ -203,16 +228,29 @@ async def _web_read(ctx, url: str) -> str:
                     "GET",
                     current,
                     follow_redirects=False,
-                    headers={"User-Agent": "Mozilla/5.0 Botly/1.0"},
+                    headers=_READ_HEADERS,
                 ) as r:
                     if r.status_code in (301, 302, 303, 307, 308):
                         loc = r.headers.get("location")
                         if not loc:
                             break
-                        current = httpx.URL(current).join(loc).human_repr()
+                        # httpx.URL 没有 human_repr（那是 yarl 的 API），直接 str()
+                        current = str(httpx.URL(current).join(loc))
+                        hops += 1
+                        continue
+                    # 429 多是公共站点限速（Reddit 这类）：按 Retry-After 等一会儿再试一次，
+                    # 不要第一次被限速就判失败。
+                    if r.status_code == 429 and not retried_429:
+                        retried_429 = True
+                        await asyncio.sleep(_retry_after(r.headers))
                         continue
                     if r.status_code >= 400:
+                        if r.status_code == 429:
+                            return "读取失败：目标站点限制了自动访问（HTTP 429），请稍后再试或换一个来源。"
+                        if r.status_code in (401, 403):
+                            return f"读取失败：目标站点拒绝了访问（HTTP {r.status_code}），可能需要登录或反爬校验。"
                         return f"读取失败：HTTP {r.status_code}"
+                    content_type = (r.headers.get("content-type") or "").lower()
                     chunks: list[bytes] = []
                     total = 0
                     byte_limited = False
@@ -228,6 +266,16 @@ async def _web_read(ctx, url: str) -> str:
                     text = text[:WEB_READ_TRUNCATE] + "\n\n[内容已截断]"
                 elif byte_limited:
                     text += "\n\n[内容超过大小限制，已截断]"
+                # 很多站点（Reddit、知乎等）对非浏览器请求只返回一个脚本外壳，
+                # 解析出来只有站名几个字。这种情况必须明说没拿到正文，
+                # 否则模型会把空内容当真、凭空编造。
+                if "html" in content_type or "xml" in content_type or not content_type:
+                    if len(text) < WEB_READ_MIN_TEXT:
+                        return (
+                            "读取失败：只取到页面框架，没有正文（站点可能靠脚本渲染，"
+                            f"或有反爬/登录校验）。来源：{current}。"
+                            "建议换一个来源，或直接提供需要的正文片段。"
+                        )
                 return f"{UNTRUSTED_PREFIX}来源：{current}\n\n{text}"
         return "读取失败：重定向次数过多"
     except ToolError as exc:
@@ -397,6 +445,7 @@ PLAN_TOOL = Tool(
     description=(
         "当任务需要 2 个及以上子任务时，先提交执行计划给用户确认。"
         "只有一项执行工作时直接调用 delegate 派活，无需计划；问候、状态查询和简短解释直接回答。"
+        "相互独立、可以同时做的步骤填同一个 batch 号（并行）；有先后依赖的步骤用递增的 batch。"
     ),
     parameters={
         "type": "object",
@@ -410,6 +459,14 @@ PLAN_TOOL = Tool(
                         "title": {"type": "string"},
                         "bot": {"type": "string"},
                         "expected": {"type": "string"},
+                        "batch": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                "并行批次：同一个数字的步骤会同时派给不同成员并行执行；"
+                                "不填表示该步骤单独一批（串行）。"
+                            ),
+                        },
                     },
                     "required": ["title", "bot"],
                 },

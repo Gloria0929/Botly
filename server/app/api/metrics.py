@@ -28,17 +28,17 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 METRICS_TOKEN = os.getenv("BOTLY_METRICS_TOKEN", "")
 
-_ACTIVE = ("queued", "running", "waiting")
+_ACTIVE = ("queued", "running", "waiting", "waiting_children")
 
 
 def _authorized(request: Request, db: Session) -> bool:
     # 1) 已登录用户
     token = request.cookies.get(SESSION_COOKIE)
     if token:
-        uid = read_session(token)
-        if uid:
-            user = db.get(User, uid)
-            if user and user.status == "active":
+        session = read_session(token)
+        if session:
+            user = db.get(User, session[0])
+            if user and user.status == "active" and session[1] == (user.session_epoch or 0):
                 return True
     # 2) Bearer token
     auth = request.headers.get("authorization", "")
@@ -83,8 +83,8 @@ def metrics(request: Request, db: Session = Depends(get_db)):
     users = db.scalar(select(func.count(User.id))) or 0
 
     lines: list[str] = []
-    lines += _gauge("botly_runs_active", "当前未结束的执行数（queued/running/waiting）", active)
-    for status in ("queued", "running", "waiting", "completed", "failed", "stopped"):
+    lines += _gauge("botly_runs_active", "当前未结束的执行数（queued/running/waiting/waiting_children）", active)
+    for status in ("queued", "running", "waiting", "waiting_children", "completed", "failed", "stopped"):
         lines.append(f'botly_runs{{status="{status}"}} {int(status_rows.get(status, 0))}')
     lines += _gauge("botly_queue_depth", "Redis 队列中待执行的 run 数", queue_depth())
     lines += _gauge("botly_approvals_pending", "待处理的审批数", approvals_pending)

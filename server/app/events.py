@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from . import redis_bus
@@ -58,4 +60,20 @@ def notify(
             "created_at": now().isoformat(),
         },
     )
+    # NTF-06：页面关闭后通过 Service Worker + VAPID 投递；失败不影响通知主流程
+    try:
+        from . import push
+
+        push.push_notification(
+            user_id,
+            notif_id=n.id,
+            type_=type_,
+            title=title,
+            body=body,
+            chat_id=chat_id,
+            target_type=target_type,
+            target_id=target_id,
+        )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("Web Push 调度失败")
     return n

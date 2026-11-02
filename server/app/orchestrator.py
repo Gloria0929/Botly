@@ -20,7 +20,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from langgraph.types import interrupt
@@ -33,6 +33,7 @@ from .config import (
     DELEGATION_DEPTH,
     HISTORY_KEEP_RECENT,
     LLM_TIMEOUT_SECONDS,
+    MAX_PARALLEL_SUBTASKS,
     MAX_REASSIGN,
     SUMMARY_MAX_ITEMS,
     SUMMARY_THRESHOLD_TOKENS,
@@ -62,6 +63,7 @@ from .models import (
     UserSettings,
     now,
 )
+from .redis_bus import enqueue
 from .security import args_hash, decrypt_secret
 from .signals import PauseSignal
 from .tools import ToolError
@@ -69,6 +71,10 @@ from .tools import ToolError
 
 class StopSignal(Exception):
     pass
+
+
+class AwaitChildren(Exception):
+    """总指挥的并行子任务还没全部返回：图停在 tool 节点，执行转入 waiting_children。"""
 
 
 class LimitExceeded(Exception):
@@ -80,6 +86,26 @@ class LimitExceeded(Exception):
 # --------------------------------------------------------------------------- #
 # 小工具
 # --------------------------------------------------------------------------- #
+def _next_seq(db: Session, thread_id: str) -> int:
+    """线程内消息序号：用 threads.seq_counter 原子自增。
+
+    并行子任务会同时往主线程写镜像消息，`max(seq)+1` 在并发下会算出同一个值，
+    导致前端排序错乱。计数器走单条 UPDATE ... RETURNING，跨进程也只可能拿到
+    不同序号。极老的 SQLite 不支持 RETURNING 时退回原来的算法。
+    """
+    value = db.execute(
+        update(Thread)
+        .where(Thread.id == thread_id)
+        .values(seq_counter=func.coalesce(Thread.seq_counter, 0) + 1)
+        .returning(Thread.seq_counter)
+    ).scalar_one_or_none()
+    if value is not None:
+        return int(value)
+    return (
+        db.scalar(select(func.max(Message.seq)).where(Message.thread_id == thread_id)) or 0
+    ) + 1
+
+
 def add_message(
     db: Session,
     *,
@@ -93,14 +119,11 @@ def add_message(
     status: str = "done",
     emit_event: bool = True,
 ) -> Message:
-    max_seq = db.scalar(
-        select(func.max(Message.seq)).where(Message.thread_id == thread.id)
-    ) or 0
     msg = Message(
         user_id=thread.user_id,
         thread_id=thread.id,
         run_id=run_id,
-        seq=max_seq + 1,
+        seq=_next_seq(db, thread.id),
         sender_type=sender_type,
         sender_bot_id=sender_bot_id,
         type=type_,
@@ -296,6 +319,52 @@ def settle_run_tasks(db: Session, run: Run, status: str, reason: str) -> None:
         })
 
 
+CHILD_ACTIVE_STATUSES = ("queued", "running", "waiting")
+
+
+def stop_child_runs(db: Session, run: Run, reason: str = "上游执行已停止") -> list[str]:
+    """停止某个执行下面的并行子执行。
+
+    子执行是独立的 Run（有自己的队列、审批和停止开关），父执行结束时必须显式
+    通知它们，否则用户点了停止，后台的子 Bot 还在继续跑。返回需要入队的 id
+    由调用方在事务提交后再处理（这里只负责落状态）。
+    """
+    stopped: list[str] = []
+    children = db.scalars(
+        select(Run).where(Run.parent_run_id == run.id, Run.status.in_(CHILD_ACTIVE_STATUSES))
+    ).all()
+    for child in children:
+        child.stop_requested = True
+        if child.status in ("queued", "waiting"):
+            # 还没跑起来（或停在审批/提问）：直接结束，不用等 Worker 接手
+            child.status = "stopped"
+            child.ended_at = now()
+            child.end_reason = reason
+            child.resume_payload = None
+            settle_run_tasks(db, child, "canceled", reason)
+            _cancel_child_task(db, child, reason)
+            db.flush()
+            emit_run_status(db, child)
+            stopped.append(child.id)
+        else:
+            # 正在跑：由它的执行器在下一次检查点抛出 StopSignal
+            _cancel_child_task(db, child, reason)
+            db.flush()
+    return stopped
+
+
+def _cancel_child_task(db: Session, child: Run, reason: str) -> None:
+    """把子执行对应的任务标成取消，群聊里的任务概要立刻反映停止。"""
+    task = db.get(Task, child.parent_task_id) if child.parent_task_id else None
+    if not task or task.status in ("completed", "failed", "canceled"):
+        return
+    task.status = "canceled"
+    task.result = reason
+    task.ended_at = now()
+    db.flush()
+    emit_task_status(db, task)
+
+
 class ToolCtx:
     """工具执行上下文。"""
 
@@ -368,6 +437,18 @@ class RunExecutor:
             run.worker_id = str(id(self))
             if not run.started_at:
                 run.started_at = now()
+            # RUN-12：父执行每次开跑前，把已经全部返回的批次补成一条汇总。
+            # 只在这里写（而不是每个子执行结束时各写一次），并发场景下也不会
+            # 重复；没有批次或还有子任务在跑时是空操作。
+            if not run.parent_run_id:
+                self._ensure_batch_summaries(db, run, chat)
+            # RUN-12：子执行（并行子任务）启动时把对应任务从 queued 置为 running
+            if run.parent_task_id:
+                task = db.get(Task, run.parent_task_id)
+                if task and task.status == "queued":
+                    task.status = "running"
+                    task.started_at = task.started_at or now()
+                    emit_task_status(db, task)
             payload = run.resume_payload or None
             # 不在这里清空：如果进程在写检查点前崩溃，重试时还要用同一个
             # resume 值继续；暂停/结束时会在对应分支覆盖或清理它。
@@ -386,6 +467,20 @@ class RunExecutor:
         except StopSignal:
             log.info("执行被用户停止 run=%s", run_id)
             self._finish_stopped()
+            return
+        except AwaitChildren:
+            # 总指挥已经派出这一批并行子任务，等它们全部返回再继续。
+            # 这里不占用 Worker：执行转入 waiting_children，由子执行结束时唤醒。
+            with session_scope() as db:
+                run = db.get(Run, run_id)
+                if run.status in ("completed", "failed", "stopped"):
+                    return
+                run.status = "waiting_children"
+                run.resume_payload = None
+                run.lease_until = None
+                db.flush()
+                emit_run_status(db, run)
+            log.info("执行等待并行子任务 run=%s", run_id)
             return
         except LimitExceeded as exc:
             log.warning("执行触发上限 run=%s 原因=%s", run_id, exc.reason)
@@ -422,12 +517,45 @@ class RunExecutor:
                 db.flush()
                 emit_run_status(db, run)
 
+    def _ensure_batch_summaries(self, db: Session, run: Run, chat: Chat) -> None:
+        """给已经全部返回的计划批次补一条汇总（父执行恢复时调用，幂等）。"""
+        rows = db.scalars(
+            select(Task).where(Task.run_id == run.id, Task.batch > 0)
+        ).all()
+        if not rows:
+            return
+        main = self._main_thread(db, chat)
+        for batch in sorted({t.batch for t in rows}):
+            newest = max(
+                (t for t in rows if t.batch == batch),
+                key=lambda t: t.created_at,
+            )
+            self._maybe_write_batch_summary(db, main, newest)
+
+    def is_child_run(self) -> bool:
+        """当前执行是不是并行子任务（RUN-12）。"""
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            return bool(run and run.parent_run_id)
+
     def _initial_state(self, db: Session, run: Run, chat: Chat) -> dict:
         main = self._main_thread(db, chat)
         # CHT-07：分支线程里的执行把上下文与回复都落在分支，不碰主线程
         thread = db.get(Thread, run.thread_id) if run.thread_id else main
         if not thread or thread.chat_id != chat.id:
             thread = main
+        # RUN-12：并行子执行固定以 worker 身份跑在自己的任务线程里
+        if run.parent_task_id and run.target_bot_id:
+            return {
+                "role": "worker",
+                "bot_id": run.target_bot_id,
+                "thread_id": thread.id,
+                "task_id": run.parent_task_id,
+                "last": "",
+                "has_calls": False,
+                "cont": False,
+                "done": False,
+            }
         sup_id = supervisor_id(run, chat)
         if run.target_bot_id and run.target_bot_id != sup_id:
             role, bot_id = "worker", run.target_bot_id
@@ -496,7 +624,9 @@ class RunExecutor:
             # 让总指挥下一轮读到插话并调整，而不是等子任务整个跑完才接上。
             if not is_supervisor and thread.type == "task" and task_id:
                 main_thread = self._main_thread(db, chat)
-                if self._pending_interjection_seq(db, run, main_thread):
+                parent = db.get(Run, run.parent_run_id) if run.parent_run_id else None
+                base = parent.last_interjection_seq if parent else None
+                if self._pending_interjection_seq(db, run, main_thread, base=base):
                     self._answer_open_calls(
                         db, thread, run.id, "用户在执行中补充了新要求，本工具调用已中止。"
                     )
@@ -690,18 +820,7 @@ class RunExecutor:
                     if run:
                         run.last_turn_message_id = msg.id
                         run.steps_used += 1
-                # 群聊里也保留工具调用细节（默认折叠），任务面板只留进行中的任务
-                if mirror_thread_id:
-                    add_message(
-                        db,
-                        thread=db.get(Thread, mirror_thread_id),
-                        run_id=self.run_id,
-                        sender_type="bot",
-                        type_="tool_call",
-                        content="",
-                        sender_bot_id=bot_id,
-                        meta={"tool_calls": [call], "task_id": task_id, "subtask_tool": True},
-                    )
+                # 群聊只保留聊天记录：工具调用不镜像到主线程，过程看任务面板
                 if idx == 0:
                     old = db.get(Message, draft["id"])
                     if old:
@@ -802,11 +921,10 @@ class RunExecutor:
         return result
 
     def write_tool_result(self, thread_id: str, call: dict, content: str) -> None:
-        """记录工具结果；子线程里的结果同时镜像到群聊。
+        """记录工具结果。
 
-        群聊是用户看执行过程的地方：子 Bot 每一步的工具调用和返回都要实时出现
-        在这里，而不是只躺在任务面板里。镜像按 tool_call_id 去重，节点重放或
-        重复调用不会多出第二条。
+        只写进执行所在的线程（子任务线程 / 主线程）。群聊保持「只有聊天记录」：
+        子 Bot 的工具调用与返回不在主线程再镜像一份，需要看过程时进任务面板。
         """
         with session_scope() as db:
             existing = db.scalar(select(Message).where(Message.thread_id == thread_id, Message.run_id == self.run_id,
@@ -824,23 +942,6 @@ class RunExecutor:
                 content=content,
                 meta={"tool_call_id": call.get("id"), "tool": tool_name},
             )
-            if thread.type != "task":
-                return
-            task = db.scalar(select(Task).where(Task.thread_id == thread.id))
-            add_message(
-                db,
-                thread=self._main_thread(db, db.get(Chat, thread.chat_id)),
-                run_id=self.run_id,
-                sender_type="system",
-                type_="tool_result",
-                content=content,
-                meta={
-                    "tool_call_id": call.get("id"),
-                    "tool": tool_name,
-                    "task_id": task.id if task else None,
-                    "subtask_tool": True,
-                },
-            )
 
     def answer_open_calls(self, content: str) -> None:
         """给悬空的工具调用补一条结果（僵尸执行回收时用）。"""
@@ -851,10 +952,299 @@ class RunExecutor:
             self._answer_open_calls(db, main, run.id, content)
 
     # ---------------- 图节点：派活 / 收尾 ----------------
+    def _resolve_member(self, members: list[Bot], name: str) -> Bot | None:
+        if not name:
+            return None
+        return next((b for b in members if b.name == name), None) or next(
+            (b for b in members if name in b.name), None
+        )
+
+    def _task_for_call(self, db: Session, run_id: str, main_id: str, call_id: str | None) -> Task | None:
+        """按 delegate 的 tool_call_id 找到这次派活建出来的任务。"""
+        if not call_id:
+            return None
+        for note in db.scalars(
+            select(Message).where(
+                Message.run_id == run_id, Message.thread_id == main_id, Message.type == "text",
+            )
+        ):
+            meta = note.meta or {}
+            if meta.get("delegation") and meta.get("tool_call_id") == call_id:
+                task = db.get(Task, meta.get("task_id"))
+                if task:
+                    return task
+        return None
+
+    def _call_answered(self, db: Session, thread_id: str, run_id: str, call_id: str | None) -> bool:
+        if not call_id:
+            return False
+        row = db.scalar(
+            select(Message).where(
+                Message.thread_id == thread_id,
+                Message.run_id == run_id,
+                Message.type == "tool_result",
+                Message.meta["tool_call_id"].as_string() == call_id,
+            )
+        )
+        return row is not None
+
+    @staticmethod
+    def _approved_plan_steps(db: Session, run_id: str) -> list[dict]:
+        """本次执行里用户最后确认过的那版计划。"""
+        rows = db.scalars(
+            select(Message)
+            .where(Message.run_id == run_id, Message.type == "plan")
+            .order_by(Message.seq.desc())
+        ).all()
+        for msg in rows:
+            meta = msg.meta or {}
+            if meta.get("status") == "approved" and meta.get("steps"):
+                return meta["steps"]
+        return []
+
+    @staticmethod
+    def _plan_batches(steps: list[dict]) -> list[list[tuple[int, dict]]]:
+        """按 batch 给计划步骤分组，保持计划顺序。
+
+        没写 batch 的步骤各自成一组（相当于串行），只有相同 batch 号的步骤
+        才会并行。分组放在执行时算，用户改过计划也能按最终版本执行。
+        """
+        groups: dict[int, list[tuple[int, dict]]] = {}
+        order: list[int] = []
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            raw = step.get("batch")
+            key = raw if isinstance(raw, int) and raw > 0 else -(idx + 1)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append((idx, step))
+        return [groups[k] for k in order]
+
+    @staticmethod
+    def _step_matches(step: dict, index: int, key: str) -> bool:
+        title = _step_key(step.get("title") or "")
+        if not key or not title:
+            return False
+        if key == title or key == str(index + 1):
+            return True
+        # 模型可能只传「资料收集」，而计划标题是「资料收集：xxx」。
+        # 太短的键（比如序号「2」）不做包含匹配，避免误命中。
+        if len(key) >= 4 and (key in title or title in key):
+            return True
+        return False
+
+    def _parallel_batch(
+        self, db: Session, run: Run, chat: Chat, step_key: str
+    ) -> tuple[int, list[dict], str] | None:
+        """当前步骤属于某个「同批 ≥2 步」的计划批次时，返回批次信息。"""
+        # 逐步确认模式要求每个子任务都停下来等用户，和并行天然冲突；
+        # 子执行也不能再派活（委派深度固定为 1）。
+        if run.parent_run_id or chat.run_mode == "step":
+            return None
+        steps = self._approved_plan_steps(db, run.id)
+        if not steps:
+            return None
+        for group in self._plan_batches(steps):
+            if len(group) < 2:
+                continue
+            for index, step in group:
+                if not self._step_matches(step, index, step_key):
+                    continue
+                if len(group) > MAX_PARALLEL_SUBTASKS:
+                    log.warning(
+                        "计划批次过大，改回串行 run=%s 批大小=%d 上限=%d",
+                        run.id, len(group), MAX_PARALLEL_SUBTASKS,
+                    )
+                    return None
+                batch_no = step.get("batch") if isinstance(step.get("batch"), int) else 1
+                return int(batch_no), [s for _, s in group], _step_key(step.get("title") or "")
+        return None
+
+    @staticmethod
+    def _plan_instruction(step: dict, batch_steps: list[dict]) -> str:
+        """模型没给某一步写指令时，用计划标题 + 期望产出拼一条可执行的指令。"""
+        title = (step.get("title") or "").strip()
+        others = "、".join(
+            (s.get("title") or "").strip()
+            for s in batch_steps
+            if (s.get("title") or "").strip() and s is not step
+        )
+        parts = [title]
+        if others:
+            parts.append(f"这一步和「{others}」同时由其他成员执行，只完成本步骤，不要重复他们的工作。")
+        expected = (step.get("expected") or "").strip()
+        if expected:
+            parts.append(f"期望产出：{expected}")
+        return "\n\n".join(p for p in parts if p)
+
+    def _delegate_summary(self, db: Session, task: Task) -> str:
+        bot = db.get(Bot, task.assigned_bot_id)
+        if task.status == "failed":
+            head = f"子任务执行失败：{task.result or '未知原因'}。你可以改派给其他成员，或跳过该步骤并向用户说明。"
+            return head
+        if task.status == "canceled":
+            return f"子任务已取消：{task.result or '用户停止'}"
+        return (
+            f"任务已完成。执行者：{bot.name if bot else ''}。\n"
+            f"期望产出：{task.expected_output or '未指定'}\n"
+            f"结果摘要：\n{(task.result or '')[:1500]}"
+        )
+
+    def _start_parallel_batch(
+        self,
+        db: Session,
+        run: Run,
+        chat: Chat,
+        main: Thread,
+        members: list[Bot],
+        batch_no: int,
+        steps: list[dict],
+        matched_key: str,
+        call: dict,
+        args: dict,
+        bot_id: str,
+    ) -> tuple[list[str], bool]:
+        """给同一批的每个步骤建任务 + 子执行，返回 (待入队的子执行, 是否仍在跑)。
+
+        模型可能在同一轮里已经为其中几步发过 delegate（支持并行工具调用的模型），
+        这里按 step 建索引优先复用它的指令；没发过的步骤用计划标题补一条。
+        """
+        ask_by_step: dict[str, tuple[dict, dict]] = {}
+        for msg in self._open_tool_calls(db, main.id, run.id):
+            c = ((msg.meta or {}).get("tool_calls") or [{}])[0]
+            fn = c.get("function") or {}
+            if fn.get("name") != "delegate":
+                continue
+            a = _parse_json(fn.get("arguments") or "{}")
+            key = _step_key(a.get("step") or a.get("instruction") or "")
+            ask_by_step.setdefault(key, (c, a))
+        ask_by_step[matched_key] = (call, args)
+
+        child_ids: list[str] = []
+        keys: list[str] = []
+        for step in steps:
+            key = _step_key(step.get("title") or "")
+            keys.append(key)
+            task = db.scalar(
+                select(Task)
+                .where(Task.run_id == run.id, Task.step_key == key)
+                .order_by(Task.created_at.desc())
+            )
+            attempt = 1
+            if task:
+                if task.status in ("queued", "running", "waiting_approval", "waiting_reply"):
+                    # 还在跑：等它，别重复派
+                    continue
+                if task.status == "failed" and task.attempt <= MAX_REASSIGN:
+                    # RUN-10：同一子任务允许改派一次，批次内换人重试同样适用
+                    attempt = task.attempt + 1
+                else:
+                    # 已经完成/取消/改派次数用尽：把结果补给它自己的 delegate
+                    ask = ask_by_step.get(key)
+                    if ask and ask[0].get("id"):
+                        self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
+                    continue
+
+            target = self._resolve_member(members, step.get("bot") or "")
+            if not target or target.id == bot_id:
+                log.warning("并行批次跳过无法派发的步骤 run=%s 步骤=%r", run.id, step.get("title"))
+                continue
+            ask = ask_by_step.get(key)
+            instruction = ((ask[1].get("instruction") if ask else "") or "").strip()
+            if not instruction:
+                instruction = self._plan_instruction(step, steps)
+            if not instruction:
+                continue
+            expected = (
+                (ask[1].get("expected_output") if ask else "")
+                or step.get("expected")
+                or ""
+            )
+
+            thread = Thread(
+                user_id=run.user_id,
+                chat_id=chat.id,
+                parent_thread_id=main.id,
+                type="task",
+                title=instruction[:60],
+                bot_id=target.id,
+            )
+            db.add(thread)
+            db.flush()
+            task = Task(
+                user_id=run.user_id,
+                run_id=run.id,
+                thread_id=thread.id,
+                assigned_bot_id=target.id,
+                instruction=instruction,
+                expected_output=expected,
+                attempt=attempt,
+                step_key=key,
+                batch=batch_no,
+                status="queued",
+            )
+            db.add(task)
+            db.flush()
+            note_meta = {
+                "task_id": task.id,
+                "thread_id": thread.id,
+                "mention_bot_id": target.id,
+                "mention_name": target.name,
+                "expected_output": expected,
+                "delegation": True,
+                "delegation_instruction": instruction,
+                "batch": batch_no,
+                "parallel": True,
+            }
+            if ask and ask[0].get("id"):
+                note_meta["tool_call_id"] = ask[0]["id"]
+            # 群聊里仍然是一条「@成员 指令」，读起来和串行派活一致；
+            # batch 标记让前端把同批的消息收拢成一组。
+            add_message(
+                db,
+                thread=main,
+                run_id=run.id,
+                sender_type="bot",
+                type_="text",
+                content=f"@{target.name} {instruction}",
+                sender_bot_id=bot_id,
+                meta=note_meta,
+            )
+            child = Run(
+                user_id=run.user_id,
+                chat_id=chat.id,
+                status="queued",
+                mode=run.mode,
+                target_bot_id=target.id,
+                thread_id=thread.id,
+                parent_run_id=run.id,
+                parent_task_id=task.id,
+                config_snapshot=run.config_snapshot or {},
+            )
+            db.add(child)
+            db.flush()
+            child_ids.append(child.id)
+            emit_task_status(db, task)
+            log.info(
+                "并行派活 task=%s 批次=%s 执行者=%s 指令=%r",
+                task.id, batch_no, target.name, instruction[:120],
+            )
+
+        batch_tasks = db.scalars(
+            select(Task).where(Task.run_id == run.id, Task.step_key.in_(keys))
+        ).all()
+        pending = any(
+            t.status in ("queued", "running", "waiting_approval", "waiting_reply")
+            for t in batch_tasks
+        )
+        return child_ids, pending
+
     async def start_delegate(
         self, *, thread_id: str, bot_id: str, task_id: str | None, call: dict
     ) -> dict:
-        """派活：建子线程与任务，把图里的角色切成 worker。"""
+        """派活：串行时切换角色就地执行，同批计划步骤则拉起并行子执行后等待。"""
         args = _parse_json((call.get("function") or {}).get("arguments") or "{}")
         error = toolmod.validate_args(toolmod.DELEGATE_TOOL, args)
         if error:
@@ -874,13 +1264,14 @@ class RunExecutor:
             self.write_tool_result(thread_id, call, "指令为空，请补充具体任务内容。")
             return {}
 
+        deferred = False
+        enqueue_ids: list[str] = []
+        patch: dict = {}
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             chat = db.get(Chat, run.chat_id)
             members = self._member_bots(db, chat, run)
-            target = next((b for b in members if b.name == target_name), None)
-            if not target and target_name:
-                target = next((b for b in members if target_name in b.name), None)
+            target = self._resolve_member(members, target_name)
             if not target:
                 names = "、".join(b.name for b in members)
                 self.write_tool_result(
@@ -893,195 +1284,289 @@ class RunExecutor:
 
             main = self._main_thread(db, chat)
             # 节点落库后、检查点写入前重启时，复用同一调用已经创建的任务。
-            for note in db.scalars(select(Message).where(
-                Message.run_id == run.id, Message.thread_id == main.id, Message.type == "text",
-            )):
-                meta = note.meta or {}
-                if meta.get("delegation") and meta.get("tool_call_id") == call.get("id"):
-                    existing = db.get(Task, meta.get("task_id"))
-                    if existing:
-                        if existing.status in ("completed", "failed", "canceled"):
-                            self._answer_delegate_call(db, main, existing, existing.result or existing.status)
-                            return {}
-                        return {"role": "worker", "bot_id": existing.assigned_bot_id,
-                                "thread_id": existing.thread_id, "task_id": existing.id,
-                                "last": existing.result or "", "has_calls": False, "cont": False}
-            # 同一子任务的判定用稳定键（RUN-10）：总指挥改派时换个说法、
-            # 换个人，都不会再被当成新任务绕过改派上限。旧任务没有 step_key
-            # 时按指令文本兜底，保证升级前后的执行口径一致。
-            failed = [
-                t
-                for t in db.scalars(
-                    select(Task).where(Task.run_id == run.id, Task.status == "failed")
+            existing = self._task_for_call(db, run.id, main.id, call.get("id"))
+            if existing:
+                if existing.status in ("completed", "failed", "canceled"):
+                    self._answer_delegate_call(db, main, existing, self._delegate_summary(db, existing))
+                    return {}
+                if existing.batch:
+                    # 并行子执行还没回来：继续等，别重复建任务
+                    deferred = True
+                else:
+                    return {"role": "worker", "bot_id": existing.assigned_bot_id,
+                            "thread_id": existing.thread_id, "task_id": existing.id,
+                            "last": existing.result or "", "has_calls": False, "cont": False}
+
+            batch = None if deferred else self._parallel_batch(db, run, chat, step_key)
+            if batch:
+                batch_no, batch_steps, matched_key = batch
+                child_ids, pending = self._start_parallel_batch(
+                    db, run, chat, main, members, batch_no, batch_steps, matched_key,
+                    call, args, bot_id,
+                )
+                if pending:
+                    enqueue_ids = child_ids
+                    deferred = True
+                else:
+                    # 这一批已经全部结束（或都无法派发）：给当前调用补结果，让总指挥继续
+                    if not self._call_answered(db, main.id, run.id, call.get("id")):
+                        self._answer_open_calls(
+                            db, main, run.id,
+                            "这一批并行步骤都已经结束或无法派发，请根据已有结果继续，不要重复派活。",
+                            call_id=call.get("id"),
+                        )
+                    return {}
+            elif not deferred:
+                # 同一子任务的判定用稳定键（RUN-10）：总指挥改派时换个说法、
+                # 换个人，都不会再被当成新任务绕过改派上限。旧任务没有 step_key
+                # 时按指令文本兜底，保证升级前后的执行口径一致。
+                failed = [
+                    t
+                    for t in db.scalars(
+                        select(Task).where(Task.run_id == run.id, Task.status == "failed")
+                    ).all()
+                    if (t.step_key or _step_key(t.instruction)) == step_key
+                ]
+                if len(failed) > MAX_REASSIGN:
+                    self.write_tool_result(thread_id, call, "同一子任务已达到改派次数上限，请向用户说明失败或跳过该步骤。")
+                    return {}
+                thread = Thread(
+                    user_id=run.user_id,
+                    chat_id=chat.id,
+                    parent_thread_id=main.id,
+                    type="task",
+                    title=instruction[:60],
+                    bot_id=target.id,
+                )
+                db.add(thread)
+                db.flush()
+                task = Task(
+                    user_id=run.user_id,
+                    run_id=run.id,
+                    thread_id=thread.id,
+                    assigned_bot_id=target.id,
+                    instruction=instruction,
+                    expected_output=expected,
+                    attempt=len(failed) + 1,
+                    step_key=step_key,
+                    status="running",
+                    started_at=now(),
+                )
+                db.add(task)
+                db.flush()
+                # 群聊里就是一条普通消息：总指挥 @ 目标 Bot，像人一样把活说清楚
+                add_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    sender_type="bot",
+                    type_="text",
+                    content=f"@{target.name} {instruction}",
+                    sender_bot_id=bot_id,
+                    meta={
+                        "task_id": task.id,
+                        "thread_id": thread.id,
+                        "mention_bot_id": target.id,
+                        "mention_name": target.name,
+                        "expected_output": expected,
+                        "delegation": True,
+                        "delegation_instruction": instruction,
+                        "tool_call_id": call.get("id"),
+                    },
+                )
+                emit_task_status(db, task)
+                log.info(
+                    "派活 task=%s 执行者=%s 第%s次 指令=%r",
+                    task.id, target.name, task.attempt, instruction[:120],
+                )
+                patch = {
+                    "role": "worker",
+                    "bot_id": target.id,
+                    "thread_id": thread.id,
+                    "task_id": task.id,
+                    "last": "",
+                    "has_calls": False,
+                    "cont": False,
+                }
+        for child_id in enqueue_ids:
+            enqueue(child_id)
+        if deferred:
+            raise AwaitChildren()
+        return patch
+
+    def _publish_task_result(
+        self, db: Session, run: Run, chat: Chat, main: Thread, task: Task, content: str
+    ) -> bool:
+        """子任务完成：回写任务、在群聊里给出结果、回答 delegate。返回是否首次完成。
+
+        串行（子 Bot 就地跑在总指挥的图里）和并行（独立子执行）共用这段逻辑，
+        区别只在于 live 镜像消息属于哪个 run。
+        """
+        if task.status in ("completed", "failed", "canceled"):
+            return False
+        bot = execution_bot(db, run, task.assigned_bot_id)
+        task.status = "completed"
+        task.result = content or EMPTY_OUTPUT
+        task.ended_at = now()
+        task.tokens_used = task.tokens_used or 0
+        db.flush()
+        emit_task_status(db, task)
+        elapsed = ""
+        if task.started_at and task.ended_at:
+            elapsed = f"{int((task.ended_at - task.started_at).total_seconds())} 秒"
+        log.info(
+            "任务完成 task=%s 执行者=%s 耗时=%s tokens=%s",
+            task.id, bot.name if bot else "", elapsed, task.tokens_used,
+        )
+        result_meta = {
+            "task_id": task.id,
+            "thread_id": task.thread_id,
+            "subtask": True,
+            "bot_name": bot.name if bot else "",
+            "elapsed": elapsed,
+            "tokens": task.tokens_used,
+            "batch": task.batch or 0,
+        }
+        # 如果最后一轮已经通过群聊镜像把答案实时发出来了，就把那条消息升级成
+        # 完成消息，避免同一条回复出现两次。用 Python 过滤 meta，兼容 SQLite/Postgres。
+        live = next(
+            (
+                m
+                for m in db.scalars(
+                    select(Message)
+                    .where(
+                        Message.thread_id == main.id,
+                        Message.run_id == run.id,
+                        Message.type == "text",
+                    )
+                    .order_by(Message.seq.desc())
                 ).all()
-                if (t.step_key or _step_key(t.instruction)) == step_key
-            ]
-            if len(failed) > MAX_REASSIGN:
-                self.write_tool_result(thread_id, call, "同一子任务已达到改派次数上限，请向用户说明失败或跳过该步骤。")
-                return {}
-            thread = Thread(
-                user_id=run.user_id,
-                chat_id=chat.id,
-                parent_thread_id=main.id,
-                type="task",
-                title=instruction[:60],
-                bot_id=target.id,
-            )
-            db.add(thread)
+                if (m.meta or {}).get("task_id") == task.id
+                and (m.meta or {}).get("subtask_live")
+            ),
+            None,
+        )
+        if live and (live.content or "").strip() == (task.result or "").strip():
+            promoted = {**(live.meta or {}), **result_meta}
+            promoted.pop("subtask_live", None)
+            live.meta = promoted
             db.flush()
-            task = Task(
-                user_id=run.user_id,
-                run_id=run.id,
-                thread_id=thread.id,
-                assigned_bot_id=target.id,
-                instruction=instruction,
-                expected_output=expected,
-                attempt=len(failed) + 1,
-                step_key=step_key,
-                status="running",
-                started_at=now(),
+            emit(
+                db,
+                run.user_id,
+                run.chat_id,
+                "message.completed",
+                {
+                    "message_id": live.id,
+                    "content": live.content,
+                    "status": live.status,
+                    "meta": live.meta,
+                },
             )
-            db.add(task)
-            db.flush()
-            # 群聊里就是一条普通消息：总指挥 @ 目标 Bot，像人一样把活说清楚
+        else:
+            # 子 Bot 在群聊里以自己的身份回复，读起来就是一次对话
             add_message(
                 db,
                 thread=main,
                 run_id=run.id,
                 sender_type="bot",
                 type_="text",
-                content=f"@{target.name} {instruction}",
-                sender_bot_id=bot_id,
-                meta={
-                    "task_id": task.id,
-                    "thread_id": thread.id,
-                    "mention_bot_id": target.id,
-                    "mention_name": target.name,
-                    "expected_output": expected,
-                    "delegation": True,
-                    "delegation_instruction": instruction,
-                    "tool_call_id": call.get("id"),
-                },
+                content=task.result,
+                sender_bot_id=task.assigned_bot_id,
+                meta=result_meta,
             )
-            emit_task_status(db, task)
-            log.info(
-                "派活 task=%s 执行者=%s 第%s次 指令=%r",
-                task.id, target.name, task.attempt, instruction[:120],
+        # 总指挥那条 delegate 还悬着，补上结果它才能继续
+        self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
+        db.flush()
+        return True
+
+    def _maybe_write_batch_summary(
+        self, db: Session, main: Thread, task: Task
+    ) -> None:
+        """同一批并行子任务全部返回后，给总指挥留一条汇总系统消息。
+
+        模型自己发起的 delegate 已有各自的 tool_result；被系统补齐的步骤
+        （计划里有、但模型没单独发调用）没有对应消息，汇总保证它们的结果
+        也能进入总指挥的上下文。按 batch 去重，节点重放不会写第二条。
+        """
+        if not task.batch:
+            return
+        siblings = db.scalars(
+            select(Task).where(Task.run_id == task.run_id, Task.batch == task.batch)
+        ).all()
+        # 改派会产生第二次尝试：同一个 step_key 只保留最新一条，汇总不重复
+        latest: dict[str, Task] = {}
+        for item in siblings:
+            key = item.step_key or item.id
+            if key not in latest or item.created_at > latest[key].created_at:
+                latest[key] = item
+        siblings = list(latest.values())
+        if any(
+            t.status in ("queued", "running", "waiting_approval", "waiting_reply")
+            for t in siblings
+        ):
+            return
+        marker = f"并行批次 {task.batch} "
+        exists = db.scalar(
+            select(func.count(Message.id)).where(
+                Message.run_id == task.run_id,
+                Message.type == "system",
+                Message.content.like(marker + "%"),
             )
-            patch = {
-                "role": "worker",
-                "bot_id": target.id,
-                "thread_id": thread.id,
-                "task_id": task.id,
-                "last": "",
-                "has_calls": False,
-                "cont": False,
-            }
-        return patch
+        )
+        if exists:
+            return
+        bots = {
+            b.id: b.name
+            for b in db.scalars(
+                select(Bot).where(Bot.id.in_([t.assigned_bot_id for t in siblings]))
+            ).all()
+        }
+        lines = []
+        for t in siblings:
+            head = (t.instruction or "").split("\n", 1)[0][:40]
+            state = {"completed": "完成", "failed": "失败", "canceled": "取消"}.get(
+                t.status, t.status
+            )
+            summary = " ".join((t.result or "").split())[:200]
+            lines.append(f"- {bots.get(t.assigned_bot_id, '')} · {head}（{state}）：{summary}")
+        add_message(
+            db,
+            thread=main,
+            run_id=task.run_id,
+            sender_type="system",
+            type_="system",
+            content=f"并行批次 {task.batch} 已全部返回：\n" + "\n".join(lines),
+            meta={"kind": "parallel_batch", "batch": task.batch},
+        )
+        db.flush()
 
     async def finish_task(self, *, task_id: str, content: str) -> dict:
-        """子 Bot 跑完：回写结果、切回总指挥；逐步确认模式下在这里暂停。"""
+        """串行子 Bot 跑完：回写结果、切回总指挥；逐步确认模式下在这里暂停。"""
         self._check_stop()
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             chat = db.get(Chat, run.chat_id)
             main = self._main_thread(db, chat)
             task = db.get(Task, task_id)
-            bot = execution_bot(db, run, task.assigned_bot_id)
             sup_id = supervisor_id(run, chat)
             sup = execution_bot(db, run, sup_id) if sup_id else None
             step_mode = chat.run_mode == "step"
             task_title = (task.instruction or "")[:60]
-            already = task.status == "completed"
 
-            if not already:
-                task.status = "completed"
-                task.result = content or EMPTY_OUTPUT
-                task.ended_at = now()
-                task.tokens_used = task.tokens_used or 0
-                db.flush()
-                emit_task_status(db, task)
-                elapsed = ""
-                if task.started_at and task.ended_at:
-                    elapsed = f"{int((task.ended_at - task.started_at).total_seconds())} 秒"
-                log.info("任务完成 task=%s 执行者=%s 耗时=%s tokens=%s", task.id, bot.name if bot else "", elapsed, task.tokens_used)
-                result_meta = {
-                    "task_id": task.id,
-                    "thread_id": task.thread_id,
-                    "subtask": True,
-                    "bot_name": bot.name if bot else "",
-                    "elapsed": elapsed,
-                    "tokens": task.tokens_used,
-                }
-                # 如果最后一轮已经通过群聊镜像把答案实时发出来了，
-                # 就把那条消息升级成完成卡片，避免同一条回复出现两次。
-                # 用 Python 过滤 meta，兼容 SQLite/Postgres 的 JSON 差异。
-                live = next(
-                    (
-                        m
-                        for m in db.scalars(
-                            select(Message)
-                            .where(
-                                Message.thread_id == main.id,
-                                Message.run_id == run.id,
-                                Message.type == "text",
-                            )
-                            .order_by(Message.seq.desc())
-                        ).all()
-                        if (m.meta or {}).get("task_id") == task.id
-                        and (m.meta or {}).get("subtask_live")
-                    ),
-                    None,
+            published = self._publish_task_result(db, run, chat, main, task, content)
+            if published and step_mode:
+                # 9.2：逐步确认暂停也要通知用户，否则关页后没人知道该点继续
+                notify(
+                    db,
+                    run.user_id,
+                    "step",
+                    f"「{chat.name}」已暂停，等待你继续",
+                    task_title,
+                    chat_id=run.chat_id,
+                    target_type="run",
+                    target_id=run.id,
                 )
-                if live and (live.content or "").strip() == (task.result or "").strip():
-                    promoted = {**(live.meta or {}), **result_meta}
-                    promoted.pop("subtask_live", None)
-                    live.meta = promoted
-                    db.flush()
-                    emit(
-                        db,
-                        run.user_id,
-                        run.chat_id,
-                        "message.completed",
-                        {
-                            "message_id": live.id,
-                            "content": live.content,
-                            "status": live.status,
-                            "meta": live.meta,
-                        },
-                    )
-                else:
-                    # 子 Bot 在群聊里以自己的身份回复，读起来就是一次对话
-                    add_message(
-                        db,
-                        thread=main,
-                        run_id=run.id,
-                        sender_type="bot",
-                        type_="text",
-                        content=task.result,
-                        sender_bot_id=task.assigned_bot_id,
-                        meta=result_meta,
-                    )
-                # 总指挥那条 delegate 还悬着，补上结果它才能继续
-                summary = (
-                    f"任务已完成。执行者：{bot.name if bot else ''}。\n"
-                    f"期望产出：{task.expected_output or '未指定'}\n"
-                    f"结果摘要：\n{(task.result or '')[:1500]}"
-                )
-                self._answer_delegate_call(db, main, task, summary)
-                db.flush()
-                if step_mode:
-                    # 9.2：逐步确认暂停也要通知用户，否则关页后没人知道该点继续
-                    notify(
-                        db,
-                        run.user_id,
-                        "step",
-                        f"「{chat.name}」已暂停，等待你继续",
-                        task_title,
-                        chat_id=run.chat_id,
-                        target_type="run",
-                        target_id=run.id,
-                    )
 
             main_id = main.id
             sup_id = sup.id if sup else None
@@ -1108,39 +1593,101 @@ class RunExecutor:
             "cont": True,
         }
 
-    async def fail_task(self, *, task_id: str, reason: str) -> dict:
-        """子任务模型失败：记失败原因，把控制权交回总指挥（不让整个 run 挂掉）。"""
-        self._check_stop()
+    async def finish_child_task(self, *, task_id: str, content: str) -> dict:
+        """并行子执行跑完：回写任务与群聊，关掉自己这条执行并唤醒父执行。"""
+        main_id = ""
+        parent_id = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             chat = db.get(Chat, run.chat_id)
             main = self._main_thread(db, chat)
             task = db.get(Task, task_id)
+            if task:
+                # 批次汇总统一在父执行恢复时写（_ensure_batch_summaries）：
+                # 多个子执行同时结束，在各自主事务里判断「是不是最后一个」会漏写或重写
+                self._publish_task_result(db, run, chat, main, task, content)
+            main_id = main.id
+            parent_id = run.parent_run_id
+        self._finish_completed(content)
+        if parent_id:
+            self._wake_parent(parent_id)
+        return {
+            "role": "worker",
+            "bot_id": None,
+            "thread_id": main_id,
+            "task_id": task_id,
+            "last": content,
+            "has_calls": False,
+            "cont": False,
+            "done": True,
+        }
+
+    def _wake_parent(self, parent_id: str) -> None:
+        """所有并行子执行都结束了，把等待中的父执行重新入队。"""
+        with session_scope() as db:
+            parent = db.get(Run, parent_id)
+            if not parent or parent.status != "waiting_children":
+                return
+            active = db.scalar(
+                select(func.count(Run.id)).where(
+                    Run.parent_run_id == parent.id, Run.status.in_(CHILD_ACTIVE_STATUSES)
+                )
+            )
+            if active:
+                return
+            parent.status = "queued"
+            db.flush()
+            emit_run_status(db, parent)
+        enqueue(parent_id)
+
+    async def fail_task(self, *, task_id: str, reason: str) -> dict:
+        """子任务模型失败：记失败原因，把控制权交回总指挥（并行子执行则自己收尾）。"""
+        self._check_stop()
+        parent_id = None
+        is_child = False
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            is_child = bool(run.parent_run_id)
+            chat = db.get(Chat, run.chat_id)
+            main = self._main_thread(db, chat)
+            task = db.get(Task, task_id)
             sup_id = supervisor_id(run, chat)
             sup = execution_bot(db, run, sup_id) if sup_id else None
-            task.status = "failed"
-            task.result = f"失败：{reason}"
-            task.ended_at = now()
-            db.flush()
-            emit_task_status(db, task)
-            log.warning("任务失败 task=%s 原因=%s", task.id, str(reason)[:500])
-            self._answer_delegate_call(
-                db,
-                main,
-                task,
-                f"子任务执行失败：{reason}。你可以改派给其他成员，或跳过该步骤并向用户说明。",
-            )
-            add_message(
-                db,
-                thread=main,
-                run_id=run.id,
-                sender_type="system",
-                type_="system",
-                content=f"子任务失败：{reason}",
-            )
-            db.flush()
+            if task and task.status not in ("completed", "failed", "canceled"):
+                task.status = "failed"
+                task.result = f"失败：{reason}"
+                task.ended_at = now()
+                db.flush()
+                emit_task_status(db, task)
+                log.warning("任务失败 task=%s 原因=%s", task.id, str(reason)[:500])
+                self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
+                if not is_child:
+                    add_message(
+                        db,
+                        thread=main,
+                        run_id=run.id,
+                        sender_type="system",
+                        type_="system",
+                        content=f"子任务失败：{reason}",
+                    )
+                db.flush()
             main_id = main.id
             sup_id = sup.id if sup else None
+            parent_id = run.parent_run_id
+        if is_child:
+            self._close_run("failed", f"子任务失败：{reason}")
+            if parent_id:
+                self._wake_parent(parent_id)
+            return {
+                "role": "worker",
+                "bot_id": None,
+                "thread_id": main_id,
+                "task_id": task_id,
+                "last": "",
+                "has_calls": False,
+                "cont": False,
+                "done": True,
+            }
         return {
             "role": "supervisor",
             "bot_id": sup_id,
@@ -1198,8 +1745,10 @@ class RunExecutor:
                         return "用户取消了这次计划，请停下来询问用户接下来的安排。"
                     steps = (old.meta or {}).get("steps") or steps
                     return (
-                        "用户已确认以下计划，请以这些最终步骤为准，逐项调用 delegate 派给对应成员，"
-                        "拿到结果后再汇总，不要只复述计划。\n"
+                        "用户已确认以下计划，请以这些最终步骤为准派活：同一个 batch 的步骤"
+                        "必须在同一次回复里同时发起多个 delegate 调用（并行），不同 batch 等"
+                        "上一批结果回来再派；delegate 的 step 参数原样填步骤标题。拿到结果后"
+                        "再汇总，不要只复述计划。\n"
                         + json.dumps(steps, ensure_ascii=False)
                     )
                 approved = any((m.meta or {}).get("status") == "approved" for m in db.scalars(
@@ -1618,9 +2167,16 @@ class RunExecutor:
         ).scalars().all()
         return [execution_bot(db, run, b.id) if run else b for b in rows if not b.deleted_at]
 
-    def _pending_interjection_seq(self, db: Session, run: Run, thread: Thread) -> int:
-        """主线程里「总指挥还没读到的插话」的最大 seq；没有则 0。"""
-        base = run.last_interjection_seq or 0
+    def _pending_interjection_seq(
+        self, db: Session, run: Run, thread: Thread, base: int | None = None
+    ) -> int:
+        """主线程里「总指挥还没读到的插话」的最大 seq；没有则 0。
+
+        RUN-12：并行子执行是独立的 Run，不能用它自己的 last_interjection_seq
+        （永远是 0）判断，否则执行前用户说过的任何一句话都会让子任务立刻中止；
+        调用方会传入父执行已读到的最新 seq。
+        """
+        base = (run.last_interjection_seq or 0) if base is None else base
         rows = db.scalars(
             select(Message).where(
                 Message.thread_id == thread.id,
@@ -1691,10 +2247,10 @@ class RunExecutor:
             parts += [
                 "\n## 你的额外职责（总指挥）",
                 "- 你负责协调成员。问候、状态查询、简短解释可以直接回答；检索资料、写代码/HTML、写文档、分析数据或审校等执行工作，有合适且已配置模型的成员时应调用 delegate 派活。",
-                "- 派活不取决于子任务数量：只有一项执行工作也直接调用 delegate，无需先出计划。两项及以上相互配合的子任务，先调用 propose_plan，用户确认后按最终计划逐项派活。",
+                "- 派活不取决于子任务数量：只有一项执行工作也直接调用 delegate，无需先出计划。两项及以上相互配合的子任务，先调用 propose_plan，用户确认后按最终计划派活。",
+                "- 计划里相互独立、可以同时做的步骤用同一个 batch 号；有先后依赖的步骤用递增的 batch。同一 batch 的步骤必须在同一次回复里一起发出多个 delegate 调用（并行），不要一个一个等；系统会同时执行，全部返回后再进入下一批。",
                 "- 例如写 HTML 派给程序员，查天气/查资料派给研究员，写需求文档派给写手/编辑，评审派给审校；按成员实际职责选择，不因自己也有工具就包办。没有合适成员、成员调用失败或用户明确要求你亲自处理时，可以自行完成。",
-                "- 执行阶段用 delegate 把子任务派给合适的成员，一次一个，等结果回来再决定下一步。",
-                "- 派活时把计划步骤的标题（或序号）原样填进 delegate 的 step 参数；同一个子任务改派时 step 保持不变——改派次数按 step 判断，换个说法重派不会多出次数。",
+                "- 串行步骤用 delegate 一次派一个，等结果回来再决定下一步；派活时把计划步骤的标题（或序号）原样填进 delegate 的 step 参数；同一个子任务改派时 step 保持不变——改派次数按 step 判断，换个说法重派不会多出次数。",
                 "- 子任务结果会以工具结果形式返回给你；需要时继续派活，最后必须给出面向用户的最终回答。",
                 "- 缺少关键信息且无法自行判断时，调用 ask_user。",
                 "- 不要声称自己完成了子 Bot 的工作；汇报要基于实际返回结果。",
@@ -1946,7 +2502,13 @@ class RunExecutor:
             {"role": "system", "content": self._build_system_prompt(db, run, chat, bot, is_supervisor, members)}
         ]
         if thread.type == "task":
-            task = db.scalar(select(Task).where(Task.thread_id == thread.id, Task.run_id == run.id))
+            # RUN-12：并行子执行自己也是 Run，任务的 run_id 指向父执行，
+            # 所以优先按 parent_task_id 取，旧的串行路径再按「本执行 + 线程」找。
+            task = (
+                db.get(Task, run.parent_task_id)
+                if run.parent_task_id
+                else db.scalar(select(Task).where(Task.thread_id == thread.id, Task.run_id == run.id))
+            )
             if task:
                 instruction = task.instruction
                 if task.expected_output:
@@ -2001,7 +2563,10 @@ class RunExecutor:
 
         used: set[str] = set()
         for m in msgs:
-            if m.status == "streaming":
+            # 没跑完的一轮不能进入上下文：streaming 是草稿，interrupted 是被停止/失败
+            # 截断的半句。后者既会误导模型，也缺 reasoning_content——思考模式会直接 400
+            # （"The reasoning_content in the thinking mode must be passed back"）。
+            if m.status in ("streaming", "interrupted"):
                 continue
             if m.type == "text":
                 if m.run_id != run.id:
@@ -2042,8 +2607,9 @@ class RunExecutor:
                         })
                         continue
                     item = {"role": "assistant", "content": m.content}
-                    if m.reasoning_content is not None:
-                        item["reasoning_content"] = m.reasoning_content
+                    # 思考模式（DeepSeek 等）要求 assistant 消息把 reasoning_content
+                    # 原样带回；字段缺失会被接口以 400 拒绝，因此空值也要显式给 ""。
+                    item["reasoning_content"] = m.reasoning_content or ""
                     out.append(item)
             elif m.type == "system" and m.run_id == run.id:
                 out.append({"role": "system", "content": m.content})
@@ -2286,9 +2852,23 @@ class RunExecutor:
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             lim = self._limits(db, run)
-            if lim["token_budget"] > 0 and run.tokens_used >= lim["token_budget"]:
+            # RUN-12：并行子执行各自记账，预算必须按「根执行 + 所有子执行」
+            # 合并算，否则一次并行 4 个子任务就能各花一份预算。
+            root_id = run.parent_run_id or run.id
+            family = [root_id] + list(
+                db.scalars(select(Run.id).where(Run.parent_run_id == root_id))
+            )
+            used = int(
+                db.scalar(
+                    select(func.coalesce(func.sum(Run.tokens_used), 0)).where(
+                        Run.id.in_(family)
+                    )
+                )
+                or 0
+            )
+            if lim["token_budget"] > 0 and used >= lim["token_budget"]:
                 raise LimitExceeded(
-                    f"token 预算超限：已用 {run.tokens_used}，上限 {lim['token_budget']}"
+                    f"token 预算超限：已用 {used}，上限 {lim['token_budget']}"
                 )
             if run.stop_requested:
                 raise StopSignal()
@@ -2307,115 +2887,173 @@ class RunExecutor:
         self._check_stop()
 
     # ---------------- 收尾 ----------------
+    def _close_run(self, status: str, reason: str) -> None:
+        """只更新执行自身状态（子执行在自己的事务里收尾时用）。"""
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            if not run or run.status in ("completed", "failed", "stopped"):
+                return
+            run.status = status
+            run.ended_at = now()
+            run.end_reason = reason
+            db.flush()
+            emit_run_status(db, run)
+
+    def _child_task_aborted(
+        self, db: Session, run: Run, main: Thread, status: str, reason: str
+    ) -> None:
+        """并行子执行异常结束：落任务状态、回答 delegate、写批次汇总。"""
+        task = db.get(Task, run.parent_task_id) if run.parent_task_id else None
+        if not task or task.status in ("completed", "failed", "canceled"):
+            return
+        task.status = status
+        task.result = reason
+        task.ended_at = now()
+        db.flush()
+        emit_task_status(db, task)
+        self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
+
     def _finish_completed(self, content: str) -> None:
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             if run.status in ("completed", "failed", "stopped"):
                 return
+            is_child = bool(run.parent_run_id)
             run.status = "completed"
             run.ended_at = now()
             run.end_reason = "已完成"
+            # 正常结束时不应该还有活着的子执行；真有说明是异常竞态，一并停掉
+            stop_child_runs(db, run, "父执行已结束")
             settle_run_tasks(db, run, "canceled", "执行已结束")
             db.flush()
             emit_run_status(db, run)
             chat = db.get(Chat, run.chat_id)
             chat.last_active_at = now()
-            notify(
-                db,
-                run.user_id,
-                "run_completed",
-                f"「{chat.name}」执行完成",
-                (content or "")[:120],
-                chat_id=chat.id,
-                target_type="run",
-                target_id=run.id,
-            )
+            if not is_child:
+                notify(
+                    db,
+                    run.user_id,
+                    "run_completed",
+                    f"「{chat.name}」执行完成",
+                    (content or "")[:120],
+                    chat_id=chat.id,
+                    target_type="run",
+                    target_id=run.id,
+                )
 
     def _finish_stopped(self) -> None:
+        parent_id = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             if run.status == "stopped":
                 settle_run_tasks(db, run, "canceled", "用户停止")
                 return
+            is_child = bool(run.parent_run_id)
             run.status = "stopped"
             run.ended_at = now()
             run.end_reason = "用户停止"
+            stop_child_runs(db, run, "上游执行已停止")
             settle_run_tasks(db, run, "canceled", run.end_reason)
+            main = self._main_thread(db, db.get(Chat, run.chat_id))
+            if is_child:
+                self._child_task_aborted(db, run, main, "canceled", "用户停止")
+                parent_id = run.parent_run_id
+            else:
+                db.flush()
+                add_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    sender_type="system",
+                    type_="system",
+                    content="执行已被用户停止，已完成的步骤与产物保留。",
+                )
             db.flush()
             emit_run_status(db, run)
-            main = self._main_thread(db, db.get(Chat, run.chat_id))
-            add_message(
-                db,
-                thread=main,
-                run_id=run.id,
-                sender_type="system",
-                type_="system",
-                content="执行已被用户停止，已完成的步骤与产物保留。",
-            )
+        if parent_id:
+            self._wake_parent(parent_id)
 
     def _finish_limited(self, reason: str) -> None:
+        parent_id = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             if run.status in ("completed", "failed", "stopped"):
                 return
+            is_child = bool(run.parent_run_id)
             run.status = "failed"
             run.ended_at = now()
             run.end_reason = reason
+            stop_child_runs(db, run, f"上游执行停止：{reason}")
             settle_run_tasks(db, run, "failed", reason)
             db.flush()
             emit_run_status(db, run)
             chat = db.get(Chat, run.chat_id)
             main = self._main_thread(db, chat)
-            add_message(
-                db,
-                thread=main,
-                run_id=run.id,
-                sender_type="system",
-                type_="limit",
-                content=f"执行已自动停止：{reason}。已完成的步骤与产物保留。",
-            )
-            notify(
-                db,
-                run.user_id,
-                "run_failed",
-                f"「{chat.name}」执行失败",
-                reason,
-                chat_id=chat.id,
-                target_type="run",
-                target_id=run.id,
-            )
+            if is_child:
+                self._child_task_aborted(db, run, main, "failed", f"失败：{reason}")
+                parent_id = run.parent_run_id
+            else:
+                add_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    sender_type="system",
+                    type_="limit",
+                    content=f"执行已自动停止：{reason}。已完成的步骤与产物保留。",
+                )
+                notify(
+                    db,
+                    run.user_id,
+                    "run_failed",
+                    f"「{chat.name}」执行失败",
+                    reason,
+                    chat_id=chat.id,
+                    target_type="run",
+                    target_id=run.id,
+                )
+        if parent_id:
+            self._wake_parent(parent_id)
 
     def _finish_failed(self, reason: str) -> None:
+        parent_id = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             if not run or run.status in ("completed", "failed", "stopped"):
                 return
+            is_child = bool(run.parent_run_id)
             run.status = "failed"
             run.ended_at = now()
             run.end_reason = reason
+            stop_child_runs(db, run, f"上游执行失败：{reason}")
             settle_run_tasks(db, run, "failed", reason)
             db.flush()
             emit_run_status(db, run)
             chat = db.get(Chat, run.chat_id)
             main = self._main_thread(db, chat)
-            add_message(
-                db,
-                thread=main,
-                run_id=run.id,
-                sender_type="system",
-                type_="system",
-                content=reason,
-            )
-            notify(
-                db,
-                run.user_id,
-                "run_failed",
-                f"「{chat.name}」执行失败",
-                reason[:160],
-                chat_id=chat.id,
-                target_type="run",
-                target_id=run.id,
-            )
+            if is_child:
+                self._child_task_aborted(db, run, main, "failed", f"失败：{reason}")
+                parent_id = run.parent_run_id
+            else:
+                add_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    sender_type="system",
+                    type_="system",
+                    content=reason,
+                )
+                notify(
+                    db,
+                    run.user_id,
+                    "run_failed",
+                    f"「{chat.name}」执行失败",
+                    reason[:160],
+                    chat_id=chat.id,
+                    target_type="run",
+                    target_id=run.id,
+                )
+        if parent_id:
+            self._wake_parent(parent_id)
 
 
 async def execute_run(run_id: str) -> None:

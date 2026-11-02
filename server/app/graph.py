@@ -131,7 +131,15 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
         return {}
 
     async def after_node(state: AgentState) -> dict:
+        # 子执行失败时 model 节点已经自己收尾（fail_task），这里不要再当成功处理
+        if state.get("done"):
+            return {"done": True}
         if state.get("role") == "worker" and state.get("task_id"):
+            # RUN-12：并行子任务是独立执行，跑完关掉自己这条，不等总指挥
+            if ex.is_child_run():
+                return await ex.finish_child_task(
+                    task_id=state["task_id"], content=state.get("last") or ""
+                )
             return await ex.finish_task(task_id=state["task_id"], content=state.get("last") or "")
         ex.finish_run(state.get("last") or "")
         return {"done": True, "cont": False}

@@ -46,7 +46,8 @@ def _user_id(scope) -> str | None:
         name, _, value = part.strip().partition("=")
         if name == SESSION_COOKIE and value:
             try:
-                return read_session(value)
+                session = read_session(value)
+                return session[0] if session else None
             except Exception:
                 return None
     return None

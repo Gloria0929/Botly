@@ -1,4 +1,4 @@
-"""子 Bot 的执行过程（工具调用/返回）要实时出现在群聊，而不是只在任务面板。"""
+"""工具调用只留在任务线程（任务面板），群聊只展示 bot 的聊天记录。"""
 from __future__ import annotations
 
 import asyncio
@@ -61,26 +61,23 @@ def _results(thread_id: str, task_id: str | None = None) -> list[Message]:
         return [m for m in rows if task_id is None or (m.meta or {}).get("task_id") == task_id]
 
 
-def test_tool_result_is_mirrored_to_chat_once(client, invite):
+def test_tool_result_stays_in_task_thread(client, invite):
     ctx = _setup(client, invite, "mirror@test.dev")
     ex = RunExecutor(ctx["run_id"])
     call = {"id": "call-1", "type": "function", "function": {"name": "file_write", "arguments": "{}"}}
 
     ex.write_tool_result(ctx["task_thread_id"], call, "已写入 report.md")
-    # 节点重放/重复调用不应在任一线程多出第二条
+    # 节点重放/重复调用不应在任务线程多出第二条
     ex.write_tool_result(ctx["task_thread_id"], call, "已写入 report.md")
 
     task_rows = _results(ctx["task_thread_id"])
-    mirror = _results(ctx["main_id"], ctx["task_id"])
     assert len(task_rows) == 1 and task_rows[0].content == "已写入 report.md"
-    assert len(mirror) == 1
-    assert mirror[0].content == "已写入 report.md"
-    assert mirror[0].meta["subtask_tool"] is True
-    assert mirror[0].meta["tool_call_id"] == "call-1"
+    # 群聊不再镜像工具返回：那边只保留聊天记录
+    assert _results(ctx["main_id"], ctx["task_id"]) == []
 
 
-def test_builtin_tool_result_reaches_chat_after_execution(client, invite):
-    """真实执行一次内置工具：任务线程与群聊各一条，内容一致。"""
+def test_builtin_tool_result_stays_in_task_thread(client, invite):
+    """真实执行一次内置工具：结果只落在任务线程，任务面板能读到。"""
     ctx = _setup(client, invite, "mirror-builtin@test.dev")
     ex = RunExecutor(ctx["run_id"])
     call = {"id": "call-list", "type": "function", "function": {"name": "file_list", "arguments": "{}"}}
@@ -97,15 +94,13 @@ def test_builtin_tool_result_reaches_chat_after_execution(client, invite):
     ex.write_tool_result(ctx["task_thread_id"], call, out)
 
     task_rows = _results(ctx["task_thread_id"])
-    mirror = _results(ctx["main_id"], ctx["task_id"])
-    assert len(task_rows) == 1
-    assert len(mirror) == 1
-    assert mirror[0].content == out
-    assert mirror[0].meta["tool"] == "file_list"
+    assert len(task_rows) == 1 and task_rows[0].content == out
+    assert task_rows[0].meta["tool"] == "file_list"
+    assert _results(ctx["main_id"], ctx["task_id"]) == []
 
 
-def test_error_tool_result_is_also_mirrored(client, invite):
-    """未授权/失败的返回同样要出现在群聊，否则那边的折叠块永远停在“执行中”。"""
+def test_error_tool_result_stays_in_task_thread(client, invite):
+    """未授权/失败的返回同样只落在任务线程，不污染群聊。"""
     ctx = _setup(client, invite, "mirror-error@test.dev")
     ex = RunExecutor(ctx["run_id"])
     call = {"id": "call-denied", "type": "function",
@@ -122,6 +117,6 @@ def test_error_tool_result_is_also_mirrored(client, invite):
     )
     ex.write_tool_result(ctx["task_thread_id"], call, out)
 
-    mirror = _results(ctx["main_id"], ctx["task_id"])
-    assert len(mirror) == 1
-    assert mirror[0].content == out
+    task_rows = _results(ctx["task_thread_id"])
+    assert len(task_rows) == 1 and task_rows[0].content == out
+    assert _results(ctx["main_id"], ctx["task_id"]) == []

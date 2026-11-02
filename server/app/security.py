@@ -51,18 +51,27 @@ def mask_key(key: str | None) -> str:
 
 
 # ---------------- 会话 ----------------
-def make_session(user_id: str) -> str:
-    return _serializer.dumps({"uid": user_id})
+def make_session(user_id: str, epoch: int = 0) -> str:
+    """会话 Cookie：uid + 会话代数。
+
+    epoch 与 users.session_epoch 比对，密码被重置后旧 Cookie 立即失效（ACC-08），
+    不需要引入服务端会话表。
+    """
+    return _serializer.dumps({"uid": user_id, "ep": int(epoch)})
 
 
-def read_session(token: str | None) -> str | None:
+def read_session(token: str | None) -> tuple[str, int] | None:
+    """返回 (user_id, epoch)；签名不对或过期返回 None。"""
     if not token:
         return None
     try:
         data = _serializer.loads(token, max_age=SESSION_MAX_AGE)
     except (BadSignature, SignatureExpired):
         return None
-    return data.get("uid")
+    uid = data.get("uid")
+    if not uid:
+        return None
+    return uid, int(data.get("ep") or 0)
 
 
 # ---------------- 杂项 ----------------
@@ -80,3 +89,8 @@ def constant_time_eq(a: str, b: str) -> bool:
 
 def random_token(n: int = 24) -> str:
     return base64.urlsafe_b64encode(os.urandom(n)).decode().rstrip("=")
+
+
+def token_hash(raw: str) -> str:
+    """邮件里的一次性令牌只存摘要（ACC-08）。"""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

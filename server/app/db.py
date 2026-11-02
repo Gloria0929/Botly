@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Any, Generator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -36,7 +37,7 @@ class Base(DeclarativeBase):
 
 
 @contextmanager
-def session_scope() -> Session:
+def session_scope():
     db = SessionLocal()
     try:
         yield db
@@ -76,8 +77,32 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _light_migrate()
+    _backfill_thread_seq()
     _migrate_bot_name_uniqueness()
     _ensure_message_search_index()
+
+
+def _backfill_thread_seq() -> None:
+    """给线程的消息序号计数器补一个不低于现有最大 seq 的起点。
+
+    并行子任务共用主线程，seq 由计数器原子分配；老库升级后计数器是 0，
+    如果不回填，新消息会从 1 开始重号。
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE threads SET seq_counter = ("
+                    "  SELECT COALESCE(MAX(seq), 0) FROM messages WHERE messages.thread_id = threads.id"
+                    ") WHERE seq_counter IS NULL OR seq_counter < ("
+                    "  SELECT COALESCE(MAX(seq), 0) FROM messages WHERE messages.thread_id = threads.id"
+                    ")"
+                )
+            )
+    except Exception:  # noqa: BLE001 - 老库/只读库不影响启动
+        pass
 
 
 def _ensure_message_search_index() -> None:
@@ -195,17 +220,25 @@ def _light_migrate() -> None:
     wanted = {
         "providers": {"vendor_id": "VARCHAR(40)", "logo": "VARCHAR(500)"},
         "messages": {"reasoning_content": "TEXT"},
-        "tasks": {"step_key": "VARCHAR(200)"},
+        "tasks": {"step_key": "VARCHAR(200)", "batch": "INTEGER DEFAULT 0"},
         "runs": {
             "last_turn_message_id": "VARCHAR(32)",
             "last_interjection_seq": "INTEGER DEFAULT 0",
             "thread_id": "VARCHAR(32)",
+            "parent_run_id": "VARCHAR(32)",
+            "parent_task_id": "VARCHAR(32)",
         },
-        "users": {"deleted_at": "TIMESTAMP", "purge_after": "TIMESTAMP"},
         "threads": {
             "summary": "TEXT",
             "summary_upto_seq": "INTEGER DEFAULT 0",
             "anchor_message_id": "VARCHAR(32)",
+            "seq_counter": "INTEGER DEFAULT 0",
+        },
+        "users": {
+            "deleted_at": "TIMESTAMP",
+            "purge_after": "TIMESTAMP",
+            "email_verified_at": "TIMESTAMP",
+            "session_epoch": "INTEGER DEFAULT 0",
         },
     }
     insp = inspect(engine)

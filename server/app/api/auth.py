@@ -1,25 +1,49 @@
-"""账号：邀请码注册、登录、退出、当前用户。"""
+"""账号：邀请码注册、登录、退出、当前用户、找回密码与邮箱验证。"""
 from __future__ import annotations
 
 from datetime import timedelta
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..config import COOKIE_SECURE, SESSION_COOKIE, SESSION_MAX_AGE
+from .. import mail
+from ..config import (
+    COOKIE_SECURE,
+    PUBLIC_BASE_URL,
+    RESET_TOKEN_TTL_MINUTES,
+    SESSION_COOKIE,
+    SESSION_MAX_AGE,
+    VERIFY_TOKEN_TTL_HOURS,
+)
 from ..accounts import RETENTION_DAYS, disable_user
 from ..db import get_db
 from ..deps import current_user
-from ..models import Bot, Chat, ChatMember, InviteCode, LoginAttempt, Thread, User, UserSettings, now
-from ..security import hash_password, make_session, verify_password
+from ..models import (
+    Bot,
+    Chat,
+    ChatMember,
+    EmailToken,
+    InviteCode,
+    LoginAttempt,
+    Thread,
+    User,
+    UserSettings,
+    now,
+)
+from ..security import hash_password, make_session, random_token, token_hash, verify_password
 from ..templates import default_bots
 from ..logging_setup import fingerprint, get_logger
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 log = get_logger("security")
+
+# 同一邮箱的同类邮件：60 秒冷却，1 小时最多 5 封
+_MAIL_COOLDOWN = timedelta(seconds=60)
+_MAIL_HOURLY_CAP = 5
 
 
 def _ip(request: Request) -> str:
@@ -38,16 +62,100 @@ class LoginIn(BaseModel):
     password: str
 
 
-def _set_cookie(response: Response, user_id: str, request: Request) -> None:
+class ForgotIn(BaseModel):
+    email: EmailStr
+
+
+class ResetIn(BaseModel):
+    token: str = Field(min_length=8, max_length=200)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class TokenIn(BaseModel):
+    token: str = Field(min_length=8, max_length=200)
+
+
+def _set_cookie(response: Response, user_id: str, request: Request, epoch: int = 0) -> None:
     response.set_cookie(
         SESSION_COOKIE,
-        make_session(user_id),
+        make_session(user_id, epoch),
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
         secure=COOKIE_SECURE or request.url.scheme == "https",
         path="/",
     )
+
+
+# --------------------------------------------------------------------------- #
+# ACC-08：邮件令牌
+# --------------------------------------------------------------------------- #
+def _base_url(request: Request) -> str:
+    """邮件里的链接前缀。优先用配置的公网地址，否则按请求头推导。"""
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _issue_token(db: Session, user: User, kind: str, ttl: timedelta, request: Request) -> str:
+    raw = random_token(32)
+    db.add(
+        EmailToken(
+            user_id=user.id,
+            email=user.email,
+            kind=kind,
+            token_hash=token_hash(raw),
+            expires_at=now() + ttl,
+            ip=_ip(request),
+        )
+    )
+    db.flush()
+    return raw
+
+
+def _live_token(db: Session, raw: str, kind: str) -> EmailToken | None:
+    row = db.scalar(
+        select(EmailToken).where(
+            EmailToken.token_hash == token_hash(raw), EmailToken.kind == kind
+        )
+    )
+    if not row or row.used_at or row.expires_at <= now():
+        return None
+    return row
+
+
+def _throttle(db: Session, email: str, kind: str, message: str = "请求过于频繁，请稍后再试") -> None:
+    """同一邮箱的同类邮件限流，避免被当成发信机。"""
+    since = now() - timedelta(hours=1)
+    rows = db.scalars(
+        select(EmailToken.created_at).where(
+            EmailToken.email == email, EmailToken.kind == kind, EmailToken.created_at >= since
+        )
+    ).all()
+    if rows:
+        latest = max(rows)
+        if now() - latest < _MAIL_COOLDOWN:
+            raise HTTPException(429, message, headers={"Retry-After": "60"})
+        if len(rows) >= _MAIL_HOURLY_CAP:
+            raise HTTPException(429, message, headers={"Retry-After": "3600"})
+
+
+def _dev_link(link: str) -> str | None:
+    """没配 SMTP、且是开发模式时，把链接直接回给前端，方便本地走完整流程。"""
+    return link if (mail.MAIL_DEV and not mail.configured()) else None
+
+
+def _send(to: str, subject: str, text: str, html: str) -> bool:
+    try:
+        return mail.send(to, subject, text, html)
+    except mail.MailNotConfigured:
+        raise HTTPException(503, "邮件服务未配置，请联系管理员")
+    except Exception as exc:  # noqa: BLE001 - SMTP 认证/超时等
+        log.error("邮件发送失败 to=%s err=%s", to, exc)
+        raise HTTPException(503, "邮件发送失败，请稍后重试")
+
 
 
 @router.post("/register", status_code=201)
@@ -112,7 +220,18 @@ def register(payload: RegisterIn, response: Response, request: Request, db: Sess
     db.add(Thread(user_id=user.id, chat_id=chat.id, type="main", title="主线程"))
     db.flush()
 
-    _set_cookie(response, user.id, request)
+    _set_cookie(response, user.id, request, user.session_epoch or 0)
+    # ACC-08：注册后自动发一封验证邮件；没配 SMTP 时只落日志，绝不能挡住注册
+    try:
+        raw = _issue_token(db, user, "verify_email", timedelta(hours=VERIFY_TOKEN_TTL_HOURS), request)
+        link = f"{_base_url(request)}/verify-email?token={quote(raw)}"
+        subject, text, html = mail.verify_email_mail(link, VERIFY_TOKEN_TTL_HOURS)
+        _send(user.email, subject, text, html)
+    except HTTPException as exc:
+        log.warning("注册验证邮件未发送 email=%s 原因=%s", email, exc.detail)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("注册验证邮件未发送 email=%s err=%s", email, exc)
+
     log.info("注册成功 uid=%s email=%s ip=%s", fingerprint(user.id), email, _ip(request))
     return {"id": user.id, "email": user.email, "name": user.name, "chat_id": chat.id}
 
@@ -143,9 +262,14 @@ def login(payload: LoginIn, response: Response, request: Request, db: Session = 
     # 只清掉该邮箱的失败记录；成功后清掉整个 IP 会让攻击者用任意账号
     # 重置同一 IP 的失败计数，绕过 ACC-03。
     db.execute(delete(LoginAttempt).where(LoginAttempt.email == email))
-    _set_cookie(response, user.id, request)
+    _set_cookie(response, user.id, request, user.session_epoch or 0)
     log.info("登录成功 uid=%s email=%s ip=%s", fingerprint(user.id), email, ip)
-    return {"id": user.id, "email": user.email, "name": user.name}
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "email_verified": bool(user.email_verified_at),
+    }
 
 
 @router.post("/logout")
@@ -165,6 +289,8 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
         "email": user.email,
         "name": user.name,
         "has_provider": has_provider,
+        "email_verified": bool(user.email_verified_at),
+        "email_verified_at": user.email_verified_at.isoformat() if user.email_verified_at else None,
         "settings": {
             "max_steps": 0,
             "token_budget": settings.token_budget if settings else 300000,
@@ -182,13 +308,128 @@ class PasswordIn(BaseModel):
 
 @router.post("/password")
 def change_password(
-        payload: PasswordIn, user: User = Depends(current_user), db: Session = Depends(get_db)
+        payload: PasswordIn,
+        response: Response,
+        request: Request,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
 ):
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(400, "当前密码不正确")
     user.password_hash = hash_password(payload.new_password)
+    # 改密码同样让其他设备的旧会话失效，当前设备重新签发一张继续用
+    user.session_epoch = (user.session_epoch or 0) + 1
     db.flush()
+    _set_cookie(response, user.id, request, user.session_epoch)
+    log.warning("密码已修改 uid=%s email=%s", fingerprint(user.id), user.email)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# ACC-08：找回密码 / 邮箱验证
+# --------------------------------------------------------------------------- #
+@router.post("/forgot-password")
+def forgot_password(payload: ForgotIn, request: Request, db: Session = Depends(get_db)):
+    """申请重置链接。
+
+    不管邮箱是否存在都返回同样的 `{"ok": true}`，避免被用来枚举账号；
+    只有真的存在且发信成功时，才在开发模式下附带 dev_link 方便本地调试。
+    """
+    email = payload.email.lower().strip()
+    _throttle(db, email, "reset_password")
+    user = db.scalar(select(User).where(User.email == email, User.status == "active"))
+
+    link: str | None = None
+    if user:
+        raw = _issue_token(db, user, "reset_password", timedelta(minutes=RESET_TOKEN_TTL_MINUTES), request)
+        link = f"{_base_url(request)}/reset-password?token={quote(raw)}"
+        subject, text, html = mail.password_reset_mail(link, RESET_TOKEN_TTL_MINUTES)
+        _send(email, subject, text, html)
+    else:
+        # 不存在的邮箱也留一条记录：既让限流对两种请求一视同仁，
+        # 又不会产生可用的令牌（expires_at == used_at == 现在）。
+        db.add(
+            EmailToken(
+                user_id="",
+                email=email,
+                kind="reset_password",
+                token_hash=token_hash(random_token(8)),
+                expires_at=now(),
+                used_at=now(),
+                ip=_ip(request),
+            )
+        )
+        db.flush()
+
+    log.warning("申请重置密码 email=%s ip=%s 账号存在=%s", email, _ip(request), bool(user))
+    out: dict = {"ok": True}
+    if link:
+        dev = _dev_link(link)
+        if dev:
+            out["dev_link"] = dev
+    return out
+
+
+@router.post("/reset-password")
+def reset_password(payload: ResetIn, db: Session = Depends(get_db)):
+    row = _live_token(db, payload.token, "reset_password")
+    if not row:
+        raise HTTPException(400, "链接无效或已过期，请重新申请")
+    user = db.get(User, row.user_id)
+    if not user or user.status != "active":
+        raise HTTPException(400, "链接无效或已过期，请重新申请")
+
+    user.password_hash = hash_password(payload.password)
+    user.session_epoch = (user.session_epoch or 0) + 1
+    # 同一个用户的其它重置链接一起作废，避免旧邮件还能改一次
+    db.execute(
+        update(EmailToken)
+        .where(
+            EmailToken.user_id == user.id,
+            EmailToken.kind == "reset_password",
+            EmailToken.used_at.is_(None),
+        )
+        .values(used_at=now())
+    )
+    db.flush()
+    log.warning("密码已重置 uid=%s email=%s", fingerprint(user.id), user.email)
+    return {"ok": True, "email": user.email}
+
+
+@router.post("/send-verification")
+def send_verification(
+        request: Request,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+):
+    if user.email_verified_at:
+        return {"ok": True, "already": True, "email": user.email}
+    _throttle(db, user.email, "verify_email", "验证邮件刚刚已经发送，请检查收件箱（含垃圾箱）")
+    raw = _issue_token(db, user, "verify_email", timedelta(hours=VERIFY_TOKEN_TTL_HOURS), request)
+    link = f"{_base_url(request)}/verify-email?token={quote(raw)}"
+    subject, text, html = mail.verify_email_mail(link, VERIFY_TOKEN_TTL_HOURS)
+    _send(user.email, subject, text, html)
+    out: dict = {"ok": True, "already": False, "email": user.email}
+    dev = _dev_link(link)
+    if dev:
+        out["dev_link"] = dev
+    return out
+
+
+@router.post("/verify-email")
+def verify_email(payload: TokenIn, db: Session = Depends(get_db)):
+    row = _live_token(db, payload.token, "verify_email")
+    if not row:
+        raise HTTPException(400, "链接无效或已过期，请重新发送验证邮件")
+    user = db.get(User, row.user_id)
+    if not user or user.status != "active":
+        raise HTTPException(400, "链接无效或已过期，请重新发送验证邮件")
+    if not user.email_verified_at:
+        user.email_verified_at = now()
+    row.used_at = now()
+    db.flush()
+    log.info("邮箱已验证 uid=%s email=%s", fingerprint(user.id), user.email)
+    return {"ok": True, "email": user.email}
 
 
 class DeleteAccountIn(BaseModel):

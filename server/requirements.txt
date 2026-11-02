@@ -14,3 +14,4 @@ langgraph>=1.0
 langgraph-checkpoint-sqlite>=3.0
 langgraph-checkpoint-postgres>=2.0
 aiosqlite>=0.20
+pywebpush>=2.0

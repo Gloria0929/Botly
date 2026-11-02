@@ -13,6 +13,9 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/test.db"
 # 指向一个没有服务的端口：连接被立即拒绝，测试不依赖 Redis
 os.environ["BOTLY_REDIS_URL"] = "redis://127.0.0.1:6399/0"
 os.environ["BOTLY_SECRET_KEY"] = "test-secret-key"
+# ACC-08：测试不发真实邮件，走「写日志 + 返回 dev 链接」的开发模式
+os.environ["BOTLY_SMTP_HOST"] = ""
+os.environ["BOTLY_MAIL_DEV"] = "1"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

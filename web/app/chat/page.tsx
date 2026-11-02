@@ -40,7 +40,7 @@ import type { Chat, ChatFile, ChatSummary, Message, PlanStep, Run, Task, Branch 
 import { num } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
 
-const ACTIVE = new Set(["queued", "running", "waiting"]);
+const ACTIVE = new Set(["queued", "running", "waiting", "waiting_children"]);
 
 export default function ChatPage() {
   return <Suspense fallback={<div className="flex h-screen items-center justify-center bg-canvas"><Loader2 className="animate-spin text-muted" size={20} /></div>}><ChatContent /></Suspense>;
@@ -1090,7 +1090,6 @@ function ChatContent() {
           <MessageStream
             chatId={chatId || ""}
             messages={messages}
-            allMessages={messages}
             members={chat?.members || []}
             tasks={activeTasks}
             files={chat?.files || []}
@@ -1198,6 +1197,8 @@ function ChatContent() {
                 activeTask={selectedTask}
                 onSelectTask={setActiveTask}
                 onCollapse={() => setPanelPersist(false)}
+                messages={messages}
+                supervisor={chat?.supervisor || null}
               />
             </aside>
           </>
@@ -1317,6 +1318,8 @@ function ChatContent() {
               activeTask={selectedTask}
               onSelectTask={setActiveTask}
               onClose={() => setMobilePanel(false)}
+              messages={messages}
+              supervisor={chat?.supervisor || null}
             />
           </div>
         </div>
@@ -1351,6 +1354,8 @@ function runStatusText(run: Run | null) {
   if (!run) return "";
   if (run.status === "queued") return "排队中，等待 Worker…";
   if (run.status === "waiting") return "等待你的处理";
+  // RUN-12：同时跑多个子任务时，说明在等它们全部返回再汇总
+  if (run.status === "waiting_children") return "等待并行子任务返回…";
   return "总指挥正在调度…";
 }
 

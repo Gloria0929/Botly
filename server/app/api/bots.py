@@ -133,14 +133,14 @@ def update_bot(
 @router.delete("/{bot_id}")
 def delete_bot(bot_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     bot = owned_or_404(db, Bot, bot_id, user.id)
-    direct = db.scalar(select(Run.id).where(Run.target_bot_id == bot.id, Run.status.in_(["queued", "running", "waiting"])))
+    direct = db.scalar(select(Run.id).where(Run.target_bot_id == bot.id, Run.status.in_(["queued", "running", "waiting", "waiting_children"])))
     if direct:
         raise HTTPException(409, "该 Bot 正在直接处理消息，请先停止相关执行再删除")
     running = db.scalars(
         select(Task).join(Run, Run.id == Task.run_id).where(
             Task.assigned_bot_id == bot.id,
-            Task.status.in_(["running", "waiting_approval", "waiting_reply"]),
-            Run.status.in_(["queued", "running", "waiting"]),
+            Task.status.in_(["queued", "running", "waiting_approval", "waiting_reply"]),
+            Run.status.in_(["queued", "running", "waiting", "waiting_children"]),
         )
     ).all()
     if running:

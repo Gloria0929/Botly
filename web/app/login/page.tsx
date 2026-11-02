@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -12,6 +12,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  // ACC-08：从重置密码页跳回来时给一条成功提示（用 location 读，避免整页套 Suspense）
+  const [resetDone, setResetDone] = useState(false);
+  useEffect(() => {
+    setResetDone(new URLSearchParams(window.location.search).get("reset") === "1");
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,8 +102,17 @@ export default function LoginPage() {
                 placeholder="至少 8 位"
                 autoComplete="current-password"
               />
+              <Link href="/forgot-password" className="mt-1.5 inline-block text-[12px] text-accent hover:underline">
+                忘记密码？
+              </Link>
             </div>
           </div>
+
+          {resetDone && !err && (
+            <div className="mt-4 rounded-lg border border-ok/35 bg-ok/10 px-3 py-2 text-[12.5px] text-ok">
+              密码已重置，请用新密码登录。
+            </div>
+          )}
 
           {err && (
             <div className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12.5px] text-danger">
