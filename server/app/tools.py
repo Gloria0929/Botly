@@ -42,8 +42,11 @@ class Tool:
     description: str
     parameters: dict
     level: str  # L1 | L2 | L3
-    kind: str  # builtin | control
+    kind: str  # builtin | control | mcp
     executor: Callable[..., Awaitable[str]] | None = None
+    # kind=mcp 时指回 mcp_servers 与远端工具名（TOL-05）
+    server_id: str | None = None
+    remote_name: str | None = None
 
     def schema(self) -> dict:
         return {
@@ -350,6 +353,40 @@ register(
     )
 )
 
+async def _skill_file_read(ctx, path: str) -> str:
+    """读取已启用技能包里的参考文件（外部技能包导入的 docs / 模板）。"""
+    from . import skills as skillmod  # 局部导入：skills 依赖本模块，避免循环
+
+    rows = skillmod.for_bot(ctx.db, ctx.user_id, ctx.bot)
+    if not rows:
+        return "当前 Bot 没有启用带参考文件的技能。"
+    rel_path = (path or "").strip().lstrip("/")
+    target: tuple | None = None
+    if "/" in rel_path:
+        prefix, rel = rel_path.split("/", 1)
+        skill = next((s for s in rows if s.name == prefix or s.id == prefix), None)
+        if skill and rel in (skill.files or []):
+            target = (skill, rel)
+    if not target:
+        for skill in rows:
+            if rel_path in (skill.files or []):
+                target = (skill, rel_path)
+                break
+    if not target:
+        listing = "；".join(
+            f"{s.name}：{'、'.join((s.files or [])[:10])}" for s in rows if s.files
+        ) or "（没有可读文件）"
+        return f"技能包里没有这个文件。可用文件——{listing}"
+    skill, rel = target
+    try:
+        text = skillmod.read_package_file(ctx.user_id, skill.id, rel)
+    except skillmod.SkillPackageError as exc:
+        return f"读取技能文件失败：{exc}"
+    if len(text) > WEB_READ_TRUNCATE:
+        text = text[:WEB_READ_TRUNCATE] + "\n\n[内容已截断]"
+    return UNTRUSTED_PREFIX + f"技能「{skill.name}」的参考文件 {rel}：\n\n{text}"
+
+
 register(
     Tool(
         name="file_write",
@@ -409,6 +446,24 @@ register(
     )
 )
 
+register(
+    Tool(
+        name="skill_file_read",
+        description=(
+            "读取已启用技能包里的参考文件（外部技能附带的说明、模板、示例）。"
+            "路径格式为「技能名/相对路径」，也可以直接给包内相对路径。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "技能名/文件路径"}},
+            "required": ["path"],
+        },
+        level="L1",
+        kind="builtin",
+        executor=_skill_file_read,
+    )
+)
+
 
 # --------------------------------------------------------------------------- #
 # 控制类工具（由编排层实现，不是真正的副作用工具）
@@ -417,7 +472,7 @@ DELEGATE_TOOL = Tool(
     name="delegate",
     description=(
         "把一项子任务派给群聊里的某个 Bot。被派 Bot 会在独立子线程里执行并把结果回给你。"
-        "检索、编程、写作、分析、审校等执行工作优先派给对应成员；只有一项工作也应派活，无需先出计划。"
+        "检索、编程、写作、分析、审校等执行工作优先派给对应成员；只有一项工作也应派任务，无需先出计划。"
         "指令要具体，包含目标、范围和期望产出。"
     ),
     parameters={
@@ -444,7 +499,7 @@ PLAN_TOOL = Tool(
     name="propose_plan",
     description=(
         "当任务需要 2 个及以上子任务时，先提交执行计划给用户确认。"
-        "只有一项执行工作时直接调用 delegate 派活，无需计划；问候、状态查询和简短解释直接回答。"
+        "只有一项执行工作时直接调用 delegate 派任务，无需计划；问候、状态查询和简短解释直接回答。"
         "相互独立、可以同时做的步骤填同一个 batch 号（并行）；有先后依赖的步骤用递增的 batch。"
     ),
     parameters={
@@ -491,14 +546,30 @@ ASK_TOOL = Tool(
 )
 
 
-def tools_for_bot(bot_tools: list[str], is_supervisor: bool) -> list[Tool]:
+def tools_for_bot(
+    bot_tools: list[str],
+    is_supervisor: bool,
+    can_delegate: bool = False,
+    extra_tools: list[Tool] | None = None,
+) -> list[Tool]:
+    """按角色组装工具。
+
+    `can_delegate` 只在「子 Bot 还能再往下派一层」时为 True（RUN-09）；
+    总指挥始终可以派任务，子 Bot 到达委派深度上限后不再下发 delegate。
+    `extra_tools` 是用户接入的 MCP 工具（TOL-05），按名字与内置工具合并。
+    """
+    extra = {t.name: t for t in (extra_tools or [])}
     out: list[Tool] = []
+    seen: set[str] = set()
     for name in bot_tools:
-        t = BUILTIN_TOOLS.get(name)
-        if t:
+        t = BUILTIN_TOOLS.get(name) or extra.get(name)
+        if t and t.name not in seen:
+            seen.add(t.name)
             out.append(t)
     if is_supervisor:
         out.append(PLAN_TOOL)
+        out.append(DELEGATE_TOOL)
+    elif can_delegate:
         out.append(DELEGATE_TOOL)
     out.append(ASK_TOOL)
     return out

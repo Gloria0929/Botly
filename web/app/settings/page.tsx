@@ -501,7 +501,7 @@ export default function SettingsPage() {
           </Section>
 
           {/* 默认限额 */}
-          <Section title="默认限额" desc="设置单次任务的 token 预算与审批有效期；群聊可单独覆盖 token 预算。">
+          <Section title="默认限额" desc="设置单次任务的 token 预算、委派深度与审批有效期；群聊可单独覆盖 token 预算与委派深度。">
             {settings && (
               <div className="grid gap-5 sm:grid-cols-2 sm:gap-8">
                 <NumField
@@ -509,6 +509,14 @@ export default function SettingsPage() {
                   value={settings.token_budget}
                   onSave={(v) => saveSettings({ token_budget: v })}
                   allowUnlimited
+                  disabled={busy}
+                />
+                <NumField
+                  label="委派深度（1–5 层）"
+                  value={settings.delegation_depth ?? 2}
+                  onSave={(v) => saveSettings({ delegation_depth: v })}
+                  min={1}
+                  max={5}
                   disabled={busy}
                 />
                 <NumField
@@ -1052,11 +1060,13 @@ function ProviderEditDialog({
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [key, setKey] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
     if (!name.trim()) return toast("名称不能为空", "error");
     if (!baseUrl.trim()) return toast("base_url 不能为空", "error");
     setSaving(true);
+    setError(null);
     try {
       const changedBase = baseUrl.trim() !== provider.base_url;
       await api.patchProvider(provider.id, {
@@ -1074,6 +1084,7 @@ function ProviderEditDialog({
           .catch((e) => toast(e.message, "error"));
       }
     } catch (e: any) {
+      setError(e.message || "保存失败，请稍后重试");
       toast(e.message, "error");
     } finally {
       setSaving(false);
@@ -1099,6 +1110,11 @@ function ProviderEditDialog({
       }
     >
       <div className="space-y-3">
+        {error && (
+          <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+            {error}
+          </div>
+        )}
         <label className="block">
           <span className="mb-1 block text-[12px] text-muted">名称</span>
           <input className="field" value={name} onChange={(e) => setName(e.target.value)} />
@@ -1144,9 +1160,11 @@ function VendorDialog({
   const [logo, setLogo] = useState(vendor.logo);
   const [advanced, setAdvanced] = useState(custom);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
     setLoading(true);
+    setError(null);
     try {
       const body: any = { vendor_id: vendor.id, api_key: key || undefined };
       if (logo && logo !== vendor.logo) body.logo = logo;
@@ -1159,9 +1177,16 @@ function VendorDialog({
           .map((name) => ({ name }));
       }
       const r = await api.createProvider(body);
-      toast(r.message, r.detected ? "ok" : "info");
-      onDone();
+      if (r.detected) {
+        toast(r.message, "ok");
+        onDone();
+      } else {
+        // 没探测到模型：保留弹窗，把原因内联展示，让用户能改 Key / base_url / 模型名
+        setError(r.message || "未能获取模型，请检查 API Key 与 base_url");
+        toast(r.message, "error");
+      }
     } catch (e: any) {
+      setError(e.message || "添加失败，请稍后重试");
       toast(e.message, "error");
     } finally {
       setLoading(false);
@@ -1186,6 +1211,11 @@ function VendorDialog({
       }
     >
       <div className="space-y-4">
+        {error && (
+          <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+            {error}
+          </div>
+        )}
         <div>
           <label className="label">厂商标识</label>
           <AvatarPicker value={logo} onChange={setLogo} />
@@ -1299,12 +1329,16 @@ function NumField({
   onSave,
   allowUnlimited = false,
   disabled = false,
+  min,
+  max,
 }: {
   label: string;
   value: number;
   onSave: (v: number) => void | Promise<boolean | void>;
   allowUnlimited?: boolean;
   disabled?: boolean;
+  min?: number;
+  max?: number;
 }) {
   const [v, setV] = useState(allowUnlimited && value === 0 ? 300000 : value);
   const [unlimited, setUnlimited] = useState(allowUnlimited && value === 0);
@@ -1340,13 +1374,20 @@ function NumField({
             className="field h-10 min-w-0 flex-1"
             type="number"
             aria-label={label}
-            min={allowUnlimited ? 1000 : undefined}
+            min={allowUnlimited ? 1000 : min}
+            max={max}
             disabled={disabled}
             value={v}
             onChange={(e) => setV(Number(e.target.value))}
           />
           <button className="btn-ghost h-10 w-10 shrink-0 p-0" aria-label={`保存${label}`} onClick={() => onSave(v)}
-            disabled={disabled || v === value || (allowUnlimited && (!Number.isInteger(v) || v < 1000))}>
+            disabled={
+              disabled ||
+              v === value ||
+              (allowUnlimited && (!Number.isInteger(v) || v < 1000)) ||
+              (min !== undefined && (!Number.isInteger(v) || v < min)) ||
+              (max !== undefined && v > max)
+            }>
             <Save size={14} />
           </button>
         </div>

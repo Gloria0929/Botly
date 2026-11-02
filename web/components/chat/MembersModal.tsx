@@ -92,7 +92,7 @@ export default function MembersModal({
     if (!chat || busy) return;
     const ok = await confirm({
       title: `把「${bot.name}」移出群聊？`,
-      description: "移出后总指挥不会再派活给它，历史消息与产物都会保留。",
+      description: "移出后总指挥不会再派任务给它，历史消息与产物都会保留。",
       confirmText: "移出",
       danger: true,
     });
@@ -183,7 +183,7 @@ export default function MembersModal({
             )}
           </div>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
-            总指挥负责拆解任务并派活；更换总指挥对下一次执行生效。
+            总指挥负责拆解任务并派任务；更换总指挥对下一次执行生效。
           </p>
         </section>
 

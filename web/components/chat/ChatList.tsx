@@ -208,7 +208,7 @@ function NewChatDialog({
               placeholder="选择总指挥"
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
-              总指挥负责拆解任务与派活，额外拥有 delegate 与计划工具。
+              总指挥负责拆解任务与派任务，额外拥有 delegate 与计划工具。
             </p>
           </div>
         </div>

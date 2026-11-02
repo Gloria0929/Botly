@@ -8,6 +8,7 @@ export type Bot = {
   model: string | null;
   temperature: number;
   tools: string[];
+  skills?: string[];
   deleted: boolean;
   display_name: string;
   status?: "idle" | "working" | "waiting";
@@ -22,6 +23,37 @@ export type BotTemplate = {
   system_prompt: string;
   tools: string[];
   is_supervisor_template: boolean;
+};
+
+/** 技能：可复用的提示词 + 工具包，绑定到 Bot 后生效。 */
+export type Skill = {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  tools: string[];
+  enabled: boolean;
+  bot_count?: number;
+  source?: "manual" | "url" | "zip" | "github" | "clawhub" | string;
+  source_url?: string | null;
+  files?: string[];
+  created_at?: string;
+};
+
+/** TOL-05：用户接入的 MCP 服务。 */
+export type McpServer = {
+  id: string;
+  name: string;
+  slug: string;
+  url: string;
+  level: "L1" | "L2" | "L3" | string;
+  enabled: boolean;
+  status: "unchecked" | "ok" | "error";
+  last_error: string | null;
+  last_checked_at: string | null;
+  token_last4: string | null;
+  tool_count: number;
+  tools: { name: string; remote_name: string; description: string }[];
 };
 
 /** MOD-02：模型能力探测结果。三态——true 支持 / false 不支持 / null 未探测。 */
@@ -200,7 +232,7 @@ export type Chat = {
   pending_approvals?: { id: string; tool: string; bot_name: string }[];
   tasks: Task[];
   files: ChatFile[];
-  limits: { max_steps: number; token_budget: number };
+  limits: { max_steps: number; token_budget: number; delegation_depth?: number };
 };
 
 export type ChatSummary = {
@@ -258,6 +290,7 @@ export type Me = {
   settings: {
     max_steps: number;
     token_budget: number;
+    delegation_depth?: number;
     notifications_enabled: boolean;
     approval_ttl_hours: number;
     search_configured: boolean;

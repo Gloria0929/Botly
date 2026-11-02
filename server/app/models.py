@@ -7,7 +7,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import (Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, text)
+from sqlalchemy import (
+    Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -94,6 +96,9 @@ class UserSettings(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), primary_key=True)
     max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 旧字段保留，不再限制步数。
     token_budget: Mapped[int] = mapped_column(Integer, default=300_000)  # 0 表示无限制。
+    # RUN-09：委派深度（1 = 只有总指挥可派任务，2 = 允许再向下一层）。
+    # 为空表示未设置，按环境变量 BOTLY_MAX_DELEGATION_DEPTH 的默认值执行。
+    delegation_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     search_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     search_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -143,8 +148,60 @@ class Bot(Base, TimestampMixin):
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     temperature: Mapped[float] = mapped_column(default=0.4)
     tools: Mapped[list] = mapped_column(JSON, default=list)
+    # 已启用的技能 id 列表（技能提供额外提示词与工具，运行时合并）
+    skills: Mapped[list] = mapped_column(JSON, default=list)
     is_supervisor_template: Mapped[bool] = mapped_column(Boolean, default=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class McpServer(Base, TimestampMixin):
+    """用户接入的 MCP 服务（TOL-05）。
+
+    第一版只支持 Streamable HTTP：服务地址是一个 JSON-RPC 端点，工具在
+    「检测」时通过 tools/list 拉到本地缓存，执行时再 tools/call。
+    权限级别在服务级指定（默认 L3），该服务下所有工具继承同一级别。
+    """
+
+    __tablename__ = "mcp_servers"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_mcp_user_name"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(60))
+    # 工具名前缀，同一用户下唯一（由名字推导，检测时固化）
+    slug: Mapped[str] = mapped_column(String(24))
+    url: Mapped[str] = mapped_column(String(500))
+    token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_last4: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    level: Mapped[str] = mapped_column(String(2), default="L3")  # L1 | L2 | L3
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(20), default="unchecked")  # unchecked | ok | error
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # [{name, remote_name, description, parameters}]，检测成功后写入
+    tools: Mapped[list] = mapped_column(JSON, default=list)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Skill(Base, TimestampMixin):
+    """可复用的技能包：一段方法提示词 + 一组工具。
+
+    技能不直接执行，绑定到 Bot 后由编排器把提示词注入系统提示，
+    并把技能里的工具并入该 Bot 的可用工具（仍受工具自身的权限级别约束）。
+    """
+
+    __tablename__ = "skills"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_skill_user_name"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(60))
+    description: Mapped[str] = mapped_column(String(200), default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    tools: Mapped[list] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 外部技能包：manual（手写）/ url / zip / github
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 技能包内文件（相对路径），提示词之外的参考资料；用 skill_file_read 读取
+    files: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class Chat(Base, TimestampMixin):

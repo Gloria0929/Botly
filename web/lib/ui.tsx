@@ -7,8 +7,17 @@ type Item = { id: number; text: string; kind: Kind };
 
 let seq = 0;
 const listeners = new Set<(i: Item) => void>();
+// 1 秒内相同文案的去重：req 统一报错 + 调用方兜底报错时不会弹两条一样的
+let lastText = "";
+let lastKind = "";
+let lastAt = 0;
 
 export function toast(text: string, kind: Kind = "info") {
+  const now = Date.now();
+  if (text === lastText && kind === lastKind && now - lastAt < 1000) return;
+  lastText = text;
+  lastKind = kind;
+  lastAt = now;
   const item = { id: ++seq, text, kind };
   listeners.forEach((l) => l(item));
 }
@@ -32,7 +41,7 @@ export function Toaster() {
       {items.map((i) => (
         <div
           key={i.id}
-          className={`animate-rise rounded-lg border px-3.5 py-2 text-[13px] shadow-card backdrop-blur ${
+          className={`max-w-[90vw] break-words animate-rise rounded-lg border px-3.5 py-2 text-[13px] shadow-card backdrop-blur ${
             i.kind === "error"
               ? "border-danger/40 bg-danger/15 text-danger"
               : i.kind === "ok"

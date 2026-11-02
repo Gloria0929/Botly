@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..capabilities import CAPABILITY_KEYS, apply_capability
+from ..capabilities import CAPABILITY_KEYS, apply_capability, hard_save_block_reason
 from ..db import get_db
 from ..deps import current_user, owned_or_404
 from ..llm import list_models, probe_capabilities
@@ -181,7 +181,9 @@ async def create_provider(
     last_checked = now() if detected else None
 
     # MOD-02：真实探测首个模型（流式 + 工具调用），结果按模型持久化。
-    # 不影响保存本身——自建网关的探测限制各不相同，探测失败只标红状态。
+    # 连通性与流式输出不通过时拒绝保存（MOD-02 ①②）；工具调用只在
+    # 选总指挥的位置拦截（capabilities.supervisor_block_reason），普通 Bot 可用。
+    # 三态里的 None（网关探测限制等）不拦截，避免把探测不了当成不支持。
     probe_note = ""
     if names:
         caps = await probe_capabilities(
@@ -192,6 +194,9 @@ async def create_provider(
         status = "ok" if caps["ok"] else "error"
         last_checked = now()
         probe_note = f"；{names[0]}：{caps['message']}"
+        block = hard_save_block_reason(caps)
+        if block:
+            raise HTTPException(400, f"{block}（{names[0]}：{caps['message']}）")
 
     p = Provider(
         user_id=user.id,
@@ -228,9 +233,11 @@ async def update_provider(
         p.name = payload.name
     if payload.logo is not None:
         p.logo = payload.logo or None
-    if payload.base_url is not None and payload.base_url != p.base_url:
+    base_url_changed = payload.base_url is not None and payload.base_url != p.base_url
+    if base_url_changed:
         p.base_url = payload.base_url
         p.status = "unchecked"
+    key_changed = bool(payload.api_key)
     if payload.api_key:
         p.api_key_encrypted = encrypt_secret(payload.api_key)
         p.api_key_last4 = _last4(payload.api_key)
@@ -251,6 +258,20 @@ async def update_provider(
                     row[key] = old[key]
             rows.append(row)
         p.models = rows
+    # MOD-02：改了 base_url 或 Key 等于重新登记接入，与创建一样做保存校验，
+    # 避免绕过创建时的连通性 / 流式校验。
+    if p.kind == "openai" and (base_url_changed or key_changed):
+        model = (p.models or [{}])[0].get("name")
+        if model:
+            key = decrypt_secret(p.api_key_encrypted)
+            caps = await probe_capabilities(base_url=p.base_url, api_key=key, model=model)
+            caps["checked_at"] = now().isoformat()
+            p.models = apply_capability(p.models or [], model, caps)
+            p.status = "ok" if caps["ok"] else "error"
+            p.last_checked_at = now()
+            block = hard_save_block_reason(caps)
+            if block:
+                raise HTTPException(400, f"{block}（{model}：{caps['message']}）")
     db.flush()
     return provider_out(p)
 

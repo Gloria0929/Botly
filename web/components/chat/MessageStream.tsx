@@ -89,6 +89,14 @@ export default function MessageStream({
     const seen = new Set<string>();
     messages.forEach((m) => {
       if (m.type === "tool_call" || m.type === "tool_result") return;
+      // CHT-05/RUN-08：task / task_done / handoff 的结构化兼容消息只在
+      // 导出与第三方接入里消费；群聊交互保持现状（派任务 @ 消息 + 概要行），
+      // 这里按 compat 标记过滤，不额外渲染。
+      if (
+        m.meta?.compat &&
+        (m.type === "task" || m.type === "task_done" || m.type === "handoff")
+      )
+        return;
       // 兜底去重：SSE 推送与本地乐观插入可能产生同一条消息
       if (seen.has(m.id)) return;
       seen.add(m.id);
@@ -331,8 +339,11 @@ function MessageItem({
           {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
         </div>
         {streaming && !hasContent ? (
-          // 模型还没吐字：不显示空气泡，只显示三点跳动
-          <TypingDots className="py-1.5" />
+          // CHT-04：模型还没吐字时，消息流里明确显示「正在输入」
+          <div className="flex items-center gap-2 py-1.5">
+            <TypingDots />
+            <span className="text-[11px] text-faint">正在输入…</span>
+          </div>
         ) : hasContent ? (
           <div className="flex items-start gap-1.5">
             <div className="max-w-[85%] rounded-2xl rounded-tl-md border border-line bg-panel px-3.5 py-2.5">

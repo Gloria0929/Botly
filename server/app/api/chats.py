@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .. import sandbox
 from ..capabilities import supervisor_block_reason
 from ..db import IS_SQLITE, get_db
-from ..config import SANDBOX_FILE_MAX_MB
+from ..config import DELEGATION_DEPTH, SANDBOX_FILE_MAX_MB
 from ..deps import current_user, owned_or_404
 from ..events import emit
 from ..execution_config import capture_bots
@@ -254,8 +254,12 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
             .order_by(Run.created_at.desc())
         )
     if panel_run:
+        # RUN-09：并行子执行里再派出的孙任务挂在子执行下，任务面板要一并列出
+        panel_run_ids = [panel_run.id] + list(
+            db.scalars(select(Run.id).where(Run.parent_run_id == panel_run.id))
+        )
         rows = db.scalars(
-            select(Task).where(Task.run_id == panel_run.id).order_by(Task.created_at)
+            select(Task).where(Task.run_id.in_(panel_run_ids)).order_by(Task.created_at)
         ).all()
         for t in rows:
             tasks.append(task_out(t, db.get(Bot, t.assigned_bot_id)))
@@ -301,11 +305,15 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
         ).all()
     ]
     settings = db.get(UserSettings, user.id)
+    chat_limits = chat.limits_override or {}
     data["limits"] = {
         "max_steps": 0,
-        "token_budget": (chat.limits_override or {}).get("token_budget")
-                        if (chat.limits_override or {}).get("token_budget") is not None
+        "token_budget": chat_limits.get("token_budget")
+                        if chat_limits.get("token_budget") is not None
                         else (settings.token_budget if settings else 300000),
+        "delegation_depth": chat_limits.get("delegation_depth")
+                            if chat_limits.get("delegation_depth") is not None
+                            else ((settings.delegation_depth or DELEGATION_DEPTH) if settings else DELEGATION_DEPTH),
     }
     return data
 
@@ -323,12 +331,15 @@ def update_chat(
         override = data["limits_override"]
         if not isinstance(override, dict):
             raise HTTPException(400, "限额覆盖必须是对象")
-        unknown = set(override) - {"token_budget"}
+        unknown = set(override) - {"token_budget", "delegation_depth"}
         if unknown:
             raise HTTPException(400, f"不支持的限额项：{'、'.join(sorted(unknown))}")
         budget = override.get("token_budget")
         if budget is not None and (type(budget) is not int or (budget != 0 and budget < 1000)):
             raise HTTPException(400, "token 预算应为 0（无限制）或至少 1000")
+        depth = override.get("delegation_depth")
+        if depth is not None and (type(depth) is not int or not 1 <= depth <= 5):
+            raise HTTPException(400, "委派深度应为 1–5 层")
     if "run_mode" in data and data["run_mode"] not in ("auto", "step"):
         raise HTTPException(400, "运行模式只能是 auto 或 step")
 
@@ -877,7 +888,7 @@ def export_chat(
     """15.2：把主线程导出为 Markdown。
 
     只导出对话本身：用户消息、Bot 的最终回复、计划卡片与系统提示。子 Bot 的
-    过程镜像（`subtask_live`）、工具调用与内部派活副本不导出，否则同一段内容
+    过程镜像（`subtask_live`）、工具调用与内部派任务副本不导出，否则同一段内容
     会在记录里出现多次。时间统一按北京时间（UTC+8）呈现。
     """
     chat = owned_or_404(db, Chat, chat_id, user.id)
@@ -953,7 +964,19 @@ def export_chat(
         elif m.type == "task" and (m.content or "").strip():
             body = f"> 任务：{m.content}"
         elif m.type == "task_done" and (m.content or "").strip():
-            body = f"> 任务完成：{m.content}"
+            state = str(meta.get("status") or "")
+            label = "任务失败" if state == "failed" else "任务完成"
+            info = []
+            if meta.get("bot_name"):
+                info.append(str(meta["bot_name"]))
+            if meta.get("elapsed"):
+                info.append(f"耗时 {meta['elapsed']}")
+            if meta.get("tokens"):
+                info.append(f"{meta['tokens']} tokens")
+            prefix = f"（{' · '.join(info)}）" if info else ""
+            body = f"> {label}{prefix}：{m.content}"
+        elif m.type == "handoff" and (m.content or "").strip():
+            body = f"> {m.content}"
         if not body.strip():
             continue
 

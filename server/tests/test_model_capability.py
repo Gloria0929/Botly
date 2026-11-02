@@ -181,3 +181,61 @@ def test_unknown_capability_does_not_block(client, invite, probe):
     )
     r = client.patch(f"/api/chats/{chat_id}", json={"supervisor_bot_id": bots[2]["id"]})
     assert r.status_code == 200, r.text
+
+
+def test_save_blocks_non_streaming_model(client, invite, probe):
+    """MOD-02 ①②：保存时硬校验流式输出，明确不支持就拒绝保存。"""
+    register(client, invite, "cap-nostream@test.dev")
+    probe["good-model"] = (False, None)
+    r = client.post("/api/providers", json={"vendor_id": "deepseek", "api_key": "sk-test"})
+    assert r.status_code == 400, r.text
+    assert "流式" in r.json()["detail"]
+    # 没有保存成功
+    assert client.get("/api/providers").json() == []
+
+
+def test_save_blocks_unreachable_provider(client, invite, monkeypatch):
+    """MOD-02 ①：连不上就不保存，错误信息要能定位问题。"""
+    from app.api import providers as prov
+
+    async def fake_list(*, base_url, api_key):
+        return True, ["m1"], "ok"
+
+    async def fake_probe(*, base_url, api_key, model):
+        return {"ok": False, "message": "连接被拒绝", "streaming": None, "tool_calling": None}
+
+    monkeypatch.setattr(prov, "list_models", fake_list)
+    monkeypatch.setattr(prov, "probe_capabilities", fake_probe)
+    register(client, invite, "cap-unreach@test.dev")
+    r = client.post("/api/providers", json={"vendor_id": "deepseek", "api_key": "sk-test"})
+    assert r.status_code == 400, r.text
+    assert "连通" in r.json()["detail"]
+
+
+def test_save_allows_no_tool_calling_but_flags_it(client, invite, probe):
+    """MOD-02 ③：不支持工具调用不阻断保存（可作普通 Bot），但结果要持久化。"""
+    register(client, invite, "cap-notool@test.dev")
+    probe["good-model"] = (True, False)
+    r = client.post("/api/providers", json={"vendor_id": "deepseek", "api_key": "sk-test"})
+    assert r.status_code == 201, r.text
+    models = {m["name"]: m for m in r.json()["provider"]["models"]}
+    assert models["good-model"]["tool_calling"] is False
+
+
+def test_update_revalidates_on_key_change(client, invite, probe):
+    """改 Key / base_url 等于重新登记，保存校验不能被编辑绕过。"""
+    register(client, invite, "cap-revalid@test.dev")
+    provider = _add_provider(client)
+    probe["good-model"] = (False, None)
+    r = client.patch(f"/api/providers/{provider['id']}", json={"api_key": "sk-new"})
+    assert r.status_code == 400, r.text
+    assert "流式" in r.json()["detail"]
+    # 校验失败不落库：新 Key 没有被保存
+    saved = next(p for p in client.get("/api/providers").json() if p["id"] == provider["id"])
+    assert saved["api_key_last4"] == "test", "校验失败时不应保存新 Key"
+    # 改单价（不换 Key / URL）仍然放行
+    r = client.patch(
+        f"/api/providers/{provider['id']}",
+        json={"models": [{"name": "good-model", "input_price": 1.0, "output_price": 2.0}]},
+    )
+    assert r.status_code == 200, r.text

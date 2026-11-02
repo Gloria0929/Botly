@@ -1,3 +1,5 @@
+import { toast } from "./ui";
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -7,15 +9,24 @@ export class ApiError extends Error {
 }
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Botly-Client": "web",
-      ...(init.headers || {}),
-    },
-    credentials: "same-origin",
-  });
+  // FormData 由浏览器自己带 boundary，不能手动指定 Content-Type
+  const isForm = typeof FormData !== "undefined" && init.body instanceof FormData;
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      ...init,
+      headers: {
+        ...(isForm ? {} : { "Content-Type": "application/json" }),
+        "X-Botly-Client": "web",
+        ...(init.headers || {}),
+      },
+      credentials: "same-origin",
+    });
+  } catch (e) {
+    const message = "网络请求失败，请检查连接或稍后重试";
+    toast(message, "error");
+    throw new ApiError(0, message);
+  }
   if (res.status === 401) {
     if (typeof window !== "undefined" && !location.pathname.startsWith("/login")) {
       location.href = "/login";
@@ -36,6 +47,7 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     } catch {
       /* ignore */
     }
+    toast(detail, "error");
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
@@ -172,9 +184,57 @@ export const api = {
         level: string;
         available?: boolean;
         reason?: string | null;
+        source?: "builtin" | "mcp";
       }[]
     >("/bots/tools"),
   templates: () => req<import("./types").BotTemplate[]>("/bots/templates"),
+
+  // 技能
+  skills: () => req<import("./types").Skill[]>("/skills"),
+  createSkill: (body: any) =>
+    req<import("./types").Skill>("/skills", { method: "POST", body: JSON.stringify(body) }),
+  patchSkill: (id: string, body: any) =>
+    req<import("./types").Skill>(`/skills/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSkill: (id: string) => req(`/skills/${id}`, { method: "DELETE" }),
+  importSkillFile: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return req<import("./types").Skill>("/skills/import", { method: "POST", body: form });
+  },
+  importSkillUrl: (url: string) =>
+    req<import("./types").Skill>("/skills/import-url", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  importSkillFromClawhub: (slug: string) =>
+    req<import("./types").Skill>("/skills/import-clawhub", {
+      method: "POST",
+      body: JSON.stringify({ slug }),
+    }),
+  importSkillFromGithub: (repo: string) =>
+    req<import("./types").Skill>("/skills/import-github", {
+      method: "POST",
+      body: JSON.stringify({ repo }),
+    }),
+
+  // TOL-05：MCP 服务
+  mcpServers: () => req<import("./types").McpServer[]>("/mcp/servers"),
+  createMcpServer: (body: any) =>
+    req<import("./types").McpServer>("/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  patchMcpServer: (id: string, body: any) =>
+    req<import("./types").McpServer>(`/mcp/servers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  testMcpServer: (id: string) =>
+    req<{ ok: boolean; status: string; error: string | null; tools: any[] }>(
+      `/mcp/servers/${id}/test`,
+      { method: "POST" }
+    ),
+  deleteMcpServer: (id: string) => req(`/mcp/servers/${id}`, { method: "DELETE" }),
 
   // 群聊
   chats: () => req<import("./types").ChatSummary[]>("/chats"),

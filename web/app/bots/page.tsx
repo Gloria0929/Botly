@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Loader2, Plus, Save, Trash2, Wrench } from "lucide-react";
+import { Loader2, Plus, Save, Sparkles, Trash2, Wrench } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Avatar from "@/components/ui/Avatar";
 import AvatarPicker from "@/components/ui/AvatarPicker";
@@ -11,7 +11,7 @@ import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api } from "@/lib/api";
 import { modelCapability } from "@/lib/fmt";
-import type { Bot, BotTemplate, Provider } from "@/lib/types";
+import type { Bot, BotTemplate, Provider, Skill } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
 const EMPTY: Partial<Bot> = {
@@ -23,6 +23,7 @@ const EMPTY: Partial<Bot> = {
   model: null,
   temperature: 0.4,
   tools: ["web_search", "web_read", "file_read", "file_write", "file_list"],
+  skills: [],
 };
 
 export default function BotsPage() {
@@ -30,11 +31,20 @@ export default function BotsPage() {
   const [botsLoading, setBotsLoading] = useState(true);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [tools, setTools] = useState<
-    { name: string; description: string; level: string; available?: boolean; reason?: string | null }[]
+    {
+      name: string;
+      description: string;
+      level: string;
+      available?: boolean;
+      reason?: string | null;
+      source?: "builtin" | "mcp";
+    }[]
   >([]);
   const [templates, setTemplates] = useState<BotTemplate[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [editing, setEditing] = useState<Partial<Bot> | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const confirm = useConfirm();
 
   const load = () => {
@@ -42,6 +52,7 @@ export default function BotsPage() {
     api.providers().then(setProviders).catch(() => {});
     api.tools().then(setTools).catch(() => {});
     api.templates().then(setTemplates).catch(() => {});
+    api.skills().then(setSkills).catch(() => {});
   };
   useEffect(load, []);
 
@@ -73,6 +84,7 @@ export default function BotsPage() {
     if (!editing.provider_id) return toast("请选择模型厂商", "error");
     if (!editing.model?.trim()) return toast("请选择或填写模型", "error");
     setSaving(true);
+    setSaveError(null);
     try {
       const body = {
         name: editing.name.trim(),
@@ -83,13 +95,16 @@ export default function BotsPage() {
         model: editing.model || null,
         temperature: editing.temperature ?? 0.4,
         tools: editing.tools || [],
+        skills: editing.skills || [],
       };
       if (editing.id) await api.patchBot(editing.id, body);
       else await api.createBot(body);
       toast("已保存", "ok");
       setEditing(null);
+      setSaveError(null);
       load();
     } catch (e: any) {
+      setSaveError(e.message || "保存失败，请稍后重试");
       toast(e.message, "error");
     } finally {
       setSaving(false);
@@ -195,11 +210,43 @@ export default function BotsPage() {
                   {b.system_prompt || "（无提示词）"}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-1">
-                  {(b.tools || []).map((t) => (
-                    <span key={t} className="chip font-mono">
-                      {t}
-                    </span>
-                  ))}
+                  {(() => {
+                    const tools = b.tools || [];
+                    const builtin = tools.filter((t) => !t.startsWith("mcp__"));
+                    const mcp = tools.filter((t) => t.startsWith("mcp__"));
+                    const shown = builtin.slice(0, 3);
+                    const extra = builtin.length - shown.length;
+                    return (
+                      <>
+                        {shown.map((t) => (
+                          <span key={t} className="chip font-mono">
+                            {t}
+                          </span>
+                        ))}
+                        {extra > 0 && (
+                          <span className="chip text-faint" title={builtin.join("、")}>
+                            +{extra}
+                          </span>
+                        )}
+                        {mcp.length > 0 && (
+                          <span
+                            className="chip border-accent/40 text-accent"
+                            title={mcp.join("、")}
+                          >
+                            MCP ×{mcp.length}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
+                  {(b.skills || []).map((sid) => {
+                    const skill = skills.find((x) => x.id === sid);
+                    return skill ? (
+                      <span key={sid} className="chip border-accent/40 text-accent">
+                        <Sparkles size={9} /> {skill.name}
+                      </span>
+                    ) : null;
+                  })}
                 </div>
               </div>
             ))}
@@ -239,6 +286,11 @@ export default function BotsPage() {
       >
         {editing && (
           <div className="space-y-4">
+            {saveError && (
+              <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+                {saveError}
+              </div>
+            )}
             {!editing.id && templates.length > 0 && (
               <div>
                 <label className="label">从模板开始</label>
@@ -395,6 +447,11 @@ export default function BotsPage() {
                         >
                           {t.level}
                         </span>
+                        {t.source === "mcp" && (
+                          <span className="chip shrink-0 border-accent/40 text-[9.5px] text-accent">
+                            MCP
+                          </span>
+                        )}
                         {off && (
                           <span className="chip shrink-0 border-warn/40 text-warn">
                             未配置，暂不可用
@@ -416,6 +473,56 @@ export default function BotsPage() {
                   );
                 })}
               </div>
+            </div>
+
+            <div>
+              <label className="label">技能</label>
+              <div className="space-y-1 rounded-lg border border-line p-2">
+                {skills.length === 0 && (
+                  <div className="px-1 py-2 text-[11px] leading-relaxed text-faint">
+                    还没有技能，可到「技能」页新建，再回来绑定。
+                  </div>
+                )}
+                {skills.map((sk) => (
+                  <label
+                    key={sk.id}
+                    className="block cursor-pointer rounded px-1 py-1.5 hover:bg-panel2"
+                    title={sk.description}
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
+                        checked={(editing.skills || []).includes(sk.id)}
+                        onChange={(e) =>
+                          setEditing({
+                            ...editing,
+                            skills: e.target.checked
+                              ? [...(editing.skills || []), sk.id]
+                              : (editing.skills || []).filter((x) => x !== sk.id),
+                          })
+                        }
+                      />
+                      <Sparkles size={12} className="shrink-0 text-accent" />
+                      <span className="min-w-0 truncate text-[12px]">{sk.name}</span>
+                      {!sk.enabled && <span className="chip shrink-0 text-faint">已停用</span>}
+                      {!!sk.tools.length && (
+                        <span className="ml-auto shrink-0 text-[10px] text-faint">
+                          {sk.tools.length} 个工具
+                        </span>
+                      )}
+                    </span>
+                    {sk.description && (
+                      <span className="mt-0.5 block pl-[38px] text-[10.5px] leading-relaxed text-faint">
+                        {sk.description}
+                      </span>
+                    )}
+                  </label>
+                ))}
+              </div>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
+                技能的提示词会注入系统提示，技能里的工具自动并入上面的可用工具。
+              </p>
             </div>
           </div>
         )}

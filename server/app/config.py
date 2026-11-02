@@ -108,7 +108,17 @@ LOG_LEVEL = os.getenv("BOTLY_LOG_LEVEL", "INFO").upper()
 LOG_LEVEL_NUM = getattr(logging, LOG_LEVEL, logging.INFO) if LOG_LEVEL.isalpha() else logging.INFO
 LOG_FILE_MAX_MB = max(1, int(os.getenv("BOTLY_LOG_FILE_MAX_MB", "20")))
 LOG_BODY = os.getenv("BOTLY_LOG_BODY", "1").lower() in ("1", "true", "yes")
-DELEGATION_DEPTH = 1
+# RUN-09 / LIM-01：委派深度（总指挥 → 子 Bot 记为第 1 层）。
+# 1 = 只有总指挥能派任务（旧行为）；2 = 允许子 Bot 再向下派一层，以此类推。
+# 默认值可被用户设置与单个群聊的 limits_override 覆盖（见 orchestrator._limits）。
+DELEGATION_DEPTH = max(1, min(5, int(os.getenv("BOTLY_MAX_DELEGATION_DEPTH", "2"))))
+
+# ---- TOL-05 MCP 工具 ----
+# 默认只允许公网地址（SSRF 防护）。自建/本机 MCP 服务把该开关设为 1。
+MCP_ALLOW_LOCAL = os.getenv("BOTLY_MCP_ALLOW_LOCAL", "0").lower() in ("1", "true", "yes")
+MCP_TIMEOUT = max(5, int(os.getenv("BOTLY_MCP_TIMEOUT", "30")))
+MCP_MAX_TOOLS = max(1, int(os.getenv("BOTLY_MCP_MAX_TOOLS", "80")))
+MCP_MAX_RESULT_CHARS = max(1000, int(os.getenv("BOTLY_MCP_MAX_RESULT_CHARS", "20000")))
 
 # 8.6 告警阈值：Worker 每分钟检查一次，冷却期内同一类告警不重复写
 ALERT_QUEUE_BACKLOG = max(1, int(os.getenv("BOTLY_ALERT_QUEUE_BACKLOG", "10")))

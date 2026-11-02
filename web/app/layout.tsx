@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Toaster } from "@/lib/ui";
 import { ConfirmProvider } from "@/components/ui/Confirm";
+import GlobalError from "@/components/ui/GlobalError";
 
 export const metadata: Metadata = {
   title: "Botly · 多智能体工作台",
@@ -27,6 +28,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="font-sans antialiased">
         <ConfirmProvider>{children}</ConfirmProvider>
         <Toaster />
+        <GlobalError />
       </body>
     </html>
   );

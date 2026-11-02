@@ -22,7 +22,7 @@ export default function Markdown({
   if (mention) {
     const tag = `@${mention}`;
     if (source.includes(tag)) {
-      // 把派活消息里的第一个 @成员 变成可点击样式的提及
+      // 把派任务消息里的第一个 @成员 变成可点击样式的提及
       const label = tag.replace(/([\\[\]])/g, "\\$1");
       source = source.replace(tag, `[${label}](mention:${encodeURIComponent(mention)})`);
     }

@@ -12,8 +12,10 @@ import {
   LogOut,
   MessagesSquare,
   Moon,
+  Plug,
   Settings,
   ScrollText,
+  Sparkles,
   Sun,
   UserRound,
 } from "lucide-react";
@@ -24,6 +26,8 @@ import type { Me } from "@/lib/types";
 const NAV = [
   { href: "/chat", label: "群聊", icon: MessagesSquare },
   { href: "/bots", label: "Bot", icon: Blocks },
+  { href: "/skills", label: "技能", icon: Sparkles },
+  { href: "/mcp", label: "MCP", icon: Plug },
   { href: "/memory", label: "记忆", icon: Brain },
   { href: "/status", label: "运行状况", icon: Activity },
   { href: "/usage", label: "用量", icon: BarChart3 },

@@ -29,8 +29,15 @@ export default function ChatSettings({
   const [budgetInput, setBudgetInput] = useState(
     chat.limits_override?.token_budget != null ? String(chat.limits_override.token_budget) : ""
   );
+  // RUN-09：委派深度覆盖（1 = 只有总指挥能派任务，2 = 允许子 Bot 再派一层）
+  const [depthInput, setDepthInput] = useState(
+    chat.limits_override?.delegation_depth != null
+      ? String(chat.limits_override.delegation_depth)
+      : ""
+  );
   const [tools, setTools] = useState<Record<string, { description: string; level: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setMode(chat.run_mode);
@@ -42,7 +49,12 @@ export default function ChatSettings({
   // 把用户正在输入的内容清掉。
   useEffect(() => {
     setBudgetInput(chat.limits_override?.token_budget != null ? String(chat.limits_override.token_budget) : "");
-  }, [chat.id, chat.limits_override?.token_budget]);
+    setDepthInput(
+      chat.limits_override?.delegation_depth != null
+        ? String(chat.limits_override.delegation_depth)
+        : ""
+    );
+  }, [chat.id, chat.limits_override?.token_budget, chat.limits_override?.delegation_depth]);
 
   useEffect(() => {
     api
@@ -57,24 +69,31 @@ export default function ChatSettings({
 
   const patch = async (body: any, key: string, okMsg: string) => {
     setBusy(key);
+    setError(null);
     try {
       await api.patchChat(chat.id, body);
       toast(okMsg, "ok");
       onSaved();
     } catch (e: any) {
+      setError(e.message || "保存失败，请稍后重试");
       toast(e.message, "error");
       // 失败时回滚为服务端状态
       setMode(chat.run_mode);
       setRequireWrite(chat.require_approval_for_write);
       setAllowed(chat.always_allow_tools || []);
       setBudgetInput(chat.limits_override?.token_budget != null ? String(chat.limits_override.token_budget) : "");
+      setDepthInput(
+        chat.limits_override?.delegation_depth != null
+          ? String(chat.limits_override.delegation_depth)
+          : ""
+      );
     } finally {
       setBusy(null);
     }
   };
 
   const saveLimits = () => {
-    // 只保留 token 预算；旧版本可能存过其它键，这里顺手清掉
+    // 只保留支持的两项；旧版本可能存过其它键，这里顺手清掉
     const next: Record<string, number> = {};
     const budget = budgetInput.trim();
     if (budget) {
@@ -84,12 +103,21 @@ export default function ChatSettings({
       }
       next.token_budget = value;
     }
-    patch({ limits_override: next }, "limits", "已更新本群聊的 token 预算");
+    const depth = depthInput.trim();
+    if (depth) {
+      const value = Number(depth);
+      if (!Number.isInteger(value) || value < 1 || value > 5) {
+        return toast("委派深度应为 1–5 层", "error");
+      }
+      next.delegation_depth = value;
+    }
+    patch({ limits_override: next }, "limits", "已更新本群聊的执行限额");
   };
 
   const resetLimits = () => {
     setBudgetInput("");
-    patch({ limits_override: {} }, "limits", "已恢复为默认预算");
+    setDepthInput("");
+    patch({ limits_override: {} }, "limits", "已恢复为默认限额");
   };
 
   const setModePersist = (next: "auto" | "step") => {
@@ -122,6 +150,11 @@ export default function ChatSettings({
       width="max-w-lg"
     >
       <div className="space-y-5">
+        {error && (
+          <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+            {error}
+          </div>
+        )}
         <div>
           <div className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium">
             <Workflow size={13} className="text-accent" /> 运行模式
@@ -169,9 +202,20 @@ export default function ChatSettings({
                 onChange={(e) => setBudgetInput(e.target.value)}
               />
             </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-muted">委派深度</span>
+              <input
+                className="field"
+                inputMode="numeric"
+                placeholder={`默认：${chat.limits.delegation_depth ?? 2} 层`}
+                value={depthInput}
+                onChange={(e) => setDepthInput(e.target.value)}
+              />
+            </label>
           </div>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
-            token 预算填 0 表示无限制；只影响之后开始的执行。运行时长不设上限。
+            token 预算填 0 表示无限制。委派深度 1 表示只有总指挥能派任务，2 表示子 Bot 还能再向下一层；
+            1–5 层。两项都只影响之后开始的执行，运行时长不设上限。
           </p>
           <div className="mt-2 flex items-center gap-2">
             <button className="btn-primary" onClick={saveLimits} disabled={busy === "limits"}>

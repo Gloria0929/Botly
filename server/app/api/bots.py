@@ -7,16 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .. import mcp
 from ..db import get_db
 from ..deps import current_user, owned_or_404
-from ..models import Bot, Chat, ChatMember, Provider, Run, Task, User, UserSettings, now
+from ..models import Bot, Chat, ChatMember, Provider, Run, Skill, Task, User, UserSettings, now
 from ..serializers import bot_out
 from ..templates import BOT_TEMPLATES, out as template_out
 from ..tools import BUILTIN_TOOLS
 
 router = APIRouter(prefix="/bots", tags=["bots"])
-
-ALL_TOOLS = list(BUILTIN_TOOLS.keys())
 
 
 class BotIn(BaseModel):
@@ -28,6 +27,7 @@ class BotIn(BaseModel):
     model: str | None = None
     temperature: float = 0.4
     tools: list[str] = []
+    skills: list[str] = []
 
 
 class BotPatch(BaseModel):
@@ -39,6 +39,11 @@ class BotPatch(BaseModel):
     model: str | None = None
     temperature: float | None = None
     tools: list[str] | None = None
+    skills: list[str] | None = None
+
+
+def _allowed_tools(db: Session, user_id: str) -> set[str]:
+    return set(BUILTIN_TOOLS) | {t.name for t in mcp.tools_for_user(db, user_id)}
 
 
 def _validate(bot_in: dict, user_id: str, db: Session, exclude_id: str | None = None):
@@ -53,9 +58,18 @@ def _validate(bot_in: dict, user_id: str, db: Session, exclude_id: str | None = 
             raise HTTPException(400, f"已存在名为「{name}」的 Bot")
     tools = bot_in.get("tools")
     if tools is not None:
-        unknown = [t for t in tools if t not in ALL_TOOLS]
+        allowed = _allowed_tools(db, user_id)
+        unknown = [t for t in tools if t not in allowed]
         if unknown:
             raise HTTPException(400, f"未知工具：{'、'.join(unknown)}")
+    skills = bot_in.get("skills")
+    if skills is not None:
+        owned = set(
+            db.scalars(select(Skill.id).where(Skill.user_id == user_id)).all()
+        )
+        unknown = [sid for sid in skills if sid not in owned]
+        if unknown:
+            raise HTTPException(400, "存在不属于当前账号的技能")
     pid = bot_in.get("provider_id")
     if pid:
         owned_or_404(db, Provider, pid, user_id)
@@ -100,6 +114,19 @@ def list_tools(user: User = Depends(current_user), db: Session = Depends(get_db)
                 "level": t.level,
                 "available": available,
                 "reason": reason,
+                "source": "builtin",
+            }
+        )
+    # TOL-05：MCP 工具与内置工具并列展示，供 Bot 勾选
+    for t in mcp.tools_for_user(db, user.id):
+        out.append(
+            {
+                "name": t.name,
+                "description": t.description,
+                "level": t.level,
+                "available": True,
+                "reason": None,
+                "source": "mcp",
             }
         )
     return out

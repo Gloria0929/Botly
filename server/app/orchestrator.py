@@ -27,7 +27,8 @@ from langgraph.types import interrupt
 
 from . import graph as graphmod
 from . import llm
-from . import sandbox, tools as toolmod
+from . import mcp as mcpmod
+from . import sandbox, skills as skillmod, tools as toolmod
 from .config import (
     APPROVAL_TTL_HOURS,
     DELEGATION_DEPTH,
@@ -35,6 +36,7 @@ from .config import (
     LLM_TIMEOUT_SECONDS,
     MAX_PARALLEL_SUBTASKS,
     MAX_REASSIGN,
+    MCP_TIMEOUT,
     SUMMARY_MAX_ITEMS,
     SUMMARY_THRESHOLD_TOKENS,
 )
@@ -50,6 +52,7 @@ from .models import (
     Chat,
     ChatMember,
     FileRec,
+    McpServer,
     Memory,
     MemoryCandidate,
     Message,
@@ -155,6 +158,52 @@ def add_message(
         },
     )
     return msg
+
+
+def add_compat_message(
+    db: Session,
+    *,
+    thread: Thread,
+    run_id: str | None,
+    type_: str,
+    content: str,
+    meta: dict,
+    sender_type: str = "bot",
+    sender_bot_id: str | None = None,
+) -> None:
+    """CHT-05 / RUN-08 / 7.1：补发 task / task_done / handoff 结构化消息。
+
+    群聊交互保持现状：派任务是「@成员 指令」的普通消息，子 Bot 的回复是普通
+    气泡，任务详情在派任务消息下方的概要行里。这三类消息只作为结构化记录
+    存在，供导出、第三方接入与历史渲染消费；前端按 meta.compat 过滤，
+    不额外渲染。按 (run_id, task_id, type) 去重，图节点重放不会写第二条。
+    """
+    task_id = meta.get("task_id")
+    rows = (
+        db.scalars(
+            select(Message).where(
+                Message.thread_id == thread.id,
+                Message.type == type_,
+                Message.run_id == run_id,
+            )
+        ).all()
+        if run_id
+        else []
+    )
+    for row in rows:
+        rm = row.meta or {}
+        if rm.get("compat") and rm.get("task_id") == task_id:
+            return
+    add_message(
+        db,
+        thread=thread,
+        run_id=run_id,
+        sender_type=sender_type,
+        type_=type_,
+        content=content,
+        sender_bot_id=sender_bot_id,
+        meta={**meta, "compat": True},
+    )
 
 
 def emit_run_status(db: Session, run: Run) -> None:
@@ -667,8 +716,19 @@ class RunExecutor:
             api_key = decrypt_secret(provider.api_key_encrypted)
             provider_id = provider.id
             members = self._member_bots(db, chat, run)
-            tool_list = toolmod.tools_for_bot(bot.tools or [], is_supervisor)
-            # CHT-07：分支是「深入讨论」，不派活、不出计划，避免打断主线程
+            can_delegate = self._can_delegate(db, run, thread_id, is_supervisor, task_id)
+            # TOL-05 / 技能：Bot 自己的工具 + 已启用技能带来的工具，再与 MCP 工具合并
+            allowed_tools = list(bot.tools or [])
+            for name in skillmod.effective_tool_names(skillmod.for_bot(db, run.user_id, bot)):
+                if name not in allowed_tools:
+                    allowed_tools.append(name)
+            tool_list = toolmod.tools_for_bot(
+                allowed_tools,
+                is_supervisor,
+                can_delegate=can_delegate,
+                extra_tools=mcpmod.tools_for_user(db, run.user_id),
+            )
+            # CHT-07：分支是「深入讨论」，不派任务、不出计划，避免打断主线程
             if thread.type == "branch":
                 tool_list = [
                     t for t in tool_list if t.name not in ("delegate", "propose_plan")
@@ -951,7 +1011,7 @@ class RunExecutor:
             main = self._main_thread(db, chat)
             self._answer_open_calls(db, main, run.id, content)
 
-    # ---------------- 图节点：派活 / 收尾 ----------------
+    # ---------------- 图节点：派任务 / 收尾 ----------------
     def _resolve_member(self, members: list[Bot], name: str) -> Bot | None:
         if not name:
             return None
@@ -959,8 +1019,16 @@ class RunExecutor:
             (b for b in members if name in b.name), None
         )
 
-    def _task_for_call(self, db: Session, run_id: str, main_id: str, call_id: str | None) -> Task | None:
-        """按 delegate 的 tool_call_id 找到这次派活建出来的任务。"""
+    def _task_for_call(
+        self, db: Session, run_id: str, main_id: str, call_id: str | None,
+        thread_id: str | None = None,
+    ) -> Task | None:
+        """按 delegate 的 tool_call_id 找到这次派任务建出来的任务。
+
+        嵌套派任务（RUN-09）的 tool_call 发生在上级成员的线程里，但展示用的
+        「@成员 指令」仍然写在主线程，所以按 note 上的 delegate_thread_id 区分，
+        避免不同层级复用了同一个 call id 时互相串任务。
+        """
         if not call_id:
             return None
         for note in db.scalars(
@@ -969,10 +1037,13 @@ class RunExecutor:
             )
         ):
             meta = note.meta or {}
-            if meta.get("delegation") and meta.get("tool_call_id") == call_id:
-                task = db.get(Task, meta.get("task_id"))
-                if task:
-                    return task
+            if not meta.get("delegation") or meta.get("tool_call_id") != call_id:
+                continue
+            if thread_id and (meta.get("delegate_thread_id") or main_id) != thread_id:
+                continue
+            task = db.get(Task, meta.get("task_id"))
+            if task:
+                return task
         return None
 
     def _call_answered(self, db: Session, thread_id: str, run_id: str, call_id: str | None) -> bool:
@@ -1040,7 +1111,7 @@ class RunExecutor:
     ) -> tuple[int, list[dict], str] | None:
         """当前步骤属于某个「同批 ≥2 步」的计划批次时，返回批次信息。"""
         # 逐步确认模式要求每个子任务都停下来等用户，和并行天然冲突；
-        # 子执行也不能再派活（委派深度固定为 1）。
+        # 并行子执行与子 Bot 的嵌套派任务都走串行（计划批次只属于总指挥）。
         if run.parent_run_id or chat.run_mode == "step":
             return None
         steps = self._approved_plan_steps(db, run.id)
@@ -1200,7 +1271,7 @@ class RunExecutor:
             }
             if ask and ask[0].get("id"):
                 note_meta["tool_call_id"] = ask[0]["id"]
-            # 群聊里仍然是一条「@成员 指令」，读起来和串行派活一致；
+            # 群聊里仍然是一条「@成员 指令」，读起来和串行派任务一致；
             # batch 标记让前端把同批的消息收拢成一组。
             add_message(
                 db,
@@ -1211,6 +1282,26 @@ class RunExecutor:
                 content=f"@{target.name} {instruction}",
                 sender_bot_id=bot_id,
                 meta=note_meta,
+            )
+            # CHT-05 / RUN-08：任务卡片的结构化记录（前端按 compat 过滤不渲染）
+            add_compat_message(
+                db,
+                thread=main,
+                run_id=run.id,
+                type_="task",
+                content=instruction,
+                sender_bot_id=bot_id,
+                meta={
+                    "task_id": task.id,
+                    "thread_id": thread.id,
+                    "bot_id": target.id,
+                    "bot_name": target.name,
+                    "expected_output": expected,
+                    "status": "queued",
+                    "attempt": attempt,
+                    "batch": batch_no,
+                    "parallel": True,
+                },
             )
             child = Run(
                 user_id=run.user_id,
@@ -1228,7 +1319,7 @@ class RunExecutor:
             child_ids.append(child.id)
             emit_task_status(db, task)
             log.info(
-                "并行派活 task=%s 批次=%s 执行者=%s 指令=%r",
+                "并行派任务 task=%s 批次=%s 执行者=%s 指令=%r",
                 task.id, batch_no, target.name, instruction[:120],
             )
 
@@ -1244,16 +1335,11 @@ class RunExecutor:
     async def start_delegate(
         self, *, thread_id: str, bot_id: str, task_id: str | None, call: dict
     ) -> dict:
-        """派活：串行时切换角色就地执行，同批计划步骤则拉起并行子执行后等待。"""
+        """派任务：串行时切换角色就地执行，同批计划步骤则拉起并行子执行后等待。"""
         args = _parse_json((call.get("function") or {}).get("arguments") or "{}")
         error = toolmod.validate_args(toolmod.DELEGATE_TOOL, args)
         if error:
             self.write_tool_result(thread_id, call, f"参数不合法：{error}")
-            return {}
-        if task_id:
-            self.write_tool_result(
-                thread_id, call, "只有总指挥可以派活，子 Bot 不能再次派活（委派深度固定为 1）。"
-            )
             return {}
         instruction = (args.get("instruction") or "").strip()
         expected = args.get("expected_output") or ""
@@ -1282,9 +1368,39 @@ class RunExecutor:
                 self.write_tool_result(thread_id, call, "不能把任务派给自己。")
                 return {}
 
+            # RUN-09：子 Bot 也能继续派任务，但不能超过委派深度，也不能派回上级。
+            call_thread = db.get(Thread, thread_id)
+            if call_thread and call_thread.type == "branch":
+                self.write_tool_result(thread_id, call, "分支讨论不能派任务，请直接回答或回到主线程发起任务。")
+                return {}
+            nested = bool(call_thread and call_thread.type == "task")
+            depth = self._thread_depth(db, thread_id)
+            limit = self._limits(db, run)["delegation_depth"]
+            if nested and depth >= limit:
+                self.write_tool_result(
+                    thread_id,
+                    call,
+                    f"已达到委派深度上限（{limit} 层），请自己完成这一步，或把结论交回上级。",
+                )
+                return {}
+            if nested:
+                sup_id = supervisor_id(run, chat)
+                if target.id == sup_id:
+                    self.write_tool_result(
+                        thread_id, call, "不能把任务派回总指挥，请把结论交回上级处理。"
+                    )
+                    return {}
+                if target.id in self._ancestor_bot_ids(db, call_thread):
+                    self.write_tool_result(
+                        thread_id, call, "不能把任务派回自己的上级成员，请换一个成员或自己完成。"
+                    )
+                    return {}
+
             main = self._main_thread(db, chat)
             # 节点落库后、检查点写入前重启时，复用同一调用已经创建的任务。
-            existing = self._task_for_call(db, run.id, main.id, call.get("id"))
+            existing = self._task_for_call(
+                db, run.id, main.id, call.get("id"), thread_id=thread_id
+            )
             if existing:
                 if existing.status in ("completed", "failed", "canceled"):
                     self._answer_delegate_call(db, main, existing, self._delegate_summary(db, existing))
@@ -1297,7 +1413,9 @@ class RunExecutor:
                             "thread_id": existing.thread_id, "task_id": existing.id,
                             "last": existing.result or "", "has_calls": False, "cont": False}
 
-            batch = None if deferred else self._parallel_batch(db, run, chat, step_key)
+            # 计划批次只属于总指挥：子 Bot 的嵌套派任务一律串行，避免子执行
+            # 再拉起一批孙任务、打乱父执行的等待语义。
+            batch = None if (deferred or nested) else self._parallel_batch(db, run, chat, step_key)
             if batch:
                 batch_no, batch_steps, matched_key = batch
                 child_ids, pending = self._start_parallel_batch(
@@ -1312,7 +1430,7 @@ class RunExecutor:
                     if not self._call_answered(db, main.id, run.id, call.get("id")):
                         self._answer_open_calls(
                             db, main, run.id,
-                            "这一批并行步骤都已经结束或无法派发，请根据已有结果继续，不要重复派活。",
+                            "这一批并行步骤都已经结束或无法派发，请根据已有结果继续，不要重复派任务。",
                             call_id=call.get("id"),
                         )
                     return {}
@@ -1333,7 +1451,7 @@ class RunExecutor:
                 thread = Thread(
                     user_id=run.user_id,
                     chat_id=chat.id,
-                    parent_thread_id=main.id,
+                    parent_thread_id=call_thread.id if nested else main.id,
                     type="task",
                     title=instruction[:60],
                     bot_id=target.id,
@@ -1372,11 +1490,35 @@ class RunExecutor:
                         "delegation": True,
                         "delegation_instruction": instruction,
                         "tool_call_id": call.get("id"),
+                        # 嵌套派任务：tool_call 在上级成员线程里，结果要回到那里；
+                        # 主线程只保留这条 @ 展示消息（RUN-09）
+                        "delegate_thread_id": thread_id,
+                        "depth": depth + 1,
+                        "nested": nested,
+                    },
+                )
+                # CHT-05 / RUN-08：任务卡片的结构化记录（前端按 compat 过滤不渲染）
+                add_compat_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    type_="task",
+                    content=instruction,
+                    sender_bot_id=bot_id,
+                    meta={
+                        "task_id": task.id,
+                        "thread_id": thread.id,
+                        "bot_id": target.id,
+                        "bot_name": target.name,
+                        "expected_output": expected,
+                        "status": "running",
+                        "attempt": task.attempt,
+                        "tool_call_id": call.get("id"),
                     },
                 )
                 emit_task_status(db, task)
                 log.info(
-                    "派活 task=%s 执行者=%s 第%s次 指令=%r",
+                    "派任务 task=%s 执行者=%s 第%s次 指令=%r",
                     task.id, target.name, task.attempt, instruction[:120],
                 )
                 patch = {
@@ -1477,6 +1619,43 @@ class RunExecutor:
             )
         # 总指挥那条 delegate 还悬着，补上结果它才能继续
         self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
+        # CHT-05 / RUN-08 / 7.1：完成卡片与交接提示的结构化记录（前端不额外渲染）
+        done_bot = bot.name if bot else "子 Bot"
+        # RUN-09：嵌套派任务的结果交回上级成员，而不是总指挥
+        parent = self._delegation_parent(db, task)
+        parent_bot = db.get(Bot, parent[0].bot_id) if parent and parent[0].bot_id else None
+        handoff_to = f"「{parent_bot.name}」" if parent_bot else "总指挥"
+        add_compat_message(
+            db,
+            thread=main,
+            run_id=run.id,
+            type_="task_done",
+            content=(task.result or "")[:1500],
+            sender_bot_id=task.assigned_bot_id,
+            meta={
+                "task_id": task.id,
+                "thread_id": task.thread_id,
+                "bot_id": task.assigned_bot_id,
+                "bot_name": done_bot,
+                "status": "completed",
+                "elapsed": elapsed,
+                "tokens": task.tokens_used,
+                "batch": task.batch or 0,
+            },
+        )
+        add_compat_message(
+            db,
+            thread=main,
+            run_id=run.id,
+            type_="handoff",
+            content=f"「{done_bot}」已完成子任务，结果已交回{handoff_to}。",
+            sender_type="system",
+            meta={
+                "task_id": task.id,
+                "thread_id": task.thread_id,
+                "status": "completed",
+            },
+        )
         db.flush()
         return True
 
@@ -1542,8 +1721,13 @@ class RunExecutor:
         db.flush()
 
     async def finish_task(self, *, task_id: str, content: str) -> dict:
-        """串行子 Bot 跑完：回写结果、切回总指挥；逐步确认模式下在这里暂停。"""
+        """子 Bot 跑完：回写结果，切回派任务的那一层。
+
+        直接子任务回到总指挥（逐步确认模式下在这里暂停）；嵌套派任务回到上级成员，
+        由上级继续汇总，不打断用户（RUN-09）。
+        """
         self._check_stop()
+        parent_frame: dict | None = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             chat = db.get(Chat, run.chat_id)
@@ -1551,7 +1735,8 @@ class RunExecutor:
             task = db.get(Task, task_id)
             sup_id = supervisor_id(run, chat)
             sup = execution_bot(db, run, sup_id) if sup_id else None
-            step_mode = chat.run_mode == "step"
+            parent = self._delegation_parent(db, task)
+            step_mode = chat.run_mode == "step" and not parent
             task_title = (task.instruction or "")[:60]
 
             published = self._publish_task_result(db, run, chat, main, task, content)
@@ -1571,6 +1756,17 @@ class RunExecutor:
             main_id = main.id
             sup_id = sup.id if sup else None
             task_id_value = task.id
+            if parent:
+                parent_thread, parent_task = parent
+                parent_frame = {
+                    "role": "worker",
+                    "bot_id": parent_thread.bot_id,
+                    "thread_id": parent_thread.id,
+                    "task_id": parent_task.id,
+                }
+
+        if parent_frame:
+            return {**parent_frame, "last": "", "has_calls": False, "cont": True}
 
         if step_mode:
             # 逐步确认：子任务完成后暂停，等用户点「继续」（RUN-04）
@@ -1641,16 +1837,22 @@ class RunExecutor:
         enqueue(parent_id)
 
     async def fail_task(self, *, task_id: str, reason: str) -> dict:
-        """子任务模型失败：记失败原因，把控制权交回总指挥（并行子执行则自己收尾）。"""
+        """子任务模型失败：记失败原因，把控制权交回派任务的那一层。
+
+        嵌套派任务（RUN-09）失败只交回上级成员，不结束整个执行；
+        并行子执行的顶层任务失败才关闭这条子执行。
+        """
         self._check_stop()
         parent_id = None
         is_child = False
+        parent_frame: dict | None = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             is_child = bool(run.parent_run_id)
             chat = db.get(Chat, run.chat_id)
             main = self._main_thread(db, chat)
             task = db.get(Task, task_id)
+            parent = self._delegation_parent(db, task)
             sup_id = supervisor_id(run, chat)
             sup = execution_bot(db, run, sup_id) if sup_id else None
             if task and task.status not in ("completed", "failed", "canceled"):
@@ -1661,6 +1863,42 @@ class RunExecutor:
                 emit_task_status(db, task)
                 log.warning("任务失败 task=%s 原因=%s", task.id, str(reason)[:500])
                 self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
+                # CHT-05 / RUN-08 / 7.1：失败也出完成卡与交接提示（结构化记录，前端不渲染）
+                failed_bot = db.get(Bot, task.assigned_bot_id)
+                failed_name = failed_bot.name if failed_bot else "子 Bot"
+                parent_bot = db.get(Bot, parent[0].bot_id) if parent and parent[0].bot_id else None
+                handoff_to = f"「{parent_bot.name}」" if parent_bot else "总指挥"
+                add_compat_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    type_="task_done",
+                    content=f"子任务失败：{reason}"[:1500],
+                    sender_bot_id=task.assigned_bot_id,
+                    meta={
+                        "task_id": task.id,
+                        "thread_id": task.thread_id,
+                        "bot_id": task.assigned_bot_id,
+                        "bot_name": failed_name,
+                        "status": "failed",
+                        "elapsed": "",
+                        "tokens": task.tokens_used,
+                        "batch": task.batch or 0,
+                    },
+                )
+                add_compat_message(
+                    db,
+                    thread=main,
+                    run_id=run.id,
+                    type_="handoff",
+                    content=f"「{failed_name}」的子任务失败，控制权已交回{handoff_to}。",
+                    sender_type="system",
+                    meta={
+                        "task_id": task.id,
+                        "thread_id": task.thread_id,
+                        "status": "failed",
+                    },
+                )
                 if not is_child:
                     add_message(
                         db,
@@ -1674,6 +1912,17 @@ class RunExecutor:
             main_id = main.id
             sup_id = sup.id if sup else None
             parent_id = run.parent_run_id
+            if parent:
+                parent_thread, parent_task = parent
+                parent_frame = {
+                    "role": "worker",
+                    "bot_id": parent_thread.bot_id,
+                    "thread_id": parent_thread.id,
+                    "task_id": parent_task.id,
+                }
+        if parent_frame:
+            # 嵌套子任务失败：交回上级成员，由它决定改派/跳过/继续
+            return {**parent_frame, "last": "", "has_calls": False, "cont": True}
         if is_child:
             self._close_run("failed", f"子任务失败：{reason}")
             if parent_id:
@@ -1745,7 +1994,7 @@ class RunExecutor:
                         return "用户取消了这次计划，请停下来询问用户接下来的安排。"
                     steps = (old.meta or {}).get("steps") or steps
                     return (
-                        "用户已确认以下计划，请以这些最终步骤为准派活：同一个 batch 的步骤"
+                        "用户已确认以下计划，请以这些最终步骤为准派任务：同一个 batch 的步骤"
                         "必须在同一次回复里同时发起多个 delegate 调用（并行），不同 batch 等"
                         "上一批结果回来再派；delegate 的 step 参数原样填步骤标题。拿到结果后"
                         "再汇总，不要只复述计划。\n"
@@ -1775,7 +2024,7 @@ class RunExecutor:
                     run.user_id,
                     "plan",
                     f"「{chat.name}」的计划等待确认",
-                    "确认后才会开始派活",
+                    "确认后才会开始派任务",
                     chat_id=run.chat_id,
                     target_type="run",
                     target_id=run.id,
@@ -1863,17 +2112,20 @@ class RunExecutor:
             )
 
         if name == "delegate":
-            # 正常路径由图的 tool 节点处理，这里只兜底
-            return "派活需要在总指挥层发起。"
+            # 正常路径由图的 tool 节点处理（含 RUN-09 的嵌套派任务），这里只兜底
+            return "派任务由编排层处理，不能作为普通工具直接执行。"
 
-        tool = toolmod.BUILTIN_TOOLS.get(name)
-        if not tool:
-            return f"未知工具：{name}"
         with session_scope() as db:
             run = db.get(Run, self.run_id)
             bot = execution_bot(db, run, bot_id)
-            if not bot or name not in (bot.tools or []):
+            allowed = set(bot.tools or []) if bot else set()
+            if bot:
+                allowed.update(skillmod.effective_tool_names(skillmod.for_bot(db, run.user_id, bot)))
+            if not bot or name not in allowed:
                 return f"该 Bot 未获授权使用工具：{name}"
+            tool = toolmod.BUILTIN_TOOLS.get(name) or mcpmod.find_tool(db, run.user_id, name)
+            if not tool:
+                return f"未知工具：{name}"
 
         err = toolmod.validate_args(tool, args)
         if err:
@@ -1891,6 +2143,8 @@ class RunExecutor:
         if gate is not None:
             return gate
 
+        if tool.kind == "mcp":
+            return await self._execute_mcp(tool, args, thread_id=thread_id, call=call)
         return await self._execute_builtin(tool, args, bot_id, task_id, thread_id=thread_id, call=call)
 
     async def _approval_gate(
@@ -2051,6 +2305,40 @@ class RunExecutor:
             # 未授权这些提前返回的分支也要能在群聊里看到，不能只在任务线程。
         return out or "（无返回）"
 
+    async def _execute_mcp(
+        self, tool: toolmod.Tool, args: dict, *, thread_id: str, call: dict
+    ) -> str:
+        """TOL-05：调用远端 MCP 工具。结果按不可信外部内容标注。"""
+        if not tool.server_id or not tool.remote_name:
+            return "MCP 工具配置不完整，请到设置页重新检测该服务。"
+        with session_scope() as db:
+            existing = db.scalar(
+                select(Message).where(
+                    Message.thread_id == thread_id,
+                    Message.run_id == self.run_id,
+                    Message.type == "tool_result",
+                    Message.meta["tool_call_id"].as_string() == call.get("id"),
+                )
+            )
+            if existing:
+                return existing.content
+            server = db.get(McpServer, tool.server_id)
+            if not server or not server.enabled:
+                return "MCP 服务已停用或删除，请到设置页检查。"
+            url = server.url
+            token = decrypt_secret(server.token_encrypted) if server.token_encrypted else None
+        try:
+            return await asyncio.wait_for(
+                mcpmod.call_remote_tool(url, token, tool.remote_name, args),
+                timeout=MCP_TIMEOUT + 5,
+            )
+        except asyncio.TimeoutError:
+            return f"MCP 工具执行超时（{MCP_TIMEOUT + 5} 秒），未取得结果。"
+        except mcpmod.McpError as exc:
+            return f"MCP 工具执行失败：{exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"MCP 工具执行异常：{type(exc).__name__}: {exc}"
+
     # ---------------- 消息构造 ----------------
     def _open_tool_calls(self, db: Session, thread_id: str, run_id: str) -> list[Message]:
         """本执行里已经发出、但没有对应 tool_result 的调用。"""
@@ -2126,19 +2414,26 @@ class RunExecutor:
     def _answer_delegate_call(
         self, db: Session, thread: Thread, task: Task, content: str
     ) -> None:
-        """一个子任务只回答自己的 delegate，不能替尚未执行的调用填结果。"""
+        """一个子任务只回答自己的 delegate，不能替尚未执行的调用填结果。
+
+        RUN-09：嵌套派任务的工具调用发生在上层成员的线程里，展示用的「@成员 指令」
+        仍写在主线程。回答要回到 tool_call 所在的线程，否则模型会收到悬空调用。
+        """
         rows = db.scalars(
             select(Message).where(
-                Message.thread_id == thread.id,
                 Message.run_id == task.run_id,
                 Message.type == "text",
             ).order_by(Message.seq)
         ).all()
         note = next((m for m in rows if (m.meta or {}).get("task_id") == task.id), None)
         call_id = (note.meta or {}).get("tool_call_id") if note else None
+        answer_thread = thread
+        target_thread_id = (note.meta or {}).get("delegate_thread_id") if note else None
+        if target_thread_id and target_thread_id != thread.id:
+            answer_thread = db.get(Thread, target_thread_id) or thread
         if not call_id:
-            # 兼容旧执行：派活展示消息还没有 tool_call_id 时，按指令匹配。
-            for m in self._open_tool_calls(db, thread.id, task.run_id):
+            # 兼容旧执行：派任务展示消息还没有 tool_call_id 时，按指令匹配。
+            for m in self._open_tool_calls(db, answer_thread.id, task.run_id):
                 call = ((m.meta or {}).get("tool_calls") or [{}])[0]
                 fn = call.get("function") or {}
                 args = _parse_json(fn.get("arguments"))
@@ -2146,7 +2441,7 @@ class RunExecutor:
                     call_id = call.get("id")
                     break
         if call_id:
-            self._answer_open_calls(db, thread, task.run_id, content, call_id=call_id)
+            self._answer_open_calls(db, answer_thread, task.run_id, content, call_id=call_id)
 
     def _main_thread(self, db: Session, chat: Chat) -> Thread:
         thread = db.scalar(
@@ -2166,6 +2461,63 @@ class RunExecutor:
             .order_by(Bot.created_at)
         ).scalars().all()
         return [execution_bot(db, run, b.id) if run else b for b in rows if not b.deleted_at]
+
+    # ---------------- RUN-09：委派深度与嵌套派任务 ----------------
+    def _thread_depth(self, db: Session, thread_id: str) -> int:
+        """当前线程的委派层数：总指挥/主线程是 0，直接子任务线程是 1。
+
+        层级从线程的 parent_thread_id 链推导，不用执行状态里的栈——
+        Worker 重启、检查点丢失后重新起跑，深度仍然算得出来。
+        """
+        depth = 0
+        seen: set[str] = set()
+        thread = db.get(Thread, thread_id)
+        while thread and thread.type == "task" and thread.id not in seen:
+            seen.add(thread.id)
+            depth += 1
+            thread = db.get(Thread, thread.parent_thread_id) if thread.parent_thread_id else None
+        return depth
+
+    def _ancestor_bot_ids(self, db: Session, thread: Thread) -> set[str]:
+        """当前线程的上级成员（含直接派任务人），用于阻止把任务派回上级。"""
+        ids: set[str] = set()
+        seen: set[str] = set()
+        current: Thread | None = thread
+        while current and current.id not in seen:
+            seen.add(current.id)
+            if current.type == "task" and current.bot_id:
+                ids.add(current.bot_id)
+            current = db.get(Thread, current.parent_thread_id) if current.parent_thread_id else None
+        return ids
+
+    def _delegation_parent(self, db: Session, task: Task | None) -> tuple[Thread, Task] | None:
+        """嵌套派任务：本任务的线程挂在另一个任务线程下时，返回上级线程与任务。"""
+        if not task:
+            return None
+        thread = db.get(Thread, task.thread_id)
+        parent_id = thread.parent_thread_id if thread else None
+        if not parent_id:
+            return None
+        parent = db.get(Thread, parent_id)
+        if not parent or parent.type != "task":
+            return None
+        parent_task = db.scalar(
+            select(Task)
+            .where(Task.thread_id == parent.id)
+            .order_by(Task.created_at.desc())
+        )
+        return (parent, parent_task) if parent_task else None
+
+    def _can_delegate(
+        self, db: Session, run: Run, thread_id: str, is_supervisor: bool, task_id: str | None
+    ) -> bool:
+        """总指挥永远可以派任务；子 Bot 只有领到任务且未到深度上限时才可以。"""
+        if is_supervisor:
+            return True
+        if not task_id:
+            # @Bot 直连：线程是主线程，没有「上级」，派任务会切错角色
+            return False
+        return self._thread_depth(db, thread_id) < self._limits(db, run)["delegation_depth"]
 
     def _pending_interjection_seq(
         self, db: Session, run: Run, thread: Thread, base: int | None = None
@@ -2212,7 +2564,14 @@ class RunExecutor:
         )
 
     def _build_system_prompt(
-        self, db: Session, run: Run, chat: Chat, bot: Bot, is_supervisor: bool, members: list[Bot]
+        self,
+        db: Session,
+        run: Run,
+        chat: Chat,
+        bot: Bot,
+        is_supervisor: bool,
+        members: list[Bot],
+        thread: Thread | None = None,
     ) -> str:
         shared = db.execute(
             select(Memory).where(Memory.user_id == run.user_id, Memory.scope == "shared")
@@ -2225,14 +2584,21 @@ class RunExecutor:
 
         member_desc = "、".join(
             f"{b.name}（{b.role}；工具：{', '.join(b.tools or []) or '无'}；"
-            f"{'模型已配置' if b.provider_id else '未配置模型，暂不可派活'}）"
+            f"{'模型已配置' if b.provider_id else '未配置模型，暂不可派任务'}）"
             for b in members
         )
         budget = self._limits(db, run)["token_budget"]
         budget_label = "无限制" if budget == 0 else str(budget)
+        depth_limit = self._limits(db, run)["delegation_depth"]
+        can_delegate = is_supervisor or bool(
+            thread is not None
+            and thread.type == "task"
+            and self._thread_depth(db, thread.id) < depth_limit
+        )
         parts = [
             f"你是「{bot.name}」，角色是{bot.role}。",
             bot.system_prompt or "",
+            skillmod.prompt_block(skillmod.for_bot(db, run.user_id, bot)),
             f"\n当前群聊：{chat.name}。成员：{member_desc}。",
             "\n## 共享记忆\n" + (memory["shared"] or "（空）"),
             "\n## 你的私有记忆\n" + (memory["private"] or "（空）"),
@@ -2246,12 +2612,12 @@ class RunExecutor:
         if is_supervisor:
             parts += [
                 "\n## 你的额外职责（总指挥）",
-                "- 你负责协调成员。问候、状态查询、简短解释可以直接回答；检索资料、写代码/HTML、写文档、分析数据或审校等执行工作，有合适且已配置模型的成员时应调用 delegate 派活。",
-                "- 派活不取决于子任务数量：只有一项执行工作也直接调用 delegate，无需先出计划。两项及以上相互配合的子任务，先调用 propose_plan，用户确认后按最终计划派活。",
+                "- 你负责协调成员。问候、状态查询、简短解释可以直接回答；检索资料、写代码/HTML、写文档、分析数据或审校等执行工作，有合适且已配置模型的成员时应调用 delegate 派任务。",
+                "- 派任务不取决于子任务数量：只有一项执行工作也直接调用 delegate，无需先出计划。两项及以上相互配合的子任务，先调用 propose_plan，用户确认后按最终计划派任务。",
                 "- 计划里相互独立、可以同时做的步骤用同一个 batch 号；有先后依赖的步骤用递增的 batch。同一 batch 的步骤必须在同一次回复里一起发出多个 delegate 调用（并行），不要一个一个等；系统会同时执行，全部返回后再进入下一批。",
                 "- 例如写 HTML 派给程序员，查天气/查资料派给研究员，写需求文档派给写手/编辑，评审派给审校；按成员实际职责选择，不因自己也有工具就包办。没有合适成员、成员调用失败或用户明确要求你亲自处理时，可以自行完成。",
-                "- 串行步骤用 delegate 一次派一个，等结果回来再决定下一步；派活时把计划步骤的标题（或序号）原样填进 delegate 的 step 参数；同一个子任务改派时 step 保持不变——改派次数按 step 判断，换个说法重派不会多出次数。",
-                "- 子任务结果会以工具结果形式返回给你；需要时继续派活，最后必须给出面向用户的最终回答。",
+                "- 串行步骤用 delegate 一次派一个，等结果回来再决定下一步；派任务时把计划步骤的标题（或序号）原样填进 delegate 的 step 参数；同一个子任务改派时 step 保持不变——改派次数按 step 判断，换个说法重派不会多出次数。",
+                "- 子任务结果会以工具结果形式返回给你；需要时继续派任务，最后必须给出面向用户的最终回答。",
                 "- 缺少关键信息且无法自行判断时，调用 ask_user。",
                 "- 不要声称自己完成了子 Bot 的工作；汇报要基于实际返回结果。",
                 "- 需要生成文件时，优先让负责该产出的成员写；汇总时读取或引用成员产物，不重复生成同一份内容。",
@@ -2261,8 +2627,21 @@ class RunExecutor:
                 "\n## 你的职责",
                 "- 只完成分配给你的这一项子任务，不要越界。",
                 "- 开始执行时先用一两句话说明你的处理思路（要查什么、写什么、先读哪个文件），然后再调用工具；不要只回一句“收到”。",
-                "- 完成后给出一段可直接交给总指挥的结果摘要（不是寒暄）。",
+                "- 完成后给出一段可直接交给上级的结果摘要（不是寒暄）。",
             ]
+            if can_delegate:
+                # RUN-09：子 Bot 在深度允许时可以继续拆解，把其中一部分派给其他成员
+                parts += [
+                    "\n## 你可以继续派任务",
+                    "- 如果这一项子任务本身需要多人分工（例如先查资料再成稿），可以调用 delegate 把其中一部分派给其他成员；"
+                    "写清目标与期望产出，等结果返回后继续完成自己那部分并汇总。",
+                    "- 不要把整项任务原样转派，也不要派给总指挥或自己的上级；同一子任务最多改派 1 次。",
+                    "- 派任务同样按计划步骤标题填写 step，改派时保持不变。",
+                ]
+            else:
+                parts += [
+                    f"- 你已到达委派深度上限（{depth_limit} 层），所有工作自己完成，不要请求派任务。",
+                ]
         return "\n".join(p for p in parts if p)
 
     async def _complete_text(
@@ -2499,7 +2878,7 @@ class RunExecutor:
             # 重建旧执行时也不能读到后续执行的消息。
             msgs = [m for m in msgs if m.seq <= trigger.seq or m.run_id == run.id]
         out: list[dict] = [
-            {"role": "system", "content": self._build_system_prompt(db, run, chat, bot, is_supervisor, members)}
+            {"role": "system", "content": self._build_system_prompt(db, run, chat, bot, is_supervisor, members, thread=thread)}
         ]
         if thread.type == "task":
             # RUN-12：并行子执行自己也是 Run，任务的 run_id 指向父执行，
@@ -2575,10 +2954,10 @@ class RunExecutor:
                     if trigger and m.id == trigger.id:
                         out.append({
                             "role": "system",
-                            "content": "下面的用户消息是本次执行的当前请求，只执行它及本轮后续补充。历史记录中的失败、停止、已完成任务均不是待办，除非当前请求明确要求继续，否则不得恢复、补做或重新派发旧任务。若当前请求只是问候，就回应问候，不要为历史任务调用工具或派活。用户可以明确要求继续历史任务，此时才使用历史参考。",
+                            "content": "下面的用户消息是本次执行的当前请求，只执行它及本轮后续补充。历史记录中的失败、停止、已完成任务均不是待办，除非当前请求明确要求继续，否则不得恢复、补做或重新派发旧任务。若当前请求只是问候，就回应问候，不要为历史任务调用工具或派任务。用户可以明确要求继续历史任务，此时才使用历史参考。",
                         })
                     # RUN-13：执行中补充用一条前置系统提示标注，正文保持原样，
-                    # 避免模型把标注当成用户原话复述到派活指令里
+                    # 避免模型把标注当成用户原话复述到派任务指令里
                     if m.run_id == run.id and (m.meta or {}).get("kind") == "interjection":
                         out.append(
                             {
@@ -2589,7 +2968,7 @@ class RunExecutor:
                     out.append({"role": "user", "content": m.content})
                 elif m.sender_type == "bot" and m.content.strip():
                     meta = m.meta or {}
-                    # 派活文本是 UI 展示副本，不是模型返回的 assistant 消息。
+                    # 派任务文本是 UI 展示副本，不是模型返回的 assistant 消息。
                     # 它没有 reasoning_content，回传会破坏思考模式的工具链。
                     if meta.get("delegation") or meta.get("subtask_live") or (
                         meta.get("task_id") and meta.get("mention_bot_id")
@@ -2842,10 +3221,18 @@ class RunExecutor:
         settings = db.get(UserSettings, run.user_id)
         chat = db.get(Chat, run.chat_id)
         override = chat.limits_override or {}
+        # RUN-09 / LIM-01：委派深度按「群聊覆盖 → 用户默认 → 环境变量」取值
+        raw_depth = override.get("delegation_depth")
+        if raw_depth is None and settings is not None:
+            raw_depth = settings.delegation_depth
+        try:
+            depth = int(raw_depth) if raw_depth is not None else DELEGATION_DEPTH
+        except (TypeError, ValueError):
+            depth = DELEGATION_DEPTH
         return {
             "max_steps": 0,
             "token_budget": override.get("token_budget") if override.get("token_budget") is not None else (settings.token_budget if settings else 300_000),
-            "delegation_depth": DELEGATION_DEPTH,
+            "delegation_depth": max(1, min(5, depth)),
         }
 
     def _check_limits(self) -> None:

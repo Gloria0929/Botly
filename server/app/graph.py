@@ -13,9 +13,11 @@
 设计要点：
 - 暂停点用 `interrupt()`：计划确认、提问、审批、逐步确认。恢复时节点会重新执行，
   因此节点里的副作用必须幂等（审批按 args_hash 去重、计划/提问按 tool_call_id 去重）。
-- 「派活」不是递归调用，而是切换图里的角色状态：tool 节点建子线程与任务后把
+- 「派任务」不是递归调用，而是切换图里的角色状态：tool 节点建子线程与任务后把
   role 从 supervisor 切成 worker，图继续跑子 Bot 的 ReAct；子 Bot 结束后 after
   节点写回 delegate 的工具结果，再把角色切回总指挥。
+- RUN-09：子 Bot 也能派任务（受委派深度限制）。嵌套任务的线程挂在上级任务线程下，
+  子任务结束时按线程链找到上级成员，切回它的线程继续，直到最外层交回总指挥。
 - 每次工具调用是图里的一步，所以一轮多个调用可以逐个暂停、逐个恢复，不会重放
   已经执行过的调用。
 """
@@ -103,8 +105,12 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
         role = state.get("role", "supervisor")
 
         if name == "delegate":
-            if role != "supervisor":
-                ex.write_tool_result(state["thread_id"], call, "只有总指挥可以派活。")
+            # RUN-09：总指挥可以派任务；领到子任务的成员在深度允许时也能再派一层。
+            # @Bot 直连（worker 但没有 task_id）没有上级，派任务会切错角色。
+            if role != "supervisor" and not state.get("task_id"):
+                ex.write_tool_result(
+                    state["thread_id"], call, "只有总指挥或已领到子任务的成员可以派任务。"
+                )
                 return {}
             return await ex.start_delegate(
                 thread_id=state["thread_id"],

@@ -54,10 +54,25 @@ def apply_capability(models: list[dict], name: str, caps: dict) -> list[dict]:
     return out
 
 
+def hard_save_block_reason(caps: dict) -> str | None:
+    """MOD-02 保存校验：连通性与流式输出必须可用，否则拒绝保存。
+
+    工具调用不在保存时阻断：不支持工具调用的模型仍可作为普通 Bot
+    （会提示「该 Bot 将无法使用工具」），只是不能担任总指挥，由
+    supervisor_block_reason 在选总指挥的位置拦截。三态里的 None
+    （无法判断，例如自建网关不支持探测）不拦截，避免误杀。
+    """
+    if caps.get("ok") is False:
+        return "模型连通性校验未通过，请检查 base_url 与 API Key"
+    if caps.get("streaming") is False:
+        return "该模型不支持流式输出，Botly 的执行依赖流式，请换模型或重新检测"
+    return None
+
+
 def supervisor_block_reason(bot: Bot | None, provider: Provider | None) -> str | None:
     """该 Bot 不能担任总指挥的原因；可以担任时返回 None。
 
-    总指挥要靠工具调用来拆任务、派活，模型明确不支持工具调用时，执行只会在
+    总指挥要靠工具调用来拆任务、派任务，模型明确不支持工具调用时，执行只会在
     第一步就失败，所以在选总指挥的位置就拦住（群聊创建 / 更换总指挥）。
     只拦「明确探测到不支持」的情况：没绑定模型、或还没探测过的，交给执行时
     报错，不在这里阻断用户搭群聊。
@@ -67,7 +82,7 @@ def supervisor_block_reason(bot: Bot | None, provider: Provider | None) -> str |
     caps = capability_of(provider, bot.model)
     if caps["tool_calling"] is False:
         return (
-            f"「{bot.name}」使用的模型 {bot.model} 不支持工具调用，无法拆解与派活。"
+            f"「{bot.name}」使用的模型 {bot.model} 不支持工具调用，无法拆解与派任务。"
             "请先换成支持工具调用的模型，或在设置页重新检测能力。"
         )
     if caps["streaming"] is False:

@@ -212,7 +212,7 @@ def usage_summary(
             Run.user_id == user.id,
             Run.created_at >= since,
             # 子执行的 token/费用仍然计入总量（真实调用），但「执行数」按用户
-            # 发起的任务数统计，避免并行派活把一次任务算成好几次
+            # 发起的任务数统计，避免并行派任务把一次任务算成好几次
             Run.parent_run_id.is_(None),
         )
         .group_by(Run.status)

@@ -1,6 +1,8 @@
-"""P0 补齐项：TOL-01 搜索工具可用性、APV-03 审批过期交回总指挥。"""
+"""P0 补齐项：TOL-01 搜索工具可用性、APV-03 审批过期交回总指挥、
+CHT-05/RUN-08 task / task_done / handoff 结构化消息。"""
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -10,6 +12,7 @@ from app.maintenance import expire_overdue
 from app.models import Approval, Chat, Message, Notification, Run, Thread, now
 from app.orchestrator import add_message
 from app.security import args_hash
+from app.worker import process_one
 from tests.conftest import register, setup_workspace
 
 
@@ -17,6 +20,20 @@ def _tools(client) -> dict[str, dict]:
     r = client.get("/api/bots/tools")
     assert r.status_code == 200, r.text
     return {t["name"]: t for t in r.json()}
+
+
+def _run_worker(run_id: str) -> None:
+    asyncio.run(process_one(run_id))
+
+
+def _wait_status(client, run_id: str, expect: set[str]) -> dict:
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["status"] in expect, f"期望 {expect}，实际 {run['status']}（{run.get('end_reason')}）"
+    return run
+
+
+def _messages(client, chat_id: str) -> list[dict]:
+    return client.get(f"/api/chats/{chat_id}/messages?limit=200").json()["messages"]
 
 
 def test_search_tool_requires_key(client, invite):
@@ -130,3 +147,44 @@ def test_approval_expiry_does_not_touch_other_waiting_run(client, invite):
         db.commit()
         assert db.get(Approval, ap_id).status == "expired"
         assert db.get(Run, run_id).status == "waiting"
+
+
+def test_compat_task_task_done_handoff_messages(client, invite):
+    """CHT-05 / RUN-08 / 7.1：派任务、完成、交接都补发结构化消息。
+
+    群聊交互保持现状（@ 消息 + 子 Bot 气泡），但 task / task_done / handoff
+    三种类型要真实落库，供导出与第三方接入消费；每条都带 compat 标记和
+    task_id，重放不产生第二条。
+    """
+    register(client, invite, "compat-cards@test.dev")
+    chat_id, _ = setup_workspace(client)
+    r = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"content": "调研 3 家国内向量数据库厂商，写一份对比报告。"},
+    )
+    assert r.status_code == 201, r.text
+    run_id = r.json()["run"]["id"]
+
+    _run_worker(run_id)
+    run = _wait_status(client, run_id, {"waiting"})  # 计划待确认
+    assert client.post(f"/api/runs/{run_id}/plan/approve", json={}).status_code == 200
+    _run_worker(run_id)
+    _wait_status(client, run_id, {"completed"})
+
+    msgs = _messages(client, chat_id)
+    tasks = [m for m in msgs if m["type"] == "task"]
+    dones = [m for m in msgs if m["type"] == "task_done"]
+    handoffs = [m for m in msgs if m["type"] == "handoff"]
+    assert len(tasks) == 2 and len(dones) == 2, "计划两步各出一条任务卡与完成卡"
+    assert len(handoffs) >= 2, "每个子任务结束都应有交接提示"
+    for m in tasks + dones + handoffs:
+        assert m["meta"].get("compat") is True, "兼容消息要带 compat 标记"
+        assert m["meta"].get("task_id"), "兼容消息必须能关联到子任务"
+    assert all(m["meta"].get("status") == "completed" for m in dones)
+    assert all(m["meta"].get("tokens") is not None and m["meta"].get("bot_name") for m in dones)
+    task_ids = {m["meta"]["task_id"] for m in tasks}
+    assert task_ids == {m["meta"]["task_id"] for m in dones}, "task 与 task_done 一一对应"
+
+    # 导出应包含任务/完成/交接的文本（15.2 消费这些类型）
+    export = client.get(f"/api/chats/{chat_id}/export").text
+    assert "任务：" in export and "任务完成" in export

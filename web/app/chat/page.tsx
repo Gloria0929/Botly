@@ -982,6 +982,13 @@ function ChatContent() {
               {chat && chat.members.length > 5 && (
                 <span className="text-[10.5px] text-faint">+{chat.members.length - 5}</span>
               )}
+              {/* CHT-04：成员栏显示「正在输入」——任一成员处理中就在头像旁标出 */}
+              {chat?.members?.some((m) => m.status === "working") && (
+                <span className="ml-1 hidden items-center gap-1 text-[10.5px] text-faint md:flex">
+                  <TypingDots size={4} />
+                  正在输入…
+                </span>
+              )}
               {chat && (
                 <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-dashed border-line text-faint transition-colors group-hover:border-accent/50 group-hover:text-accent">
                   <Plus size={12} />
@@ -1160,6 +1167,7 @@ function ChatContent() {
             onInterject={interject}
             onStop={doStop}
             seed={seed}
+            delegationDepth={chat?.limits?.delegation_depth ?? 2}
             onUpload={chatId ? async (file) => {
               const uploaded = await api.uploadChatFile(chatId, file);
               refreshChat(chatId);
@@ -1347,7 +1355,23 @@ function NoChatState({ onOpenList }: { onOpenList: () => void }) {
 }
 
 function statusLabel(s?: string) {
-  return s === "working" ? "工作中" : s === "waiting" ? "等待处理" : "空闲";
+  // CHT-04：成员栏的进行中文案对齐需求文档
+  return s === "working" ? "正在输入…" : s === "waiting" ? "等待处理" : "空闲";
+}
+
+/** 三点跳动：成员栏的「正在输入」指示。 */
+function TypingDots({ size = 4 }: { size?: number }) {
+  return (
+    <span className="flex items-center gap-0.5" role="status" aria-label="正在输入">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="animate-bounce rounded-full bg-faint"
+          style={{ height: size, width: size, animationDelay: `${i * 0.15}s` }}
+        />
+      ))}
+    </span>
+  );
 }
 
 function runStatusText(run: Run | null) {

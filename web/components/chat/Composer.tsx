@@ -15,6 +15,7 @@ export default function Composer({
   onStop,
   seed,
   onUpload,
+  delegationDepth,
 }: {
   members: Bot[];
   running: boolean;
@@ -24,6 +25,7 @@ export default function Composer({
   onStop: () => void;
   seed?: { text: string; k: number } | null;
   onUpload?: (file: File) => Promise<ChatFile>;
+  delegationDepth?: number;
 }) {
   const [text, setText] = useState("");
   const [mention, setMention] = useState(false);
@@ -195,23 +197,25 @@ export default function Composer({
             >
               <AtSign size={15} />
             </button>
-            {running && (
+            {running ? (
+              // CHT-03：执行进行中时发送按钮变为「停止」；插话改由 Enter 发送
               <button
                 onClick={onStop}
-                className="mb-0.5 flex h-7 items-center gap-1.5 rounded-lg bg-danger px-2.5 text-[12px] font-medium text-white hover:opacity-90"
+                className="mb-0.5 flex h-7 items-center gap-1.5 rounded-lg bg-danger px-2.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
                 title="停止执行，已完成的步骤与产物会保留"
               >
                 <Square size={11} fill="currentColor" /> 停止
               </button>
+            ) : (
+              <button
+                onClick={send}
+                disabled={(!text.trim() && !attachments.length) || !!disabledReason || uploading}
+                className="mb-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-accentink transition-opacity disabled:opacity-30"
+                title="发送"
+              >
+                <ArrowUp size={15} />
+              </button>
             )}
-            <button
-              onClick={send}
-              disabled={(!text.trim() && !attachments.length) || !!disabledReason || uploading}
-              className="mb-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-accentink transition-opacity disabled:opacity-30"
-              title={running ? "插话（下一步前送达）" : "发送"}
-            >
-              <ArrowUp size={15} />
-            </button>
           </div>
         </div>
 
@@ -219,16 +223,20 @@ export default function Composer({
           {running ? (
             <>
               <span className="flex items-center gap-1">
-                <Zap size={10} /> 执行中发送 = 插话，总指挥在下一步前读取
+                <Zap size={10} /> 执行中 Enter 发送 = 插话，总指挥在下一步前读取
               </span>
-              <span>停止会保留已完成步骤与产物</span>
+              <span>点「停止」结束执行，已完成步骤与产物保留</span>
             </>
           ) : (
             <>
               <span className="flex items-center gap-1">
                 <Zap size={10} /> 默认发给总指挥
               </span>
-              <span>子任务串行执行，委派深度 1</span>
+              <span>
+                {delegationDepth === 1
+                  ? "委派深度 1：只有总指挥能派任务"
+                  : `委派深度 ${delegationDepth ?? 2}：子 Bot 可再向下派任务`}
+              </span>
             </>
           )}
         </div>

@@ -220,6 +220,7 @@ def _light_migrate() -> None:
     wanted = {
         "providers": {"vendor_id": "VARCHAR(40)", "logo": "VARCHAR(500)"},
         "messages": {"reasoning_content": "TEXT"},
+        "bots": {"skills": "JSON"},
         "tasks": {"step_key": "VARCHAR(200)", "batch": "INTEGER DEFAULT 0"},
         "runs": {
             "last_turn_message_id": "VARCHAR(32)",
@@ -239,6 +240,12 @@ def _light_migrate() -> None:
             "purge_after": "TIMESTAMP",
             "email_verified_at": "TIMESTAMP",
             "session_epoch": "INTEGER DEFAULT 0",
+        },
+        "user_settings": {"delegation_depth": "INTEGER"},
+        "skills": {
+            "source": "VARCHAR(20) DEFAULT 'manual'",
+            "source_url": "VARCHAR(500)",
+            "files": "JSON",
         },
     }
     insp = inspect(engine)

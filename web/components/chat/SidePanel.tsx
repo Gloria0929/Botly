@@ -61,7 +61,7 @@ export default function SidePanel({
         if (m.meta?.task_id) return false;
         if (m.type === "tool_call") {
           const name = m.meta?.tool_calls?.[0]?.function?.name;
-          // 派活、计划、提问在群聊里都有专门的卡片，不在这里重复
+          // 派任务、计划、提问在群聊里都有专门的卡片，不在这里重复
           return name !== "delegate" && name !== "propose_plan" && name !== "ask_user";
         }
         return m.type === "tool_result";

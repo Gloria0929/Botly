@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..config import DELEGATION_DEPTH
 from ..db import get_db
 from ..deps import current_user
 from ..models import User, UserSettings
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 class SettingsPatch(BaseModel):
     max_steps: int | None = None  # 兼容旧客户端，执行步数已不设限。
     token_budget: int | None = None
+    delegation_depth: int | None = None  # RUN-09：1–5 层
     notifications_enabled: bool | None = None
     approval_ttl_hours: int | None = None
     search_api_key: str | None = None
@@ -26,6 +28,7 @@ def _out(s: UserSettings) -> dict:
     return {
         "max_steps": 0,
         "token_budget": s.token_budget,
+        "delegation_depth": s.delegation_depth or DELEGATION_DEPTH,
         "notifications_enabled": s.notifications_enabled,
         "approval_ttl_hours": s.approval_ttl_hours,
         "search_provider": s.search_provider,
@@ -54,6 +57,10 @@ def update_settings(
         if payload.token_budget != 0 and payload.token_budget < 1000:
             raise HTTPException(400, "token 预算应为 0（无限制）或至少 1000")
         s.token_budget = payload.token_budget
+    if payload.delegation_depth is not None:
+        if not 1 <= payload.delegation_depth <= 5:
+            raise HTTPException(400, "委派深度应为 1–5 层")
+        s.delegation_depth = payload.delegation_depth
     if payload.notifications_enabled is not None:
         s.notifications_enabled = payload.notifications_enabled
     if payload.approval_ttl_hours is not None:

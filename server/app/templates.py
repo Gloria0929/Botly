@@ -11,7 +11,7 @@ BOT_TEMPLATES: list[dict] = [
         "name": "总指挥",
         "avatar": "compass",
         "role": "总指挥",
-        "description": "拆解任务、派活、汇总结果，不亲自干活",
+        "description": "拆解任务、派任务、汇总结果，不亲自干活",
         "system_prompt": (
             "你是一个多智能体团队的总指挥。你的职责是理解用户目标、判断复杂度、拆解任务、"
             "把子任务派给合适的成员，并在最后汇总成一份面向用户的完整回答。"

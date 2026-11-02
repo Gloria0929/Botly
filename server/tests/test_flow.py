@@ -100,7 +100,7 @@ def test_full_flow_plan_delegate_summarize(client, invite, mention_supervisor):
     types = [m["type"] for m in msgs]
     assert "plan" in types
 
-    # 派活是群聊里的 @ 消息，子 Bot 以自己的身份回复
+    # 派任务是群聊里的 @ 消息，子 Bot 以自己的身份回复
     delegations = [m for m in msgs if (m["meta"] or {}).get("delegation")]
     replies = [m for m in msgs if (m["meta"] or {}).get("subtask")]
     assert len(delegations) == 2, "应派给两个不同的 Bot"
@@ -375,9 +375,9 @@ def test_reasoning_content_on_all_tool_calls_of_a_turn(client, invite, monkeypat
     ]
 
 
-@pytest.mark.parametrize("reasoning", ["原始派活思考", ""])
+@pytest.mark.parametrize("reasoning", ["原始派任务思考", ""])
 def test_delegate_preserves_reasoning_and_passes_worker_instruction(client, invite, monkeypatch, reasoning):
-    """派活展示消息不能破坏思考链，子 Bot 必须收到指令和期望产出。"""
+    """派任务展示消息不能破坏思考链，子 Bot 必须收到指令和期望产出。"""
     import json
 
     from app import orchestrator
@@ -395,7 +395,7 @@ def test_delegate_preserves_reasoning_and_passes_worker_instruction(client, invi
             assert any(
                 m["role"] == "user" and instruction in m["content"] and expected in m["content"]
                 for m in kw["messages"]
-            ), "真实模型的上下文里必须有派活指令，不能只在 mock ctx 里传入"
+            ), "真实模型的上下文里必须有派任务指令，不能只在 mock ctx 里传入"
             yield {"type": "done", "content": "登录规则已经整理", "reasoning_content": "子任务思考", "tool_calls": []}
             return
         supervisor_turns += 1
@@ -412,7 +412,7 @@ def test_delegate_preserves_reasoning_and_passes_worker_instruction(client, invi
             return
         assert_tool_history_valid(kw["messages"])
         assistants = [m for m in kw["messages"] if m["role"] == "assistant"]
-        assert len(assistants) == 1, "派活展示文本不能成为额外的 assistant 回复"
+        assert len(assistants) == 1, "派任务展示文本不能成为额外的 assistant 回复"
         assert assistants[0]["reasoning_content"] == reasoning
         assert any(m["role"] == "tool" and "登录规则已经整理" in m["content"] for m in kw["messages"])
         yield {"type": "done", "content": "这是登录需求", "reasoning_content": "汇总思考", "tool_calls": []}
@@ -450,7 +450,7 @@ def test_new_run_ignores_old_control_messages_and_keeps_named_bot_replies(client
             add_message(db, thread=thread, run_id=old_id, sender_type="system", type_="system", content=content)
         add_message(db, thread=thread, run_id=old_id, sender_type="user", type_="text",
                     content="补充：继续旧简报评审", meta={"kind": "interjection"})
-        # 旧版本的派活副本没有 delegation 标记，也没有 reasoning_content。
+        # 旧版本的派任务副本没有 delegation 标记，也没有 reasoning_content。
         add_message(db, thread=thread, run_id=old_id, sender_type="bot", type_="text",
                     sender_bot_id=chat.supervisor_bot_id, content="@研究员 继续旧评审",
                     meta={"task_id": "old-task", "mention_bot_id": researcher["id"]})
@@ -504,7 +504,7 @@ def test_current_request_survives_long_running_text_history(client, invite):
 
 
 def test_multiple_delegates_keep_their_own_results(client, invite, monkeypatch):
-    """同轮两次派活都要执行，第一项结果不能代替第二项结果。"""
+    """同轮两次派任务都要执行，第一项结果不能代替第二项结果。"""
     import json
 
     from app import orchestrator
@@ -534,7 +534,7 @@ def test_multiple_delegates_keep_their_own_results(client, invite, monkeypatch):
                 } for i, instruction in enumerate(["登录规则", "退出规则"])],
             }
             return
-        assert worker_instructions == ["登录规则", "退出规则"], "汇总前必须先执行完同轮的两次派活"
+        assert worker_instructions == ["登录规则", "退出规则"], "汇总前必须先执行完同轮的两次派任务"
         results = {m["tool_call_id"]: m["content"] for m in kw["messages"] if m["role"] == "tool"}
         assert "完成：登录规则" in results["delegate-0"]
         assert "完成：退出规则" in results["delegate-1"]
@@ -569,7 +569,7 @@ def test_worker_failure_returns_to_supervisor_for_final_reply(client, invite, mo
         supervisor_turns += 1
         if supervisor_turns == 1:
             yield {
-                "type": "done", "content": "", "reasoning_content": "派活思考",
+                "type": "done", "content": "", "reasoning_content": "派任务思考",
                 "tool_calls": [{
                     "id": "delegate-failure", "type": "function",
                     "function": {"name": "delegate", "arguments": json.dumps({

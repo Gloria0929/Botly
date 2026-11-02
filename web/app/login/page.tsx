@@ -63,7 +63,7 @@ export default function LoginPage() {
         </div>
         <div className="relative grid grid-cols-3 gap-3">
           {[
-            { k: "派活", v: "总指挥拆解并调度" },
+            { k: "派任务", v: "总指挥拆解并调度" },
             { k: "可见", v: "每个子任务独立线程" },
             { k: "可控", v: "审批、限额与停止" },
           ].map((i) => (

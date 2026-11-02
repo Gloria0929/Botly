@@ -111,7 +111,7 @@ def _recover_and_collect() -> list[str]:
         ).all()
         for r in queued:
             if r.parent_run_id:
-                # 子执行不受「每用户并发数」限制：一次并行派活本来就会有多个
+                # 子执行不受「每用户并发数」限制：一次并行派任务本来就会有多个
                 # 子任务同时跑，按顶层执行的上限卡住会让批次永远起不来。
                 picked.append(r.id)
                 continue

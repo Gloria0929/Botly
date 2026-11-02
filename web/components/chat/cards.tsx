@@ -146,7 +146,8 @@ export function PlanCard({
                     )}
                   </div>
                   <div className="mt-1 flex items-center gap-2 text-[11.5px] text-faint">
-                    <span className="chip">{s.bot}</span>
+                    {/* 成员名保持一行：空间不足时截断右侧「产出」，不折行成员名 */}
+                    <span className="chip shrink-0">{s.bot}</span>
                     {s.expected && <span className="truncate">产出：{s.expected}</span>}
                   </div>
                 </>
