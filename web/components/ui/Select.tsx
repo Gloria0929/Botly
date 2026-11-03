@@ -99,9 +99,7 @@ export default function Select({
         className={`flex w-full items-center gap-2 rounded-lg border bg-panel2/70 px-2.5 ${h} text-left outline-none transition-colors ${
           disabled
             ? "cursor-not-allowed border-line opacity-50"
-            : open
-              ? "border-accent ring-2 ring-accent/10"
-              : "border-line hover:border-line2"
+            : "border-line hover:border-line2"
         }`}
       >
         {current?.avatar !== undefined && current?.avatar !== null && (

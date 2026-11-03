@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import MEMORY_INJECT_LIMIT
 from app.core.db import get_db
 from app.core.deps import current_user, owned_or_404
 from app.core.models import Bot, Memory, MemoryCandidate, User, now
+from app.core.similarity import duplicates_in
 from app.agent.memory_context import memory_context
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -20,11 +21,13 @@ class MemoryIn(BaseModel):
     bot_id: str | None = None
     title: str = ""
     content: str
+    category: str = ""
 
 
 class MemoryPatch(BaseModel):
     title: str | None = None
     content: str | None = None
+    category: str | None = None
 
 
 def _out(m: Memory) -> dict:
@@ -34,6 +37,7 @@ def _out(m: Memory) -> dict:
         "bot_id": m.bot_id,
         "title": m.title,
         "content": m.content,
+        "category": getattr(m, "category", "") or "",
         # user = 用户手动维护；bot = Bot 执行中自主保存（MEM-03 修订）
         "source": getattr(m, "source", None) or "user",
         "run_id": getattr(m, "run_id", None),
@@ -50,6 +54,7 @@ def _candidate_out(c: MemoryCandidate) -> dict:
         "bot_id": c.bot_id,
         "title": c.title,
         "content": c.content,
+        "category": getattr(c, "category", "") or "",
         "status": c.status,
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
@@ -82,6 +87,7 @@ def accept_candidate(
         bot_id=c.bot_id,
         title=c.title,
         content=c.content,
+        category=getattr(c, "category", "") or "",
     )
     db.add(m)
     c.status = "accepted"
@@ -106,15 +112,26 @@ def reject_candidate(
 def list_memories(
     scope: str | None = None,
     bot_id: str | None = None,
+    q: str | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    q = select(Memory).where(Memory.user_id == user.id)
+    stmt = select(Memory).where(Memory.user_id == user.id)
     if scope:
-        q = q.where(Memory.scope == scope)
+        stmt = stmt.where(Memory.scope == scope)
     if bot_id:
-        q = q.where(Memory.bot_id == bot_id)
-    rows = db.scalars(q.order_by(Memory.updated_at.desc())).all()
+        stmt = stmt.where(Memory.bot_id == bot_id)
+    if q and q.strip():
+        # 转义 LIKE 通配符，避免用户输入 % / _ 被当成分页/通配
+        kw = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{kw}%"
+        stmt = stmt.where(
+            or_(
+                Memory.title.ilike(like, escape="\\"),
+                Memory.content.ilike(like, escape="\\"),
+            )
+        )
+    rows = db.scalars(stmt.order_by(Memory.updated_at.desc())).all()
     context_rows = rows
     if scope == "bot" and bot_id:
         owned_or_404(db, Bot, bot_id, user.id)
@@ -147,6 +164,7 @@ def create_memory(
         bot_id=payload.bot_id if payload.scope == "bot" else None,
         title=payload.title.strip(),
         content=payload.content.strip(),
+        category=payload.category.strip()[:30],
     )
     db.add(m)
     db.flush()
@@ -165,6 +183,8 @@ def update_memory(
         m.title = payload.title
     if payload.content is not None:
         m.content = payload.content
+    if payload.category is not None:
+        m.category = payload.category.strip()[:30]
     db.flush()
     return _out(m)
 
@@ -177,6 +197,38 @@ def delete_memory(
     db.delete(m)
     db.flush()
     return {"ok": True}
+
+
+@router.get("/duplicates")
+def list_duplicates(
+    scope: str | None = None,
+    bot_id: str | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """疑似重复：当前范围内记忆两两比对相似度，供界面整理合并。
+
+    阈值比「写入去重」略低，宁可多报、由用户判断；结果按相似度降序，最多 200 条参与比对。
+    """
+    stmt = select(Memory).where(Memory.user_id == user.id)
+    if scope:
+        stmt = stmt.where(Memory.scope == scope)
+    if bot_id:
+        stmt = stmt.where(Memory.bot_id == bot_id)
+    rows = db.scalars(stmt.order_by(Memory.updated_at.desc()).limit(200)).all()
+    items = [(m.id, m.content or "") for m in rows]
+    by_id = {m.id: m for m in rows}
+    out = []
+    for i, j, score in duplicates_in(items):
+        a_id, b_id = items[i][0], items[j][0]
+        out.append(
+            {
+                "a": _out(by_id[a_id]),
+                "b": _out(by_id[b_id]),
+                "score": round(score, 3),
+            }
+        )
+    return {"duplicates": out, "count": len(out)}
 
 
 @router.get("/stats")

@@ -64,7 +64,7 @@ def _read_lines(path: Path) -> list[str]:
 @router.get("")
 def list_logs(
     user: User = Depends(current_user),
-    level: str | None = Query(default=None, description="只看某个级别及以上：ERROR / WARNING / INFO / DEBUG"),
+    level: str | None = Query(default=None, description="精确匹配日志级别：CRITICAL / ERROR / WARNING / INFO / DEBUG"),
     module: str | None = Query(default=None, description="模块名，如 access、agent、security"),
     q: str | None = Query(default=None, description="关键字（不区分大小写）"),
     request_id: str | None = Query(default=None, description="按请求编号串联一条请求的全部日志"),
@@ -73,14 +73,13 @@ def list_logs(
     offset: int = Query(default=0, ge=0),
 ):
     """返回最新的 limit 条（过滤后），倒序：第一页就是最近发生的事。"""
-    level_rank = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
-    want_level = (level or "").upper()
-    min_rank = level_rank.get(want_level, 0)
+    want_level = (level or "").strip().upper()
     needle = (q or "").strip().lower()
 
     matched: list[dict] = []
     hidden_sql = 0
-    for path in reversed(_log_files()):
+    # _log_files 已按新到旧排序；只反转各文件内的行，不能再反转文件顺序。
+    for path in _log_files():
         # 反向扫描时，堆栈/多行消息的续行出现在父行之前，先攒着，
         # 等匹配到父行再拼回去——否则前端看到的报错只有第一行。
         pending: list[str] = []
@@ -94,8 +93,7 @@ def list_logs(
                 hidden_sql += 1
                 pending.clear()
                 continue
-            rank = level_rank.get(m["level"], 0)
-            if min_rank and rank < min_rank:
+            if want_level and m["level"] != want_level:
                 pending.clear()
                 continue
             if module and m["module"] != module:
@@ -138,7 +136,7 @@ def list_logs(
 
     total_window = len(matched)
     page = matched[offset : offset + limit]
-    files = [p.name for p in reversed(_log_files())]
+    files = [p.name for p in _log_files()]
     return {
         "items": page,
         "has_more": total_window >= offset + limit,

@@ -42,7 +42,7 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="grid min-h-screen lg:grid-cols-[1.05fr_1fr]">
+    <div className="auth-entry grid min-h-dvh lg:grid-cols-[minmax(0,1.06fr)_minmax(0,1fr)]">
       <AuthMarketing
         badge="邀请制内测"
         title={

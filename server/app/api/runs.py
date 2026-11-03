@@ -150,6 +150,12 @@ def approve_plan(
     steps = payload.steps or resume.get("plan") or []
     if not steps:
         raise HTTPException(400, "计划不能为空")
+    from app.agent.scheduling import schedule_plan
+
+    try:
+        steps = schedule_plan(steps)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     _mark_message(db, run.id, "plan", {"status": "approved", "steps": steps})
     # 保留 propose_plan 的 tool_call：恢复时要给它补一条 tool_result，
     # 否则模型会收到“assistant tool_calls 后面没有 tool 消息”的 400。

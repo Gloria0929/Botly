@@ -254,6 +254,10 @@ def _light_migrate() -> None:
         "memories": {
             "source": "VARCHAR(20) DEFAULT 'user'",
             "run_id": "VARCHAR(32)",
+            "category": "VARCHAR(30) DEFAULT ''",
+        },
+        "memory_candidates": {
+            "category": "VARCHAR(30) DEFAULT ''",
         },
         "runs": {
             "last_turn_message_id": "VARCHAR(32)",

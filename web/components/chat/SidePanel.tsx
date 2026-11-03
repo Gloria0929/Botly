@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, X } from "lucide-react";
 import { api, errText } from "@/lib/api";
+import { acceptMessageEvent, createMessageSync, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
 import Avatar from "@/components/ui/Avatar";
 import type { Bot, ChatFile, Message, Task } from "@/lib/types";
 import { bytes, clock, num, timeAgo } from "@/lib/fmt";
@@ -50,9 +51,10 @@ export default function SidePanel({
   const [preview, setPreview] = useState<ChatFile | null>(null);
   // 总指挥执行过程（工具调用）单独一屏；子任务线程由 activeTask 控制
   const [supervisorOpen, setSupervisorOpen] = useState(false);
-  // 任务面板只列进行中的任务；已完成/失败的细节通过群聊消息下的「查看过程」打开
+  // 保留本次/最近一次执行的所有任务，结束后仍能从侧边栏打开完整过程。
   const ACTIVE_TASK = new Set(["queued", "running", "waiting_approval", "waiting_reply"]);
   const activeTasks = tasks.filter((t) => ACTIVE_TASK.has(t.status));
+  const endedTasks = tasks.filter((t) => !ACTIVE_TASK.has(t.status));
 
   // 总指挥在主线程里的工具调用：群聊只显示聊天记录，过程统一收进面板
   const supervisorTools = useMemo(
@@ -80,7 +82,7 @@ export default function SidePanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-panel">
-      <div className="flex h-12 shrink-0 items-center gap-1 border-b border-line px-2">
+      <div className="flex h-16 shrink-0 items-center gap-1 border-b border-line px-2">
         <button
           onClick={() => setTab("tasks")}
           className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] transition-colors ${
@@ -88,7 +90,7 @@ export default function SidePanel({
           }`}
         >
           <ListChecks size={13} /> 任务
-          {activeTasks.length > 0 && <span className="text-[10.5px] text-faint">{activeTasks.length}</span>}
+          {tasks.length > 0 && <span className="text-[10.5px] text-faint">{tasks.length}</span>}
         </button>
         <button
           onClick={() => setTab("files")}
@@ -151,17 +153,19 @@ export default function SidePanel({
                 </div>
               </button>
             )}
-            {activeTasks.length === 0 && supervisorCalls.length === 0 && (
+            {tasks.length === 0 && supervisorCalls.length === 0 && (
               <div className="px-3 py-8 text-center text-[12px] leading-relaxed text-faint">
-                当前没有进行中的任务
-                <br />
-                已完成的过程可点群聊消息下的「详情」
+                当前还没有子任务记录
               </div>
             )}
-            {activeTasks.map((t) => (
+            {[{ title: "进行中", items: activeTasks }, { title: "已结束", items: endedTasks }].map((group) => group.items.length > 0 && (
+              <div key={group.title}>
+              <div className="px-2.5 pb-1 pt-3 text-[10.5px] font-medium text-faint">{group.title} · {group.items.length}</div>
+              {group.items.map((t) => (
               <button
                 key={t.id}
                 onClick={() => onSelectTask(t)}
+                aria-label={`查看${t.bot_name}的完整执行过程：${t.instruction.slice(0, 40)}`}
                 className="mb-1 w-full rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-line hover:bg-panel2"
               >
                 <div className="flex items-center gap-1.5">
@@ -189,7 +193,10 @@ export default function SidePanel({
                 <div className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted">
                   {t.instruction}
                 </div>
+                <div className="mt-1.5 flex items-center gap-1 text-[10.5px] text-accent"><Terminal size={11} />查看完整过程</div>
               </button>
+              ))}
+              </div>
             ))}
           </div>
         )
@@ -299,45 +306,81 @@ function TaskThread({ chatId, task, onBack }: {
   useEffect(() => {
     let alive = true;
     let es: EventSource | null = null;
+    const sync = createMessageSync();
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let refreshing = false;
+    const refresh = () => {
+      if (refreshTimer || refreshing) return;
+      refreshTimer = setTimeout(async () => {
+        refreshTimer = null;
+        if (!alive) return;
+        refreshing = true;
+        try {
+          const [history, current] = await Promise.all([
+            api.messages(chatId, { thread_id: task.thread_id, limit: 200 }), api.task(task.id),
+          ]);
+          if (!alive) return;
+          sync.cursor = Math.max(sync.cursor, history.event_cursor);
+          setMsgs((prev) => mergeMessageSnapshot(prev, history.messages, history.event_cursor, sync));
+          setDetail(current);
+          setError("");
+        } catch (e) {
+          if (alive) setError(errText(e, "过程记录刷新失败"));
+        } finally {
+          refreshing = false;
+        }
+      }, 200);
+    };
     setLoading(true);
     setError("");
     Promise.all([api.messages(chatId, { thread_id: task.thread_id, limit: 200 }), api.task(task.id)])
       .then(([history, current]) => {
         if (!alive) return;
         setMsgs(history.messages);
+        sync.cursor = history.event_cursor;
         setHasMore(history.has_more);
         setDetail(current);
         es = new EventSource(`/api/chats/${chatId}/events?after=${history.event_cursor}`);
-        es.onopen = () => alive && setError("");
+        es.onopen = () => { if (alive) { setError(""); refresh(); } };
         es.onerror = () => alive && setError("实时连接中断，正在重连…");
         es.addEventListener("message.created", (ev) => {
           if (!alive) return;
           const p = JSON.parse((ev as MessageEvent).data) as Message;
           if (p.thread_id !== task.thread_id) return;
-          setMsgs((prev) => [...prev.filter((m) => m.id !== p.id), p].sort((a, b) => a.seq - b.seq));
+          if (!acceptMessageEvent(sync, p.id, Number((ev as MessageEvent).lastEventId))) return;
+          setMsgs((prev) => {
+            const old = prev.find((m) => m.id === p.id);
+            return [...prev.filter((m) => m.id !== p.id), old ? mergeMessageUpdate(old, p) : p].sort((a, b) => a.seq - b.seq);
+          });
         });
         ["message.delta", "message.completed"].forEach((type) => es!.addEventListener(type, (ev) => {
           if (!alive) return;
           const p = JSON.parse((ev as MessageEvent).data);
+          if (!acceptMessageEvent(sync, p.message_id, Number((ev as MessageEvent).lastEventId))) return;
           setMsgs((prev) => prev.map((m) => m.id === p.message_id
-            ? { ...m, content: p.content, status: p.status || m.status,
-                meta: p.meta ? { ...m.meta, ...p.meta } : m.meta }
+            && (type === "message.completed" || m.status === "streaming")
+            ? mergeMessageUpdate(m, { content: p.content, status: p.status || m.status,
+                type: p.type || m.type, meta: p.meta })
             : m));
         }));
         es.addEventListener("message.deleted", (ev) => {
           if (!alive) return;
           const p = JSON.parse((ev as MessageEvent).data);
+          if (!acceptMessageEvent(sync, p.id, Number((ev as MessageEvent).lastEventId), true)) return;
           setMsgs((prev) => prev.filter((m) => m.id !== p.id));
         });
         es.addEventListener("task.status", (ev) => {
           if (!alive) return;
           const p = JSON.parse((ev as MessageEvent).data);
-          if (p.task_id === task.id) setDetail((t) => ({ ...t, ...p, id: t.id }));
+          if (p.task_id === task.id) {
+            setDetail((t) => ({ ...t, ...p, id: t.id }));
+            if (["completed", "failed", "canceled"].includes(p.status)) refresh();
+          }
         });
       })
       .catch((e) => alive && setError(errText(e, "任务详情加载失败")))
       .finally(() => alive && setLoading(false));
-    return () => { alive = false; es?.close(); };
+    return () => { alive = false; es?.close(); if (refreshTimer) clearTimeout(refreshTimer); };
   }, [chatId, task.id, task.thread_id, retry]);
 
   const loadMore = async () => {
@@ -352,6 +395,8 @@ function TaskThread({ chatId, task, onBack }: {
   };
   const results: Record<string, Message> = {};
   msgs.forEach((m) => { if (m.type === "tool_result") results[m.meta?.tool_call_id] = m; });
+  const loadedCallIds = new Set<string>(msgs.flatMap((m) => m.type === "tool_call"
+    ? (m.meta?.tool_calls || []).map((call: { id: string }) => call.id) : []));
   const ended = ["completed", "failed", "canceled"].includes(detail.status);
   const toolCount = msgs.filter((m) => m.type === "tool_call").length;
 
@@ -378,12 +423,13 @@ function TaskThread({ chatId, task, onBack }: {
         {hasMore && <button className="btn-ghost mb-2 w-full text-[11px]" disabled={loadingMore} onClick={loadMore}>{loadingMore ? "加载中…" : "加载更早的过程"}</button>}
         {loading && <Loader2 size={14} className="animate-spin text-faint" />}
         {!loading && !msgs.length && !error && <div className="text-[11px] text-faint">{ended ? "没有过程记录" : "等待成员开始执行…"}</div>}
-        {msgs.filter((m) => m.type !== "tool_result").map((m) => (
+        {msgs.filter((m) => m.type !== "tool_result" || !loadedCallIds.has(m.meta?.tool_call_id)).map((m) => (
           <div key={m.id} className="mb-3 min-w-0">
             <div className="mb-1 flex items-center gap-1.5 text-[10px] text-faint">
               <span>{detail.bot_name}</span><span>{clock(m.created_at)}</span>
               {m.status === "streaming" && <span className="text-accent">正在输出…</span>}
               {m.status === "interrupted" && <span className="text-warn">输出已中断</span>}
+              {m.type === "tool_result" && <span>工具返回 · {m.meta?.tool || "工具"}</span>}
             </div>
             {m.content && <Markdown text={m.content} size="sm" className="break-words" />}
             {m.type === "tool_call" && <ToolBlock msg={{ ...m, content: "" }} result={results[m.meta?.tool_calls?.[0]?.id]} defaultOpen ended={ended} />}

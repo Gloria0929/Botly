@@ -8,18 +8,30 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.core import redis_bus
 from app.core.models import Event, Notification, now
 
 
+@event.listens_for(Session, "after_commit")
+def _publish_committed_events(db: Session) -> None:
+    for args in db.info.pop("event_wakeups", {}).values():
+        redis_bus.publish_event(*args)
+
+
+@event.listens_for(Session, "after_rollback")
+def _discard_event_wakeups(db: Session) -> None:
+    db.info.pop("event_wakeups", None)
+
+
 def emit(db: Session, user_id: str, chat_id: str | None, type_: str, payload: dict) -> Event:
     ev = Event(user_id=user_id, chat_id=chat_id, type=type_, payload=payload)
     db.add(ev)
     db.flush()
-    # 广播唤醒信号；SSE 端收到后从 events 表按 id 顺序读取，保证不丢不乱序
-    redis_bus.publish_event(user_id, chat_id, ev.id, type_)
+    # 提交后再唤醒；提前发布会让 SSE 读不到尚未提交的片段，退回定时轮询。
+    db.info.setdefault("event_wakeups", {})[(user_id, chat_id)] = (user_id, chat_id, ev.id, type_)
     return ev
 
 

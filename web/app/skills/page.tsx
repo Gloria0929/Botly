@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Download, Github, Link2, Loader2, Plus, Save, Sparkles, Trash2, Upload } from "lucide-react";
+import { Download, Github, Link2, Loader2, Plus, Save, Sparkles, Trash2, Upload, Search, Blocks, CircleCheck, AlertTriangle } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Modal from "@/components/ui/Modal";
 import PageHeader from "@/components/ui/PageHeader";
+import StatGrid from "@/components/ui/StatGrid";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api, errText, toastError } from "@/lib/api";
 import type { Skill } from "@/lib/types";
@@ -29,6 +30,9 @@ const EMPTY: Partial<Skill> = {
 
 export default function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "enabled" | "imported">("all");
+  const visibleSkills = skills.filter(s => (filter === "all" || (filter === "enabled" ? s.enabled : s.source && s.source !== "manual")) && `${s.name} ${s.description || ""}`.toLowerCase().includes(query.toLowerCase()));
   const [tools, setTools] = useState<ToolRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<Skill> | null>(null);
@@ -204,8 +208,8 @@ export default function SkillsPage() {
         <div className="page">
           <PageHeader
             eyebrow="AGENT / SKILLS"
-            title="技能"
-            description="技能 = 一段可复用的方法提示词 + 一组工具。绑定到 Bot 后自动注入提示词并合并工具。"
+            title="技能库"
+            description="沉淀团队的工作方法，让专业能力在不同智能体之间复用。"
             actions={
               <>
                 <button
@@ -224,10 +228,21 @@ export default function SkillsPage() {
             }
           />
 
-          <div className="mt-6 grid gap-3 sm:grid-cols-2">
-            {skills.map((s) => (
-              <div key={s.id} className="card card-hover p-4">
-                <div className="flex items-start gap-3">
+          <StatGrid items={[
+            { label: "全部技能", value: loading ? "—" : skills.length, icon: Sparkles, note: "团队可复用的方法与工具" },
+            { label: "已启用", value: skills.filter(s => s.enabled).length, icon: CircleCheck, note: "可绑定到智能体使用" },
+            { label: "已被使用", value: skills.filter(s => (s.bot_count || 0) > 0).length, icon: Blocks, note: "已被至少一个智能体绑定" },
+          ]} />
+          <div className="collection-toolbar">
+            <div className="collection-tabs" aria-label="技能筛选">
+              {([{ value: "all", label: "全部技能" }, { value: "enabled", label: "已启用" }, { value: "imported", label: "外部导入" }] as const).map(item => <button key={item.value} aria-pressed={filter === item.value} onClick={() => setFilter(item.value)} className="collection-tab">{item.label}</button>)}
+            </div>
+            <label className="collection-search"><Search size={14} className="shrink-0 text-faint" /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索技能名称或说明" aria-label="搜索技能" /></label>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
+            {visibleSkills.map((s) => (
+              <div key={s.id} className="card card-hover flex min-w-0 flex-col p-6">
+                <div className="flex items-center gap-3">
                   <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent/12 text-accent">
                     <Sparkles size={16} />
                   </div>
@@ -246,20 +261,24 @@ export default function SkillsPage() {
                       {s.tools.length ? ` · ${s.tools.length} 个工具` : ""}
                     </div>
                   </div>
-                  <button
-                    onClick={() => setEditing(s)}
-                    className="text-[11.5px] text-muted hover:text-ink"
-                  >
-                    编辑
-                  </button>
-                  <button onClick={() => remove(s)} className="text-faint hover:text-danger">
-                    <Trash2 size={14} />
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      aria-label={`编辑技能${s.name}`}
+                      onClick={() => setEditing(s)}
+                      className="inline-flex h-9 items-center justify-center rounded-lg px-2 text-[11.5px] text-muted transition-colors hover:bg-panel2 hover:text-ink"
+                    >
+                      编辑
+                    </button>
+                    <button type="button" aria-label={`删除技能${s.name}`} onClick={() => remove(s)} className="icon-btn hover:text-danger">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </div>
-                <p className="mt-3 line-clamp-2 text-[11.5px] leading-relaxed text-muted">
+                <p className="mb-4 mt-3 line-clamp-2 text-[12px] leading-relaxed text-muted">
                   {s.description || s.prompt || "（无说明）"}
                 </p>
-                <div className="mt-3 flex flex-wrap gap-1">
+                <div className="mt-auto flex flex-wrap gap-1.5 border-t border-line pt-4">
                   {s.tools.slice(0, 6).map((t) => (
                     <span key={t} className="chip font-mono">
                       {t}
@@ -273,6 +292,7 @@ export default function SkillsPage() {
             ))}
           </div>
 
+          {!loading && skills.length > 0 && !visibleSkills.length && <div className="empty-state mt-4 text-[13px] text-muted">没有匹配的技能，试试其他关键词或筛选条件。</div>}
           {loading && (
             <div className="mt-10 flex justify-center">
               <Loader2 size={16} className="animate-spin text-faint" />
@@ -310,7 +330,7 @@ export default function SkillsPage() {
         <div className="space-y-5">
           {importError && (
             <div className="flex items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
-              <span className="mt-0.5 shrink-0">⚠</span>
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
               <span className="min-w-0 break-words">{importError}</span>
             </div>
           )}

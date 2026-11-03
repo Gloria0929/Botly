@@ -3,6 +3,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FileText, GitBranch } from "lucide-react";
 import type { Bot, ChatFile, Message, PlanStep, Task } from "@/lib/types";
+import { isVisibleChatMessage } from "@/lib/message-sync";
 import Avatar from "@/components/ui/Avatar";
 import { bytes, clock } from "@/lib/fmt";
 import Markdown from "./Markdown";
@@ -83,12 +84,13 @@ export default function MessageStream({
     return m;
   }, [members]);
 
-  // 群聊只展示聊天记录：工具调用与返回留在任务线程里，通过任务面板查看
+  // 群聊保留工具轮的文字说明，工具参数与返回通过任务面板查看。
   const items = useMemo(() => {
     const out: Message[] = [];
     const seen = new Set<string>();
     messages.forEach((m) => {
-      if (m.type === "tool_call" || m.type === "tool_result") return;
+      // 空草稿可能从刷新快照读到；等待状态由成员栏展示，不让每个工具轮闪一个空气泡。
+      if (!isVisibleChatMessage(m)) return;
       // CHT-05/RUN-08：task / task_done / handoff 的结构化兼容消息只在
       // 导出与第三方接入里消费；群聊交互保持现状（派任务 @ 消息 + 概要行），
       // 这里按 compat 标记过滤，不额外渲染。
@@ -139,7 +141,7 @@ export default function MessageStream({
     // 历史加载、刷新和流式内容都只调整本容器，绘制前直接定位。
     // scrollIntoView 会平滑滚动并影响祖先容器，切页时尤其明显。
     el.scrollTop = el.scrollHeight;
-  }, [items.length, messages[messages.length - 1]?.content, chatId, focusMessageId, loadingEarlier]);
+  }, [items, chatId, focusMessageId, loadingEarlier]);
 
   const onScroll = () => {
     const el = scroller.current;
@@ -152,8 +154,8 @@ export default function MessageStream({
   }
 
   return (
-    <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-      <div className="flex w-full flex-col gap-3">
+    <div ref={scroller} onScroll={onScroll} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+      <div className="flex w-full min-w-0 flex-col gap-7">
         {hasEarlier && onLoadEarlier && <button className="btn-ghost mx-auto text-[11.5px]" disabled={loadingEarlier} onClick={async () => {
           const el = scroller.current;
           if (el) prepending.current = { height: el.scrollHeight, top: el.scrollTop };
@@ -215,6 +217,7 @@ function MessageItem({
       <div className="px-1 py-0.5">
         <SystemLine
           text={msg.meta?.kind === "plan_approved" ? "已确认计划，开始执行" : msg.content}
+          centered={["supervisor_changed", "members_added", "members_removed"].includes(msg.meta?.kind)}
         />
       </div>
     );
@@ -274,8 +277,8 @@ function MessageItem({
     const interjection = msg.meta?.kind === "interjection";
     return (
       <div className="group flex justify-end gap-2.5">
-        <div className="max-w-[92%]">
-          <div className="rounded-lg rounded-br-sm border border-line bg-panel3 px-3.5 py-2 text-[13.5px] leading-relaxed text-ink">
+        <div className="min-w-0 max-w-[92%]">
+          <div className="break-words rounded-2xl rounded-br-md border border-line bg-panel2 px-3.5 py-2.5 text-[13.5px] leading-relaxed text-ink">
             {interjection && (
               <div className="mb-1 text-[10px] font-medium font-mono uppercase tracking-wide text-faint">
                 插话 · 执行中补充
@@ -284,17 +287,19 @@ function MessageItem({
             <div className="whitespace-pre-wrap">{msg.content}</div>
           </div>
           <div className="mt-1 flex items-center justify-end gap-1.5 text-[10.5px] text-faint">
+            <span>{clock(msg.created_at)}</span>
             {onBranch && (
               <button
+                type="button"
                 onClick={() => onBranch(msg)}
                 title="从此消息拉出分支"
-                className="flex items-center gap-1 rounded px-1 py-0.5 opacity-0 transition-opacity hover:text-accent group-hover:opacity-100"
+                aria-label="从此消息拉出分支"
+                className="message-branch-action inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] text-faint hover:bg-panel3 hover:text-ink"
               >
                 <GitBranch size={12} />
                 分支
               </button>
             )}
-            {clock(msg.created_at)}
           </div>
         </div>
       </div>
@@ -324,7 +329,7 @@ function MessageItem({
     <div className="group flex gap-2.5">
       <Avatar value={botAvatar} size={32} alt={botName} className="mt-0.5" />
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center gap-2">
+        <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-[12.5px] font-semibold">{botName}</span>
           {botRole && <span className="font-mono text-[9.5px] uppercase tracking-wide text-faint">{botRole}</span>}
           {msg.meta?.parallel && (
@@ -335,33 +340,36 @@ function MessageItem({
               并行 · 第 {msg.meta.batch} 批
             </span>
           )}
-          <span className="font-mono text-[9.5px] text-faint">{clock(msg.created_at)}</span>
-          {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
-        </div>
-        {streaming && !hasContent ? (
-          // CHT-04：模型还没吐字时，消息流里明确显示「正在输入」
-          <div className="flex items-center gap-2 py-1.5">
-            <TypingDots />
-            <span className="text-[11px] text-faint">正在输入…</span>
-          </div>
-        ) : hasContent ? (
-          <div className="flex items-start gap-1.5">
-            <div className="max-w-[92%] rounded-lg rounded-tl-sm border border-line bg-panel px-3.5 py-2.5">
-              <Markdown text={msg.content} mention={mentionName} />
-              {/* 输出中：气泡尾部用三点跳动，不再用竖线光标 */}
-              {streaming && <TypingDots className="mt-1.5" />}
-            </div>
-            {/* 分支入口贴在气泡右侧，避免飘到整行最右边、看不出属于哪条消息 */}
-            {onBranch && (
+          <span className="inline-flex shrink-0 items-center gap-1.5">
+            <span className="font-mono text-[9.5px] text-faint">{clock(msg.created_at)}</span>
+            {onBranch && hasContent && (
               <button
+                type="button"
                 onClick={() => onBranch(msg)}
                 title="从此消息拉出分支"
-                className="mt-2 flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] text-faint opacity-0 transition-opacity hover:bg-accent/10 hover:text-accent group-hover:opacity-100"
+                aria-label="从此消息拉出分支"
+                className="message-branch-action inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] text-faint hover:bg-panel3 hover:text-ink"
               >
                 <GitBranch size={12} />
                 分支
               </button>
             )}
+          </span>
+          {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
+        </div>
+        {streaming && !hasContent ? (
+          // CHT-04：模型还没吐字时，消息流里明确显示「正在输入」
+          <div className="inline-flex items-center gap-2 rounded-2xl rounded-tl-md border border-line bg-panel2/60 px-3.5 py-2.5">
+            <TypingDots />
+            <span className="text-[11px] text-faint">正在输入…</span>
+          </div>
+        ) : hasContent ? (
+          <div className="flex items-start">
+            <div className="min-w-0 max-w-[92%] break-words rounded-2xl rounded-tl-md border border-line bg-panel2/60 px-3.5 py-2.5">
+              <Markdown text={msg.content} mention={mentionName} />
+              {/* 输出中：气泡尾部用三点跳动，不再用竖线光标 */}
+              {streaming && <TypingDots className="mt-1.5" />}
+            </div>
           </div>
         ) : null}
         {/* 任务概要与气泡使用同一个最大宽度，整条消息看起来是一列 */}
@@ -375,7 +383,8 @@ function MessageItem({
             live={live}
             open={detailOpen}
             onToggle={onToggleDetail}
-            tokensFallback={summaryFallback.tokens_used || 0}
+            tokensFallback={msg.meta?.task_id ? summaryFallback.tokens_used || 0 : msg.meta?.agent_tokens}
+            onOpenProcess={msg.meta?.task_id ? () => handlers.onOpenTask(msg.meta.task_id, live?.thread_id || msg.meta.thread_id) : undefined}
           />
         </div>
         {files.filter((file) => msg.content.includes(file.path)).map((file) => (

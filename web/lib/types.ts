@@ -112,6 +112,8 @@ export type PlanStep = {
   title: string;
   bot: string;
   expected?: string;
+  /** Agent 判断的前置任务，批次由服务端自动计算。 */
+  depends_on?: string[];
   /** RUN-12：同一个 batch 的步骤并行执行；不填表示单独一批（串行） */
   batch?: number;
 };
@@ -250,6 +252,14 @@ export type ChatSummary = {
   member_count: number;
 };
 
+export type ChatTemplate = {
+  id: string;
+  name: string;
+  avatar: string;
+  description: string;
+  members: { name: string; role: string; avatar: string }[];
+};
+
 export type Notification = {
   id: string;
   type: string;
@@ -268,6 +278,8 @@ export type Memory = {
   bot_id: string | null;
   title: string;
   content: string;
+  /** 主题分类（偏好/约定/项目背景/事实/其他），空表示未分类 */
+  category?: string;
   /** user = 用户手动维护；bot = Bot 执行中通过 memory_save 自主保存 */
   source?: "user" | "bot";
   updated_at: string | null;
@@ -282,6 +294,7 @@ export type MemoryCandidate = {
   bot_id: string | null;
   title: string;
   content: string;
+  category?: string;
   status: "pending" | "accepted" | "rejected";
   created_at: string | null;
 };

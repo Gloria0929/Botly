@@ -14,6 +14,7 @@ import json
 import re
 import socket
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -31,6 +32,7 @@ from app.core.config import (
 )
 from app.core.events import emit
 from app.core.models import FileRec, Memory
+from app.core.similarity import is_duplicate
 
 # 工具结果来自外部（网页、文件），按需求 8.4 明确标注为不可信数据，
 # 避免网页里的提示词被模型当成用户指令执行。
@@ -480,17 +482,30 @@ register(
 )
 
 async def _skill_file_read(ctx, path: str) -> str:
-    """读取已启用技能包里的参考文件（外部技能包导入的 docs / 模板）。"""
+    """读取已启用技能的完整说明，或技能包里的参考文件。"""
     from app.tools import skills as skillmod  # 局部导入：skills 依赖本模块，避免循环
 
     rows = skillmod.for_bot(ctx.db, ctx.user_id, ctx.bot)
     if not rows:
-        return "当前 Bot 没有启用带参考文件的技能。"
+        return "当前 Bot 没有启用技能。"
     rel_path = (path or "").strip().lstrip("/")
     target: tuple | None = None
     if "/" in rel_path:
         prefix, rel = rel_path.split("/", 1)
         skill = next((s for s in rows if s.name == prefix or s.id == prefix), None)
+        if skill and rel == "SKILL.md":
+            body = "\n\n".join(
+                part.strip() for part in (skill.description or "", skill.prompt or "") if part.strip()
+            )
+            result = (
+                f"技能「{skill.name}」的完整说明（用户启用的技能配置 SKILL.md）：\n\n"
+                + (body or "（未填写说明）")
+            )
+            if skill.files:
+                result += "\n\n参考文件（需要时用 skill_file_read 读取）：\n" + "\n".join(
+                    f"- {skill.name}/{rel}" for rel in skill.files
+                )
+            return result
         if skill and rel in (skill.files or []):
             target = (skill, rel)
     if not target:
@@ -500,8 +515,8 @@ async def _skill_file_read(ctx, path: str) -> str:
                 break
     if not target:
         listing = "；".join(
-            f"{s.name}：{'、'.join((s.files or [])[:10])}" for s in rows if s.files
-        ) or "（没有可读文件）"
+            f"{s.name}：{'、'.join(['SKILL.md', *(s.files or [])[:10]])}" for s in rows
+        )
         return f"技能包里没有这个文件。可用文件——{listing}"
     skill, rel = target
     try:
@@ -576,7 +591,7 @@ register(
     Tool(
         name="skill_file_read",
         description=(
-            "读取已启用技能包里的参考文件（外部技能附带的说明、模板、示例）。"
+            "读取已启用技能的完整说明（技能名/SKILL.md），或技能包里的参考文件、模板、示例。"
             "路径格式为「技能名/相对路径」，也可以直接给包内相对路径。"
         ),
         parameters={
@@ -685,13 +700,14 @@ DELEGATE_TOOL = Tool(
     description=(
         "把一项子任务派给群聊里的某个 Bot。被派 Bot 会在独立子线程里执行并把结果回给你。"
         "检索、编程、写作、分析、终审等执行工作优先派给对应成员；只有一项工作也应派任务，无需先出计划。"
-        "指令要具体，包含目标、范围和期望产出。"
+        "委派只说明目标、范围、用户约束、已有资料和验收标准，不替子 Bot 规定操作步骤、实现方法、工具或技能。"
+        "具体做法由子 Bot 自主决定，不清楚目标时它可用 ask_supervisor 向总指挥澄清。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "bot": {"type": "string", "description": "目标 Bot 的名字，必须是群聊成员"},
-            "instruction": {"type": "string", "description": "给该 Bot 的完整指令"},
+            "instruction": {"type": "string", "description": "目标、范围、用户约束、已有资料和验收标准；保留用户明确指定的要求，执行方法由子 Bot 自主选择"},
             "step": {
                 "type": "string",
                 "description": (
@@ -712,7 +728,8 @@ PLAN_TOOL = Tool(
     description=(
         "当任务需要 2 个及以上子任务时，先提交执行计划给用户确认。"
         "只有一项执行工作时直接调用 delegate 派任务，无需计划；问候、状态查询和简短解释直接回答。"
-        "相互独立、可以同时做的步骤填同一个 batch 号（并行）；有先后依赖的步骤用递增的 batch。"
+        "由你自主判断任务依赖，不要让用户选择并行或串行。每步填写 depends_on："
+        "独立任务填 []，依赖其他步骤的任务填写前置步骤标题。执行器会自动安排并行与串行批次。"
     ),
     parameters={
         "type": "object",
@@ -726,12 +743,16 @@ PLAN_TOOL = Tool(
                         "title": {"type": "string"},
                         "bot": {"type": "string"},
                         "expected": {"type": "string"},
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "必须填写。由 Agent 判断本步骤需要哪些前置结果，引用对应步骤的完整标题；没有依赖填写 []。不要为了串行而添加不存在的依赖。",
+                        },
                         "batch": {
                             "type": "integer",
                             "minimum": 1,
                             "description": (
-                                "并行批次：同一个数字的步骤会同时派给不同成员并行执行；"
-                                "不填表示该步骤单独一批（串行）。"
+                                "兼容旧计划的批次编号；新计划无需填写，由执行器根据 depends_on 自动计算。"
                             ),
                         },
                     },
@@ -751,6 +772,25 @@ ASK_TOOL = Tool(
     parameters={
         "type": "object",
         "properties": {"question": {"type": "string", "description": "要问用户的问题"}},
+        "required": ["question"],
+    },
+    level="L1",
+    kind="control",
+)
+
+ASK_SUPERVISOR_TOOL = Tool(
+    name="ask_supervisor",
+    description=(
+        "向总指挥澄清子任务的目标、范围、约束、依赖或验收口径，并获得答复后继续执行。"
+        "具体方法、工具与技能由你自主决定；只有无法自行判断的关键疑问才询问，"
+        "总指挥确实缺少用户信息时，再用 ask_user 向用户提问。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "需要总指挥澄清的具体疑问", "minLength": 1},
+            "context": {"type": "string", "description": "已确认的信息、你的判断和疑点；不要粘贴全部过程"},
+        },
         "required": ["question"],
     },
     level="L1",
@@ -790,16 +830,15 @@ async def _memory_save(ctx, content: str, title: str = "") -> str:
             f"保存失败：本次执行最多自动保存 {MEMORY_SAVE_LIMIT_PER_RUN} 条记忆，"
             "请只保留最重要的信息。"
         )
-    dup = ctx.db.scalar(
+    existing = ctx.db.scalars(
         select(Memory).where(
             Memory.user_id == ctx.user_id,
             Memory.scope == "bot",
             Memory.bot_id == ctx.bot.id,
-            Memory.content == content,
         )
-    )
-    if dup:
-        return "这条内容已经在你的私有记忆里，无需重复保存。"
+    ).all()
+    if any(is_duplicate(m.content, content) for m in existing):
+        return "这条内容与你的私有记忆里已有的条目高度相似，无需重复保存。"
 
     mem = Memory(
         user_id=ctx.user_id,
@@ -847,6 +886,7 @@ def tools_for_bot(
     is_supervisor: bool,
     can_delegate: bool = False,
     extra_tools: list[Tool] | None = None,
+    can_consult_supervisor: bool = False,
 ) -> list[Tool]:
     """按角色组装工具。
 
@@ -857,24 +897,39 @@ def tools_for_bot(
     extra = {t.name: t for t in (extra_tools or [])}
     out: list[Tool] = []
     seen: set[str] = set()
+
+    def add(tool: Tool) -> None:
+        if tool.name not in seen:
+            seen.add(tool.name)
+            out.append(tool)
+
     for name in bot_tools:
         t = BUILTIN_TOOLS.get(name) or extra.get(name)
-        if t and t.name not in seen:
-            seen.add(t.name)
-            out.append(t)
+        if t:
+            add(t)
     if is_supervisor:
-        out.append(PLAN_TOOL)
-        out.append(DELEGATE_TOOL)
+        add(PLAN_TOOL)
+        add(DELEGATE_TOOL)
     elif can_delegate:
-        out.append(DELEGATE_TOOL)
-    out.append(ASK_TOOL)
+        add(DELEGATE_TOOL)
+    if not is_supervisor and can_consult_supervisor:
+        add(ASK_SUPERVISOR_TOOL)
+    add(ASK_TOOL)
     # MEM-03 修订：所有 Bot 都可以往自己的私有记忆里存信息（有去重与条数上限）
-    out.append(MEMORY_TOOL)
+    add(MEMORY_TOOL)
     return out
 
 
 def schema_list(tools: list[Tool]) -> list[dict]:
-    return [t.schema() for t in tools]
+    schemas = []
+    for tool in tools:
+        schema = tool.schema()
+        if tool.name == "propose_plan":
+            # 新模型必须显式判断依赖；服务端仍兼容历史计划的旧格式。
+            schema = deepcopy(schema)
+            schema["function"]["parameters"]["properties"]["steps"]["items"]["required"] = ["title", "bot", "depends_on"]
+        schemas.append(schema)
+    return schemas
 
 
 def validate_args(tool: Tool, args: dict) -> str | None:

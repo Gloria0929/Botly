@@ -193,8 +193,8 @@ export default function McpSection() {
     <section>
       <PageHeader
         eyebrow="INTEGRATIONS / MCP"
-        title="MCP 工具"
-        description="接入 MCP 服务（HTTP 或本地 stdio 进程）后，它的工具会出现在 Bot 与技能的「可用工具」里。默认按 L3 处理：每次调用都要审批。"
+        title="工具连接"
+        description="连接团队使用的服务与工具，扩展智能体的工作能力。"
         actions={
           <>
             <button className="btn-ghost" onClick={() => { setImportOpen(true); setImportText(""); setImportResult(null); }}>
@@ -206,7 +206,11 @@ export default function McpSection() {
           </>
         }
       />
-      <div className="card mt-6 p-3.5">
+      <div className="mb-5 flex flex-wrap items-center gap-5 border-b border-line pb-4 text-[12px] text-muted">
+        <span>{servers.length} 个服务</span><span>{servers.filter(s => s.status === "ok").length} 个已连接</span><span>{servers.reduce((sum, s) => sum + s.tool_count, 0)} 个工具</span>
+        <span className="ml-auto text-faint">新接入的工具默认需要审批</span>
+      </div>
+      <div className="mt-6">
         {loading ? (
           <div className="flex justify-center py-4">
             <Loader2 size={15} className="animate-spin text-faint" />
@@ -223,9 +227,9 @@ export default function McpSection() {
             </p>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="grid gap-4 xl:grid-cols-2">
             {servers.map((s) => (
-              <div key={s.id} className="rounded-lg border border-line bg-panel2/30 px-3.5 py-3 transition-colors hover:border-line2">
+              <div key={s.id} className="rounded-xl border border-line bg-panel px-5 py-5 transition-colors hover:border-line2">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[12.5px] font-medium">{s.name}</span>
                   {statusChip(s)}
@@ -233,7 +237,7 @@ export default function McpSection() {
                   {!s.enabled && <span className="chip text-faint">已停用</span>}
                   <div className="ml-auto flex items-center gap-2">
                     <button
-                      className="btn-ghost px-2 py-1 text-[11px]"
+                      className="btn px-2 py-1 text-[11px] text-muted hover:bg-panel2 hover:text-ink"
                       onClick={() => test(s)}
                       disabled={testing === s.id}
                     >
@@ -247,7 +251,7 @@ export default function McpSection() {
                     <button className="text-[11.5px] text-muted hover:text-ink" onClick={() => openEdit(s)}>
                       编辑
                     </button>
-                    <button className="text-faint hover:text-danger" onClick={() => remove(s)}>
+                    <button aria-label={`删除服务${s.name}`} className="icon-btn hover:text-danger" onClick={() => remove(s)}>
                       <Trash2 size={13} />
                     </button>
                   </div>

@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, Loader2 } from "lucide-react";
+import { ArrowRight, Eye, EyeOff, Loader2, LockKeyhole } from "lucide-react";
 import { GithubMark, GoogleMark } from "@/components/ui/BrandIcons";
 import AuthMarketing from "@/components/AuthMarketing";
 import { LogoMark } from "@/components/ui/Logo";
@@ -13,6 +13,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   // ACC-08：从重置密码页跳回来时给一条成功提示（用 location 读，避免整页套 Suspense）
@@ -33,6 +34,7 @@ export default function LoginPage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setErr("");
     setLoading(true);
     try {
@@ -54,38 +56,36 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="grid min-h-screen lg:grid-cols-[1.05fr_1fr]">
+    <div className="auth-entry grid min-h-dvh lg:grid-cols-[minmax(0,1.06fr)_minmax(0,1fr)]">
       <AuthMarketing
         title={
           <>
-            把多步骤工作
+            一个目标，
             <br />
-            交给一支 AI 团队
+            一支 AI 团队。
           </>
         }
-        description="总指挥拆解任务，子 Bot 在各自线程里执行，过程在同一个群聊里可见。高风险动作会停下来等你审批。"
+        description="把繁复的工作交给团队。从拆解任务到汇总结果，每一步都有分工，每一步都清晰可见。"
       />
 
-      <div className="relative flex items-center justify-center px-5 py-12">
-        <form onSubmit={submit} className="w-full max-w-[372px] animate-rise">
-          <div className="mb-7 flex items-center gap-2.5 lg:hidden">
-            <LogoMark size={30} />
-            <span className="font-mono text-[14px] font-semibold uppercase tracking-[0.08em]">Botly</span>
-          </div>
+      <main className="flex min-w-0 flex-col px-6 py-7 sm:px-10 lg:px-8 lg:py-5 xl:px-16">
+        <header className="flex min-h-10 items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5 lg:invisible"><LogoMark size={32} /><span className="text-[22px] font-semibold tracking-[-0.05em]">Botly</span></div>
+          {providers?.signup !== false && <Link href="/register" className="flex items-center gap-1.5 text-[12px] text-muted transition-colors hover:text-ink">创建账号<ArrowRight size={13} /></Link>}
+        </header>
+        <div className="flex flex-1 items-center justify-center py-12 sm:py-16 lg:py-10">
+        <form onSubmit={submit} className="w-full max-w-[380px] animate-rise" aria-labelledby="login-heading">
+          <div>
+            <p className="mb-3 text-[11px] font-medium tracking-[0.12em] text-faint">YOUR WORKSPACE, AWAITS.</p>
+            <h2 id="login-heading" className="text-[32px] font-semibold tracking-[-0.04em] sm:text-[36px]">欢迎回来</h2>
+            <p className="mt-3 text-[14px] leading-relaxed text-muted">登录 Botly，继续和你的团队一起工作。</p>
 
-          <div className="card p-6 md:p-7">
-            <div className="page-eyebrow">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              AUTH / SIGN IN
-            </div>
-            <h2 className="text-[26px] font-bold tracking-[-0.03em]">登录</h2>
-            <p className="mt-1.5 text-[12.5px] text-muted">使用邮箱与密码进入工作台</p>
-
-            <div className="mt-6 space-y-4">
+            <div className="mt-9 space-y-5">
               <div>
-                <label className="label">邮箱</label>
+                <label htmlFor="login-email" className="label mb-2 text-[13px] text-ink">邮箱地址</label>
                 <input
-                  className="field"
+                  id="login-email"
+                  className="field h-12 bg-panel2/50"
                   type="email"
                   required
                   value={email}
@@ -95,36 +95,28 @@ export default function LoginPage() {
                 />
               </div>
               <div>
-                <label className="label">密码</label>
-                <input
-                  className="field"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="至少 8 位"
-                  autoComplete="current-password"
-                />
-                <Link href="/forgot-password" className="mt-1.5 inline-block text-[11.5px] text-accent hover:underline">
-                  忘记密码？
-                </Link>
+                <div className="mb-2 flex items-center justify-between gap-3"><label htmlFor="login-password" className="label mb-0 text-[13px] text-ink">密码</label><Link href="/forgot-password" className="text-[12px] text-muted hover:text-ink hover:underline">忘记密码？</Link></div>
+                <div className="relative">
+                  <input id="login-password" className="field h-12 bg-panel2/50 pr-12" type={showPassword ? "text" : "password"} required value={password} onChange={e => setPassword(e.target.value)} placeholder="输入你的密码" autoComplete="current-password" />
+                  <button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)} className="icon-btn absolute inset-y-0 right-2 my-auto">{showPassword ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                </div>
               </div>
             </div>
 
             {resetDone && !err && (
-              <div className="mt-4 rounded-lg border border-ok/35 bg-ok/10 px-3 py-2 text-[12px] text-ok">
+              <div role="status" className="mt-4 rounded-lg border border-ok/35 bg-ok/10 px-3 py-2 text-[12px] text-ok">
                 密码已重置，请用新密码登录。
               </div>
             )}
 
             {(oauthError || err) && (
-              <div className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+              <div role="alert" className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
                 {oauthError || err}
               </div>
             )}
 
-            <button className="btn-primary mt-6 w-full py-2.5" disabled={loading}>
-              {loading ? <Loader2 size={15} className="animate-spin" /> : <>登录 <ArrowRight size={15} /></>}
+            <button type="submit" className="btn-primary mt-7 h-12 w-full text-[14px]" disabled={loading}>
+              {loading ? <><Loader2 size={16} className="animate-spin" />正在登录…</> : <>进入工作台 <ArrowRight size={16} className="ml-1" /></>}
             </button>
 
             {(providers?.google || providers?.github) && (
@@ -160,14 +152,16 @@ export default function LoginPage() {
             )}
           </div>
 
-          <p className="mt-5 text-center text-[12.5px] text-muted">
+          {providers?.signup !== false && <p className="mt-7 text-center text-[12px] text-muted">
             还没有账号？
             <Link href="/register" className="ml-1 font-medium text-accent hover:underline">
               用邀请码注册
             </Link>
-          </p>
+          </p>}
         </form>
-      </div>
+        </div>
+        <footer className="flex flex-wrap items-center justify-between gap-3 text-[10px] text-faint"><span>© {new Date().getFullYear()} Botly</span><span className="flex items-center gap-1.5"><LockKeyhole size={11} />你的工作空间，由你掌控</span></footer>
+      </main>
     </div>
   );
 }

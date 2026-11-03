@@ -1,5 +1,14 @@
 import { toast } from "./ui";
 
+export const NOTIFICATIONS_CHANGED_EVENT = "botly:notifications-changed";
+export type NotificationCountChange = { unreadCount?: number; readCount?: number };
+
+function notifyNotificationChange(detail: NotificationCountChange) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent<NotificationCountChange>(NOTIFICATIONS_CHANGED_EVENT, { detail }));
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -13,14 +22,15 @@ export function detailText(detail: unknown): string {
   if (typeof detail === "string") return detail.trim();
   if (Array.isArray(detail)) {
     return detail
-      .map((d: any) => (typeof d === "string" ? d : d?.msg || ""))
+      .map(detailText)
       .filter(Boolean)
       .join("；");
   }
   if (detail && typeof detail === "object") {
-    const obj = detail as any;
-    for (const key of ["msg", "message", "detail"]) {
-      if (typeof obj[key] === "string" && obj[key].trim()) return obj[key].trim();
+    const obj = detail as Record<string, unknown>;
+    for (const key of ["detail", "msg", "message"]) {
+      const text = detailText(obj[key]);
+      if (text) return text;
     }
   }
   return "";
@@ -28,15 +38,18 @@ export function detailText(detail: unknown): string {
 
 /** 统一取错误文案：优先后端 detail，其次 Error.message，最后兜底。 */
 export function errText(e: unknown, fallback = "操作失败，请稍后重试"): string {
-  if (e instanceof ApiError && e.message) return e.message;
-  if (typeof e === "string" && e.trim()) return e;
-  const message = (e as any)?.message;
+  if (typeof e === "string" && e.trim()) return e.trim();
+  const error = e as { detail?: unknown; message?: unknown } | null | undefined;
+  const detail = detailText(error?.detail);
+  if (detail) return detail;
+  const message = error?.message;
   if (typeof message === "string" && message.trim()) {
+    if (e instanceof ApiError) return message.trim();
     // 浏览器把网络层的失败暴露成英文 TypeError，对用户没意义
     if (/^(Failed to fetch|Load failed|NetworkError)/i.test(message)) {
       return "网络请求失败，请检查连接或稍后重试";
     }
-    return message;
+    return message.trim();
   }
   return fallback;
 }
@@ -56,7 +69,8 @@ async function readError(res: Response, fallback: string): Promise<string> {
   }
 }
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** JSON、上传和下载共用同一套错误解析与登录失效处理。 */
+async function request(path: string, init: RequestInit = {}, fallback?: string): Promise<Response> {
   // FormData 由浏览器自己带 boundary，不能手动指定 Content-Type
   const isForm = typeof FormData !== "undefined" && init.body instanceof FormData;
   let res: Response;
@@ -70,27 +84,34 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
       },
       credentials: "same-origin",
     });
-  } catch (e) {
+  } catch {
     const message = "网络请求失败，请检查连接或稍后重试";
     toast(message, "error");
     throw new ApiError(0, message);
   }
-  if (res.status === 401) {
-    if (typeof window !== "undefined" && !location.pathname.startsWith("/login")) {
-      location.href = "/login";
-    }
-    throw new ApiError(401, "未登录");
-  }
   if (!res.ok) {
-    // 5xx 多半不是用户操作的问题：后端没起来 / 代理连不上，给一句能排查的提示
-    const fallback =
-      res.status >= 500
+    // 所有状态码（含 401）都先读取 detail，不能把账号密码错误覆盖成“未登录”。
+    const message = await readError(res, fallback || (
+      res.status === 401
+        ? "未登录，请重新登录"
+        : res.status >= 500
         ? `服务暂时不可用（${res.status}），请确认后端已启动后重试`
-        : `请求失败（${res.status}）`;
-    const detail = await readError(res, fallback);
-    toast(detail, "error");
-    throw new ApiError(res.status, detail);
+        : `请求失败（${res.status}）`
+    ));
+    toast(message, "error");
+    if (res.status === 401 && path !== "/auth/login" && typeof window !== "undefined") {
+      const publicPages = ["/login", "/register", "/forgot-password", "/reset-password", "/verify-email"];
+      if (!publicPages.some((page) => location.pathname === page || location.pathname.startsWith(`${page}/`))) {
+        location.href = "/login";
+      }
+    }
+    throw new ApiError(res.status, message);
   }
+  return res;
+}
+
+async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await request(path, init);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -159,15 +180,10 @@ export const api = {
   uploadImage: async (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    const res = await fetch("/api/uploads", {
+    const res = await request("/uploads", {
       method: "POST",
       body: fd,
-      credentials: "same-origin",
-      headers: { "X-Botly-Client": "web" },
-    });
-    if (!res.ok) {
-      throw new ApiError(res.status, await readError(res, "上传失败"));
-    }
+    }, "上传失败");
     return (await res.json()) as { id: string; url: string };
   },
 
@@ -293,6 +309,11 @@ export const api = {
 
   // 群聊
   chats: () => req<import("./types").ChatSummary[]>("/chats"),
+  chatTemplates: () => req<import("./types").ChatTemplate[]>("/chats/templates"),
+  createChatFromTemplate: (template_id: string) =>
+    req<import("./types").Chat & { created_bot_ids: string[]; model_setup_required: boolean }>(
+      "/chats/from-template", { method: "POST", body: JSON.stringify({ template_id }) }
+    ),
   chat: (id: string) => req<import("./types").Chat>(`/chats/${id}`),
   task: (id: string) => req<import("./types").Task>(`/tasks/${id}`),
   createChat: (body: any) =>
@@ -310,12 +331,9 @@ export const api = {
   uploadChatFile: async (chatId: string, file: File) => {
     const body = new FormData();
     body.append("file", file);
-    const response = await fetch(`/api/chats/${chatId}/files`, {
-      method: "POST", credentials: "same-origin", headers: { "X-Botly-Client": "web" }, body,
-    });
-    if (!response.ok) {
-      throw new ApiError(response.status, await readError(response, "文件上传失败"));
-    }
+    const response = await request(`/chats/${chatId}/files`, {
+      method: "POST", body,
+    }, "文件上传失败");
     return await response.json() as import("./types").ChatFile;
   },
   messages: (chatId: string, params: { before?: number; limit?: number; thread_id?: string; around?: string } = {}) => {
@@ -366,21 +384,11 @@ export const api = {
   chatFiles: (chatId: string) => req<import("./types").ChatFile[]>(`/chats/${chatId}/files`),
   /** 15.2：导出主线程为 Markdown，返回 Blob 供前端触发下载 */
   exportChat: async (chatId: string) => {
-    const res = await fetch(`/api/chats/${chatId}/export`, {
-      headers: { "X-Botly-Client": "web" },
-      credentials: "same-origin",
-    });
-    if (!res.ok) {
-      throw new ApiError(res.status, await readError(res, "导出失败"));
-    }
+    const res = await request(`/chats/${chatId}/export`, {}, "导出失败");
     return await res.blob();
   },
   fileContent: async (fileId: string) => {
-    const res = await fetch(`/api/files/${fileId}/content`, {
-      headers: { "X-Botly-Client": "web" },
-      credentials: "same-origin",
-    });
-    if (!res.ok) throw new ApiError(res.status, await readError(res, "无法读取文件"));
+    const res = await request(`/files/${fileId}/content`, {}, "无法读取文件");
     return res.text();
   },
 
@@ -433,16 +441,26 @@ export const api = {
     }),
 
   // 记忆
-  memories: (params: { scope?: string; bot_id?: string } = {}) => {
+  memories: (params: { scope?: string; bot_id?: string; q?: string } = {}) => {
     const q = new URLSearchParams();
     if (params.scope) q.set("scope", params.scope);
     if (params.bot_id) q.set("bot_id", params.bot_id);
+    if (params.q) q.set("q", params.q);
     return req<{ memories: import("./types").Memory[]; injected_length: number; total_length: number; truncated: boolean; limit: number }>(
       `/memories?${q.toString()}`
     );
   },
   memoryStats: () =>
     req<{ limit: number; bots: any[] }>("/memories/stats"),
+  /** 疑似重复记忆对，供整理合并 */
+  memoryDuplicates: (params: { scope?: string; bot_id?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.scope) q.set("scope", params.scope);
+    if (params.bot_id) q.set("bot_id", params.bot_id);
+    return req<{ duplicates: { a: import("./types").Memory; b: import("./types").Memory; score: number }[]; count: number }>(
+      `/memories/duplicates?${q.toString()}`
+    );
+  },
   createMemory: (body: any) =>
     req<import("./types").Memory>("/memories", { method: "POST", body: JSON.stringify(body) }),
   patchMemory: (id: string, body: any) =>
@@ -458,13 +476,19 @@ export const api = {
 
   // 通知
   notifications: () => req<{ items: import("./types").Notification[]; unread_count: number }>("/notifications"),
-  readNotifications: (body: { ids?: string[]; all?: boolean }) =>
-    req<{ ok: boolean; count: number }>("/notifications/read", {
+  readNotifications: async (body: { ids?: string[]; all?: boolean }) => {
+    const result = await req<{ ok: boolean; count: number }>("/notifications/read", {
       method: "POST",
       body: JSON.stringify(body),
-    }),
-  clearNotifications: () =>
-    req<{ ok: boolean; count: number }>("/notifications", { method: "DELETE" }),
+    });
+    if (result.ok) notifyNotificationChange(body.all ? { unreadCount: 0 } : { readCount: result.count });
+    return result;
+  },
+  clearNotifications: async () => {
+    const result = await req<{ ok: boolean; count: number }>("/notifications", { method: "DELETE" });
+    if (result.ok) notifyNotificationChange({ unreadCount: 0 });
+    return result;
+  },
   /** NTF-06：Web Push 配置与订阅管理 */
   pushConfig: () => req<{ enabled: boolean; public_key: string }>("/push/config"),
   pushSubscriptions: () =>

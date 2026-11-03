@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, JetBrains_Mono } from "next/font/google";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/lib/ui";
 import { ConfirmProvider } from "@/components/ui/Confirm";
 import GlobalError from "@/components/ui/GlobalError";
 
-const sans = Space_Grotesk({
+const sans = Inter({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
@@ -27,7 +27,7 @@ const themeScript = `
 (function(){
   try{
     var t = localStorage.getItem('botly-theme');
-    if(!t){ t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; }
+    if(!t){ t = 'light'; }
     if(t === 'light') document.documentElement.classList.add('light');
   }catch(e){}
 })();

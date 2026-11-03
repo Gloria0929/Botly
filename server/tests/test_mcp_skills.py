@@ -298,6 +298,16 @@ def test_skill_prompt_and_tools_merge(client, invite, monkeypatch):
     async def fake_stream_chat(**kw):
         seen["system"] = kw["messages"][0]["content"]
         seen["tools"] = {t["function"]["name"] for t in kw["tools"]}
+        results = [m["content"] for m in kw["messages"] if m["role"] == "tool"]
+        if not results:
+            yield {"type": "done", "content": "", "tool_calls": [{
+                "id": "read-cleanup-skill", "type": "function",
+                "function": {"name": "skill_file_read", "arguments": json.dumps(
+                    {"path": "清理规范/SKILL.md"}, ensure_ascii=False
+                )},
+            }]}
+            return
+        assert skill["prompt"] in results[-1]
         yield {"type": "done", "content": "好的", "tool_calls": []}
 
     monkeypatch.setattr(orchestrator, "stream_chat", fake_stream_chat)
@@ -308,7 +318,8 @@ def test_skill_prompt_and_tools_merge(client, invite, monkeypatch):
     wait_status(client, run_id, {"completed"})
     assert "已启用的技能" in seen["system"]
     assert "清理规范" in seen["system"]
-    assert "先列出文件，再删除不再需要的产物" in seen["system"]
+    assert "清理规范/SKILL.md" in seen["system"]
+    assert skill["prompt"] not in seen["system"]
     assert "file_delete" in seen["tools"], "技能里的工具要并入 Bot 可用工具"
 
     assert client.delete(f"/api/skills/{skill['id']}").status_code == 200
@@ -372,19 +383,24 @@ def test_import_zip_skill_and_read_reference(client, invite, monkeypatch):
         turn["n"] += 1
         names = {t["function"]["name"] for t in kw["tools"]}
         assert "skill_file_read" in names, "导入技能带参考文件时要自动提供读取工具"
-        assert "先看表头" in kw["messages"][0]["content"]
-        if turn["n"] == 1:
+        assert "先看表头" not in kw["messages"][0]["content"]
+        if turn["n"] <= 2:
+            path = "数据清洗/SKILL.md" if turn["n"] == 1 else "数据清洗/reference/checklist.md"
+            if turn["n"] == 2:
+                assert any(
+                    m["role"] == "tool" and "先看表头" in m["content"] for m in kw["messages"]
+                )
             yield {
                 "type": "done",
                 "content": "",
                 "tool_calls": [
                     {
-                        "id": "call-skill-file",
+                        "id": f"call-skill-file-{turn['n']}",
                         "type": "function",
                         "function": {
                             "name": "skill_file_read",
                             "arguments": json.dumps(
-                                {"path": "数据清洗/reference/checklist.md"}, ensure_ascii=False
+                                {"path": path}, ensure_ascii=False
                             ),
                         },
                     }

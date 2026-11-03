@@ -80,7 +80,7 @@ export default function Composer({
   };
 
   return (
-    <div className="border-t border-line bg-panel px-4 py-3.5 sm:px-6">
+    <div className="chat-composer px-4 pb-5 pt-3 sm:px-6">
       <div className="w-full">
         {disabledReason && (
           <div className="mb-2 rounded-lg border border-warn/30 bg-warn/[0.08] px-3 py-1.5 text-[11.5px] text-warn">
@@ -145,9 +145,10 @@ export default function Composer({
             </div>
           )}
 
-          <div className="flex items-end gap-2 rounded-lg border border-line bg-panel2 px-3 py-2 transition-colors focus-within:border-accent/70 focus-within:ring-2 focus-within:ring-accent/10">
+          <div className="chat-composer-input flex flex-col gap-3 border border-line px-4 py-3 transition-colors">
             <textarea
               ref={ta}
+              aria-label="消息内容"
               rows={1}
               value={text}
               onChange={(e) => {
@@ -190,10 +191,11 @@ export default function Composer({
               placeholder={
                 running
                   ? "执行中：可输入补充，总指挥会在下一步前读到…"
-                  : "交代任务，Enter 发送，Shift+Enter 换行，@ 指定成员"
+                  : "描述你的任务，或 @ 一位成员…"
               }
-              className="max-h-40 min-h-[24px] flex-1 resize-none bg-transparent text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-faint"
+              className="max-h-40 min-h-[48px] w-full resize-none bg-transparent text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-faint"
             />
+            <div className="flex w-full items-center gap-1.5 border-t border-line/60 pt-2">
             <button
               onClick={() => fileInput.current?.click()}
               disabled={!onUpload || uploading}
@@ -214,6 +216,8 @@ export default function Composer({
             >
               <AtSign size={15} />
             </button>
+            <span className="ml-1 mr-auto hidden text-[10px] text-faint sm:block">Enter 发送 · Shift + Enter 换行</span>
+            <span className="mr-auto sm:hidden" />
             {running ? (
               // CHT-03：执行进行中时发送按钮变为「停止」；插话改由 Enter 发送
               <button
@@ -227,16 +231,17 @@ export default function Composer({
               <button
                 onClick={send}
                 disabled={(!text.trim() && !attachments.length) || !!disabledReason || uploading}
-                className="mb-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-accentink transition-opacity disabled:opacity-30"
+                className="mb-0.5 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accentink transition-opacity disabled:opacity-30"
                 title="发送"
               >
                 <ArrowUp size={15} />
               </button>
             )}
+            </div>
           </div>
         </div>
 
-        <div className="mt-1.5 flex items-center gap-3 px-0.5 text-[10.5px] text-faint">
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 px-0.5 text-[10.5px] text-faint">
           {running ? (
             <>
               <span className="flex items-center gap-1">

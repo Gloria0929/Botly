@@ -108,6 +108,10 @@ export function PlanCard({
                     onChange={(e) => {
                       const next = [...steps];
                       next[i] = { ...s, title: e.target.value };
+                      next.forEach((step, index) => {
+                        if (index !== i && step.depends_on) next[index] = { ...step,
+                          depends_on: step.depends_on.map((title) => title === s.title ? e.target.value : title) };
+                      });
                       setSteps(next);
                     }}
                   />
@@ -129,7 +133,8 @@ export function PlanCard({
                     />
                     <button
                       className="btn-ghost shrink-0 px-2"
-                      onClick={() => setSteps(steps.filter((_, idx) => idx !== i))}
+                      onClick={() => setSteps(steps.filter((_, idx) => idx !== i).map((step) => ({ ...step,
+                        ...(step.depends_on ? { depends_on: step.depends_on.filter((title) => title !== s.title) } : {}) })))}
                     >
                       <X size={13} />
                     </button>
@@ -150,6 +155,9 @@ export function PlanCard({
                     <span className="chip shrink-0">{s.bot}</span>
                     {s.expected && <span className="truncate">产出：{s.expected}</span>}
                   </div>
+                  {s.depends_on && <div className="mt-1 text-[10.5px] leading-relaxed text-faint">
+                    {s.depends_on.length ? `等待：${s.depends_on.join("、")}` : "无前置依赖"}
+                  </div>}
                 </>
               )}
             </div>
@@ -163,7 +171,8 @@ export function PlanCard({
               onClick={() =>
                 setSteps([
                   ...steps,
-                  { title: "", bot: members[0]?.name || "", expected: "" },
+                  { title: "", bot: members[0]?.name || "", expected: "",
+                    ...(steps.some((step) => step.depends_on) ? { depends_on: steps.map((step) => step.title) } : {}) },
                 ])
               }
             >
@@ -353,19 +362,21 @@ export function TaskSummaryLine({
   );
 }
 
-/** 在群聊消息流里原地展开的子任务详情，内容与任务面板一致。 */
+/** 在群聊消息流里展开子任务或主 Agent 的执行详情。 */
 export function TaskInlineDetail({
   msg,
   live,
   open,
   onToggle,
-  tokensFallback = 0,
+  tokensFallback,
+  onOpenProcess,
 }: {
   msg: Message;
   live?: Task;
   open: boolean;
   onToggle: () => void;
   tokensFallback?: number;
+  onOpenProcess?: () => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
   const instruction = live?.instruction || msg.meta?.delegation_instruction || "";
@@ -411,13 +422,23 @@ export function TaskInlineDetail({
           )}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-faint">
             {st && <span className={st.cls}>{st.label}</span>}
-            <span className="flex items-center gap-1"><Coins size={10} /> {num(live?.tokens_used || tokensFallback)} tokens</span>
+            <span className="flex items-center gap-1"><Coins size={10} />
+              {live?.tokens_used !== undefined || tokensFallback !== undefined
+                ? `${num(live?.tokens_used ?? tokensFallback ?? 0)} tokens${msg.meta?.task_id ? "" : " · 本次执行累计"}`
+                : "用量统计中…"}
+            </span>
             {!!live?.attempt && <span>第 {live.attempt} 次执行</span>}
             {live?.started_at && <span className="flex items-center gap-1"><Clock3 size={10} /> {elapsedText(live, now) || "—"}</span>}
           </div>
-          <div className="flex items-center gap-1 text-[10.5px] text-faint">
-            <Info size={10} /> 完整执行过程（含工具调用）在右侧「任务」面板查看
-          </div>
+          {onOpenProcess ? (
+            <button onClick={onOpenProcess} className="flex items-center gap-1 text-[11px] text-accent hover:underline">
+              <Terminal size={11} />查看完整执行过程
+            </button>
+          ) : (
+            <div className="flex items-center gap-1 text-[10.5px] text-faint">
+              <Info size={10} /> 完整执行过程（含工具调用）在右侧「任务」面板查看
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -685,11 +706,11 @@ function ToolArguments({ raw }: { raw: string }) {
 /* ------------------------------------------------------------------ */
 /* 系统提示 / 交接 / 限额                                               */
 /* ------------------------------------------------------------------ */
-export function SystemLine({ text }: { text: string }) {
+export function SystemLine({ text, centered = false }: { text: string; centered?: boolean }) {
   return (
-    <div className="flex items-center gap-2 py-0.5 text-[11.5px] text-faint">
-      <CircleDot size={10} />
-      <span className="whitespace-pre-wrap">{text}</span>
+    <div className={`flex items-center gap-2 py-0.5 text-[11.5px] text-faint ${centered ? "justify-center text-center" : ""}`}>
+      <CircleDot size={10} className="shrink-0" />
+      <span className="min-w-0 whitespace-pre-wrap break-words">{text}</span>
     </div>
   );
 }

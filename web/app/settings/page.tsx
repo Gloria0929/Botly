@@ -350,9 +350,15 @@ export default function SettingsPage() {
           <PageHeader
             eyebrow="SYSTEM / SETTINGS"
             title="设置"
-            description="模型费用由你自带的 Key 承担，平台不提供统一额度。"
+            description="管理模型接入、执行偏好与账号，让工作空间按你的方式运转。"
           />
 
+          <div className="settings-layout mt-3">
+            <nav aria-label="设置目录" className="settings-index">
+              <p className="mb-3 px-3 text-[11px] font-medium text-faint max-lg:hidden">工作空间设置</p>
+              {["模型厂商", "已添加的厂商", "默认限额", "网页搜索", "浏览器通知", "账号", "危险操作"].map((title, i) => <a key={title} href={`#setting-${title}`} className="mb-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-[12px] text-muted transition-colors hover:bg-panel2 hover:text-ink"><span className="font-mono text-[10px] text-faint">{String(i + 1).padStart(2, "0")}</span>{title}</a>)}
+            </nav>
+            <div className="min-w-0">
           {/* ACC-06：未配置模型接入时的引导。配好之前发起执行会被后端拒绝，
               与其让用户在建群聊时撞到 409，不如在这里说清楚下一步做什么。 */}
           {!providersLoading && !providers.length && (
@@ -417,9 +423,12 @@ export default function SettingsPage() {
                     <Avatar value={p.logo} color={p.color} size={24} alt={p.vendor_name} />
                     <span className="text-[12.5px] font-medium">{p.name || p.vendor_name}</span>
                     <span
+                      role="img"
+                      aria-label={p.status === "ok" ? "模型接入正常" : p.status === "error" ? "模型接入异常" : "模型接入待检测"}
+                      title={p.status === "ok" ? "模型接入正常" : p.status === "error" ? "模型接入异常" : "模型接入待检测"}
                       className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                         p.status === "ok"
-                          ? "bg-ok"
+                          ? "bg-[#22c55e]"
                           : p.status === "error"
                             ? "bg-danger"
                             : "bg-faint"
@@ -778,6 +787,7 @@ export default function SettingsPage() {
                 className="field"
                 type="password"
                 placeholder="当前密码"
+                aria-label="当前密码"
                 value={pwd.current}
                 onChange={(e) => setPwd({ ...pwd, current: e.target.value })}
               />
@@ -785,6 +795,7 @@ export default function SettingsPage() {
                 className="field"
                 type="password"
                 placeholder="新密码（至少 8 位）"
+                aria-label="新密码"
                 value={pwd.next}
                 onChange={(e) => setPwd({ ...pwd, next: e.target.value })}
               />
@@ -836,6 +847,8 @@ export default function SettingsPage() {
           <p className="mt-8 text-[10.5px] leading-relaxed text-faint">
             Botly v1.0 · 数据与密钥按账号隔离 · 调用日志保留 30 天
           </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1423,15 +1436,15 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-7">
-      <div className="mb-2.5 flex items-end gap-3">
+    <section id={`setting-${title}`} className="settings-section mb-6 overflow-hidden rounded-xl border border-line bg-panel">
+      <div className="flex items-start gap-4 border-b border-line px-5 py-5 sm:px-6">
         <div>
           <h2 className="section-title">{title}</h2>
-          {desc && <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{desc}</p>}
+          {desc && <p className="mt-1.5 text-[12px] leading-relaxed text-muted">{desc}</p>}
         </div>
         <div className="ml-auto">{action}</div>
       </div>
-      <div className="card p-3.5">{children}</div>
+      <div className="p-5 sm:p-6">{children}</div>
     </section>
   );
 }

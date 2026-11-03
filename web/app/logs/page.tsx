@@ -15,6 +15,7 @@ const LEVELS = [
   { value: "INFO", label: "INFO" },
   { value: "WARNING", label: "WARNING" },
   { value: "ERROR", label: "ERROR" },
+  { value: "CRITICAL", label: "CRITICAL" },
 ];
 
 const LEVEL_CLS: Record<string, string> = {
@@ -46,21 +47,25 @@ export default function LogsPage() {
   const [auto, setAuto] = useState(true);
   const [limit, setLimit] = useState(PAGE);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const requestSequence = useRef(0);
 
   const load = useCallback(
     async (nextLimit = limit, silent = false) => {
+      const sequence = ++requestSequence.current;
       if (!silent) setLoading(true);
       try {
         const page = await api.logs({ level, module, q, request_id: requestId, run_id: runId, limit: nextLimit });
-        setData(page);
+        if (sequence === requestSequence.current) setData(page);
       } catch (e: any) {
-        if (!silent) toastError(e);
+        if (sequence === requestSequence.current && !silent) toastError(e);
       } finally {
-        if (!silent) setLoading(false);
+        if (sequence === requestSequence.current) setLoading(false);
       }
     },
     [level, module, q, requestId, runId, limit]
   );
+
+  useEffect(() => () => { requestSequence.current += 1; }, []);
 
   useEffect(() => {
     setLimit(PAGE);
@@ -89,8 +94,8 @@ export default function LogsPage() {
   }, [auto, limit, level, module, q, requestId, runId]);
 
   const items = useMemo(
-    () => (data?.items || []).filter((r) => !isDbLog(r.module)),
-    [data]
+    () => (data?.items || []).filter((r) => !isDbLog(r.module) && (!level || r.level === level)),
+    [data, level]
   );
   // 后端已折叠数据库语句；前端再兜一层，保证接口没重启时也不会看到 SQL 刷屏
   const hiddenSql = Math.max(
@@ -128,10 +133,22 @@ export default function LogsPage() {
             }
             actions={
               <>
-                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11.5px] text-muted">
-                  <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={auto}
+                  aria-label="自动刷新"
+                  onClick={() => setAuto((value) => !value)}
+                  className="flex min-h-10 select-none items-center gap-2.5 rounded-lg px-2 text-[12px] text-muted transition-colors hover:bg-panel2 hover:text-ink"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors duration-200 ${auto ? "border-accent bg-accent" : "border-line2 bg-panel3"}`}
+                  >
+                    <span className={`absolute left-0.5 h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-200 ${auto ? "translate-x-4" : "translate-x-0"}`} />
+                  </span>
                   自动刷新
-                </label>
+                </button>
                 <button onClick={() => load(limit)} title="刷新" className="icon-btn">
                   {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                 </button>
@@ -149,7 +166,7 @@ export default function LogsPage() {
 
           {/* 筛选 */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-[9px] border border-line bg-panel px-2.5 transition-colors focus-within:border-accent/70 focus-within:ring-2 focus-within:ring-accent/10">
+            <div className="flex items-center gap-1.5 rounded-[9px] border border-line bg-panel px-2.5 transition-colors">
               <Search size={13} className="text-faint" />
               <input
                 value={q}
@@ -193,7 +210,7 @@ export default function LogsPage() {
               </button>
             )}
             <div className="ml-auto flex items-center gap-2 text-[10.5px] text-faint">
-              {["ERROR", "WARNING", "INFO", "DEBUG"].map((lv) =>
+              {["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"].map((lv) =>
                 counts[lv] ? (
                   <span key={lv} className={LEVEL_CLS[lv]}>
                     {lv} {counts[lv]}

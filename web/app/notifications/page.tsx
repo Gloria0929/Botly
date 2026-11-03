@@ -26,6 +26,7 @@ export default function NotificationsPage() {
   const [unread, setUnread] = useState(0);
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState(false);
+  const [marking, setMarking] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -57,8 +58,17 @@ export default function NotificationsPage() {
   }, []);
 
   const markAll = async () => {
-    await api.readNotifications({ all: true }).catch((e) => toastError(e, "标记已读失败"));
-    load();
+    setMarking(true);
+    try {
+      await api.readNotifications({ all: true });
+      setItems((prev) => prev.map((item) => ({ ...item, read: true })));
+      setUnread(0);
+      load();
+    } catch (e) {
+      toastError(e, "标记已读失败");
+    } finally {
+      setMarking(false);
+    }
   };
 
   /** 清空通知：只删通知记录，执行记录与群聊消息不受影响 */
@@ -93,13 +103,13 @@ export default function NotificationsPage() {
             description="审批、提问、执行完成与失败都会出现在这里。"
             actions={
               <>
-                <button className="btn-ghost" onClick={markAll} disabled={!unread}>
-                  <CheckCheck size={13} /> 全部已读
+                <button className="btn-ghost" onClick={markAll} disabled={!unread || marking || clearing}>
+                  {marking ? <Loader2 size={13} className="animate-spin" /> : <CheckCheck size={13} />} 全部已读
                 </button>
                 <button
                   className="btn-ghost hover:border-danger/40 hover:text-danger"
                   onClick={clearAll}
-                  disabled={!items.length || clearing}
+                  disabled={!items.length || clearing || marking}
                   title="清空全部通知"
                 >
                   {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} 清空

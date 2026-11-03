@@ -9,7 +9,6 @@ export default function PageHeader({
   description,
   actions,
   badge,
-  eyebrow,
 }: {
   title: React.ReactNode;
   description?: React.ReactNode;
@@ -18,14 +17,8 @@ export default function PageHeader({
   eyebrow?: string;
 }) {
   return (
-    <header className="border-b border-line/70 pb-5">
-      {eyebrow && (
-        <div className="page-eyebrow">
-          <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-          {eyebrow}
-        </div>
-      )}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <header className="page-header">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="page-title">{title}</h1>

@@ -46,10 +46,10 @@ export default {
         xl2: "14px",
       },
       boxShadow: {
-        card: "0 1px 2px rgba(0,0,0,.35)",
-        lift: "0 1px 2px rgba(0,0,0,.35)",
-        pop: "0 18px 48px -16px rgba(0,0,0,.7), 0 2px 8px rgba(0,0,0,.4)",
-        glow: "0 0 0 1px rgba(255,92,92,.2), 0 8px 28px -14px rgba(255,92,92,.35)",
+        card: "0 2px 8px -2px rgb(25 25 25 / 10%)",
+        lift: "0 2px 8px -2px rgb(25 25 25 / 10%)",
+        pop: "0 20px 60px -16px rgb(25 25 25 / 28%), 0 2px 8px rgb(25 25 25 / 8%)",
+        glow: "0 0 0 1px rgb(var(--accent-rgb) / .2), 0 8px 28px -14px rgb(var(--accent-rgb) / .2)",
       },
       keyframes: {
         rise: {

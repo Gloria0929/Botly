@@ -167,7 +167,7 @@ class Bot(Base, TimestampMixin):
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     temperature: Mapped[float] = mapped_column(default=0.4)
     tools: Mapped[list] = mapped_column(JSON, default=list)
-    # 已启用的技能 id 列表（技能提供额外提示词与工具，运行时合并）
+    # 已启用的技能 id 列表（运行时提供目录，由智能体按任务加载正文）
     skills: Mapped[list] = mapped_column(JSON, default=list)
     is_supervisor_template: Mapped[bool] = mapped_column(Boolean, default=False)
     # BOT-06：停用后不再参与任何新执行（不能被派任务、不能被 @、不能当总指挥），
@@ -211,8 +211,8 @@ class McpServer(Base, TimestampMixin):
 class Skill(Base, TimestampMixin):
     """可复用的技能包：一段方法提示词 + 一组工具。
 
-    技能不直接执行，绑定到 Bot 后由编排器把提示词注入系统提示，
-    并把技能里的工具并入该 Bot 的可用工具（仍受工具自身的权限级别约束）。
+    技能不直接执行，绑定到 Bot 后由编排器提供名称与用途，智能体按需读取正文；
+    技能里的工具并入该 Bot 的可用工具（仍受工具自身的权限级别约束）。
     """
 
     __tablename__ = "skills"
@@ -392,6 +392,8 @@ class Memory(Base, TimestampMixin):
     bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(120), default="")
     content: Mapped[str] = mapped_column(Text, default="")
+    # 主题分类（如 偏好 / 约定 / 项目背景 / 事实），用于记忆页分组与筛选；空表示未分类
+    category: Mapped[str] = mapped_column(String(30), default="")
     # user = 用户在记忆页维护；bot = Bot 执行中通过 memory_save 自主写入（MEM-03 修订）
     source: Mapped[str] = mapped_column(String(20), default="user")
     # 写入时的执行 id：追溯来源，也用于「每次执行最多自动保存 N 条」的限额
@@ -414,6 +416,7 @@ class MemoryCandidate(Base, TimestampMixin):
     bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(120), default="")
     content: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(30), default="")
     status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
     # pending | accepted | rejected
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -15,7 +15,9 @@ BOT_TEMPLATES: list[dict] = [
         "system_prompt": (
             "你是一个多智能体团队的总指挥。你的职责是理解用户目标、判断复杂度、拆解任务、"
             "把子任务派给合适的成员，并在最后汇总成一份面向用户的完整回答。"
-            "你只对结果负责，不要假装完成子 Bot 的工作。"
+            "你负责协调和验收，只向成员说明目标、范围、用户约束与期望产出。"
+            "具体方法、步骤、工具与技能由成员自主选择；成员有疑问时澄清目标，不代替它决定做法。"
+            "不要假装完成子 Bot 的工作。"
         ),
         "tools": ["web_search", "web_read", "file_read", "file_list", "file_write"],
         "is_supervisor_template": True,

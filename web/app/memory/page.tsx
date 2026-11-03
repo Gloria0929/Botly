@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Brain, Check, Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { Brain, Check, Loader2, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import PageHeader from "@/components/ui/PageHeader";
 import Avatar from "@/components/ui/Avatar";
+import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
-import { api, toastError } from "@/lib/api";
+import { api, errText, toastError } from "@/lib/api";
 import type { Bot, Memory, MemoryCandidate } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
@@ -20,10 +21,20 @@ export default function MemoryPage() {
   const [totalLength, setTotalLength] = useState(0);
   const [truncated, setTruncated] = useState(false);
   const [stats, setStats] = useState<any[]>([]);
-  const [draft, setDraft] = useState({ title: "", content: "" });
+  const [duplicates, setDuplicates] = useState<{ a: Memory; b: Memory; score: number }[]>([]);
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [draft, setDraft] = useState({ title: "", content: "", category: "" });
+  const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", content: "" });
+  const [editDraft, setEditDraft] = useState({ title: "", content: "", category: "" });
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [formError, setFormError] = useState("");
+  const [editError, setEditError] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const editSavingRef = useRef(false);
   const confirm = useConfirm();
 
   useEffect(() => {
@@ -31,6 +42,12 @@ export default function MemoryPage() {
     api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     api.memoryCandidates().then((d) => setCandidates(d.candidates)).catch(() => {});
   }, []);
+
+  // 搜索防抖，避免每次按键都请求
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 250);
+    return () => clearTimeout(t);
+  }, [search]);
 
   const acceptCandidate = async (id: string) => {
     try {
@@ -56,7 +73,11 @@ export default function MemoryPage() {
   const load = () => {
     setLoading(true);
     api
-      .memories(tab === "shared" ? { scope: "shared" } : { scope: "bot", bot_id: tab })
+      .memories(
+        tab === "shared"
+          ? { scope: "shared", q: debounced || undefined }
+          : { scope: "bot", bot_id: tab, q: debounced || undefined }
+      )
       .then((d) => {
         setItems(d.memories);
         setLimit(d.limit);
@@ -67,34 +88,62 @@ export default function MemoryPage() {
       .catch((e) => toastError(e, "记忆加载失败"))
       .finally(() => setLoading(false));
   };
-  useEffect(load, [tab]);
+  useEffect(load, [tab, debounced]);
+
+  // 疑似重复：切换 tab 或删除后刷新
+  const loadDuplicates = () => {
+    api
+      .memoryDuplicates(tab === "shared" ? { scope: "shared" } : { scope: "bot", bot_id: tab })
+      .then((d) => setDuplicates(d.duplicates))
+      .catch(() => setDuplicates([]));
+  };
+  useEffect(loadDuplicates, [tab]);
 
   const add = async () => {
-    if (!draft.content.trim()) return toast("内容不能为空", "error");
+    if (savingRef.current) return;
+    if (!draft.content.trim()) { setFormError("请填写需要记住的内容。"); return; }
+    setFormError("");
+    savingRef.current = true;
+    setSaving(true);
     try {
       await api.createMemory({
         scope: tab === "shared" ? "shared" : "bot",
         bot_id: tab === "shared" ? null : tab,
-        title: draft.title,
-        content: draft.content,
+        title: draft.title.trim(),
+        content: draft.content.trim(),
+        category: draft.category,
       });
-      setDraft({ title: "", content: "" });
+      setDraft({ title: "", content: "", category: "" });
+      setAdding(false);
       toast("已添加", "ok");
       load();
       api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     } catch (e: any) {
+      setFormError(errText(e, "添加失败，请稍后重试"));
       toastError(e);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   };
 
   const saveEdit = async (id: string) => {
+    if (editSavingRef.current) return;
+    if (!editDraft.content.trim()) { setEditError("请填写需要记住的内容。"); return; }
+    setEditError("");
+    editSavingRef.current = true;
+    setEditSaving(true);
     try {
-      await api.patchMemory(id, editDraft);
+      await api.patchMemory(id, { ...editDraft, title: editDraft.title.trim(), content: editDraft.content.trim() });
       setEditing(null);
       load();
       api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     } catch (e: any) {
+      setEditError(errText(e, "保存失败，请稍后重试"));
       toastError(e);
+    } finally {
+      editSavingRef.current = false;
+      setEditSaving(false);
     }
   };
 
@@ -109,6 +158,7 @@ export default function MemoryPage() {
     try {
       await api.deleteMemory(id);
       load();
+      loadDuplicates();
       api.memoryStats().then((d) => setStats(d.bots)).catch(() => {});
     } catch (e: any) {
       toastError(e, "删除失败，请稍后重试");
@@ -123,11 +173,14 @@ export default function MemoryPage() {
         <div className="page">
           <PageHeader
             eyebrow="CONTEXT / MEMORY"
-            title="记忆"
-            description="共享记忆对所有 Bot 可见；私有记忆只注入到对应 Bot。Bot 执行中可以用 memory_save 把重要信息存进自己的私有记忆（每次执行最多 3 条）；执行结束后还会自动提取记忆候选，确认后才写入；共享记忆由你维护。"
+            title="团队记忆"
+            description="让团队记住重要的偏好、约定和项目背景，每次协作都能接续上下文。"
+            actions={<button className="btn-primary" onClick={() => setAdding(true)}><Plus size={14} />添加记忆</button>}
           />
 
-          <div className="segmented mt-5 flex-wrap">
+          <div className="memory-layout">
+          <nav className="memory-scopes" aria-label="记忆范围">
+            <p className="mb-3 px-2 text-[11px] font-medium text-faint max-md:hidden">记忆空间</p>
             <TabBtn active={tab === "shared"} onClick={() => setTab("shared")}>
               共享记忆
             </TabBtn>
@@ -136,6 +189,17 @@ export default function MemoryPage() {
                 <span className="inline-flex items-center gap-1"><Avatar value={b.avatar} size={14} />{b.name}</span>
               </TabBtn>
             ))}
+          </nav>
+          <div className="min-w-0">
+          <div className="relative">
+            <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
+            <input
+              className="field pl-9"
+              placeholder="搜索标题或内容…"
+              aria-label="搜索记忆"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
           </div>
 
           <div className="card mt-4 flex items-center gap-2.5 px-3.5 py-2.5">
@@ -172,6 +236,9 @@ export default function MemoryPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
                           {c.title && <div className="text-[12.5px] font-medium">{c.title}</div>}
+                          {c.category && (
+                            <span className="chip border-line text-faint">{c.category}</span>
+                          )}
                           <span className="chip border-line text-faint">
                             {c.scope === "bot"
                               ? `${bots.find((b) => b.id === c.bot_id)?.name || "Bot"} 的私有记忆`
@@ -203,38 +270,50 @@ export default function MemoryPage() {
             </div>
           )}
 
-          <div className="card mt-4 p-3.5">
-            <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted">
-              <Sparkles size={13} className="text-accent" /> 添加一条记忆
+          {duplicates.length > 0 && !debounced && (
+            <div className="mt-4">
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <Sparkles size={13} className="text-amber-500" />
+                <h2 className="text-[13px] font-medium">疑似重复记忆</h2>
+                <span className="text-[10.5px] text-faint">
+                  {duplicates.length} 组 · 内容高度相似，可删除其一
+                </span>
+              </div>
+              <div className="space-y-2">
+                {duplicates.map((d, i) => (
+                  <div key={i} className="rounded-lg border border-line bg-panel2/40 p-3">
+                    <div className="flex items-start gap-3">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="truncate text-[12px] text-muted">{d.a.content}</div>
+                        <div className="truncate text-[12px] text-muted">{d.b.content}</div>
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <span className="text-[10px] tabular-nums text-faint">
+                          相似 {Math.round(d.score * 100)}%
+                        </span>
+                        <button
+                          className="btn-ghost px-2 py-1 text-[11px]"
+                          onClick={() => remove(d.b.id)}
+                        >
+                          <Trash2 size={12} /> 删除下一条
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="mt-2.5 grid gap-2 sm:grid-cols-[180px_1fr]">
-              <input
-                className="field"
-                placeholder="标题（可选）"
-                value={draft.title}
-                onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-              />
-              <textarea
-                rows={2}
-                className="field resize-none"
-                placeholder="例如：我偏好简洁的中文表达，不要使用感叹号。"
-                value={draft.content}
-                onChange={(e) => setDraft({ ...draft, content: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    add();
-                  }
-                }}
-              />
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-3">
-              <span className="text-[10.5px] text-faint">Enter 添加 · Shift+Enter 换行</span>
-              <button className="btn-primary" onClick={add}>
-                <Plus size={13} /> 添加
-              </button>
-            </div>
-          </div>
+          )}
+
+          <Modal open={adding} onClose={() => setAdding(false)} title="添加记忆" subtitle={tab === "shared" ? "共享记忆 · 所有 Bot 可见" : `私有记忆 · ${bots.find(b => b.id === tab)?.name || "当前 Bot"}`} width="max-w-xl">
+            <form onSubmit={e => { e.preventDefault(); void add(); }}>
+              <MemoryFields value={draft} onChange={value => { setDraft(value); setFormError(""); }} disabled={saving} error={formError} onSave={add} />
+              <div className="mt-6 flex justify-end gap-2 border-t border-line pt-4">
+                <button className="btn-ghost" type="button" onClick={() => setAdding(false)}>取消</button>
+                <button className="btn-primary" type="submit" disabled={saving}>{saving ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}{saving ? "正在添加…" : "添加记忆"}</button>
+              </div>
+            </form>
+          </Modal>
 
           <div className="mt-4 space-y-2">
             {loading && <Loader2 size={15} className="animate-spin text-faint" />}
@@ -252,31 +331,22 @@ export default function MemoryPage() {
             {items.map((m) => (
               <div key={m.id} className="card card-hover p-3.5">
                 {editing === m.id ? (
-                  <div className="space-y-2">
-                    <input
-                      className="field"
-                      value={editDraft.title}
-                      onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
-                    />
-                    <textarea
-                      className="field h-24 resize-none"
-                      value={editDraft.content}
-                      onChange={(e) => setEditDraft({ ...editDraft, content: e.target.value })}
-                    />
-                    <div className="flex justify-end gap-2">
-                      <button className="btn-ghost" onClick={() => setEditing(null)}>
-                        <X size={13} /> 取消
-                      </button>
-                      <button className="btn-primary" onClick={() => saveEdit(m.id)}>
-                        <Check size={13} /> 保存
-                      </button>
+                  <form onSubmit={e => { e.preventDefault(); void saveEdit(m.id); }} className="p-1 sm:p-2">
+                    <h3 className="mb-5 text-[14px] font-semibold">编辑记忆</h3>
+                    <MemoryFields value={editDraft} onChange={value => { setEditDraft(value); setEditError(""); }} disabled={editSaving} error={editError} onSave={() => saveEdit(m.id)} />
+                    <div className="mt-5 flex justify-end gap-2 border-t border-line pt-4">
+                      <button type="button" className="btn-ghost" disabled={editSaving} onClick={() => setEditing(null)}><X size={13} />取消</button>
+                      <button type="submit" className="btn-primary" disabled={editSaving}>{editSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}{editSaving ? "正在保存…" : "保存修改"}</button>
                     </div>
-                  </div>
+                  </form>
                 ) : (
-                  <div className="flex items-start gap-3">
+                  <div className="flex items-center gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
                         {m.title && <div className="text-[12.5px] font-medium">{m.title}</div>}
+                        {m.category && (
+                          <span className="chip border-line text-faint">{m.category}</span>
+                        )}
                         {m.source === "bot" && (
                           <span className="chip border-accent/40 text-accent">Bot 自主保存</span>
                         )}
@@ -285,18 +355,23 @@ export default function MemoryPage() {
                         {m.content}
                       </div>
                     </div>
-                    <button
-                      onClick={() => {
-                        setEditing(m.id);
-                        setEditDraft({ title: m.title, content: m.content });
-                      }}
-                      className="shrink-0 text-[11.5px] text-muted hover:text-ink"
-                    >
-                      编辑
-                    </button>
-                    <button onClick={() => remove(m.id)} className="shrink-0 text-faint hover:text-danger">
-                      <Trash2 size={13} />
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        aria-label={`编辑记忆${m.title || ""}`}
+                        onClick={() => {
+                          setEditError("");
+                          setEditing(m.id);
+                          setEditDraft({ title: m.title, content: m.content, category: m.category || "" });
+                        }}
+                        className="inline-flex h-9 items-center justify-center rounded-lg px-2 text-[11.5px] text-muted transition-colors hover:bg-panel2 hover:text-ink"
+                      >
+                        编辑
+                      </button>
+                      <button type="button" aria-label={`删除记忆${m.title || ""}`} onClick={() => remove(m.id)} className="icon-btn hover:text-danger">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -323,6 +398,8 @@ export default function MemoryPage() {
               </div>
             </div>
           )}
+          </div>
+          </div>
         </div>
       </div>
     </AppShell>
@@ -341,9 +418,53 @@ function TabBtn({
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={`segmented-item ${active ? "segmented-item-active" : ""}`}
     >
       {children}
     </button>
+  );
+}
+
+
+type MemoryDraft = { title: string; content: string; category: string };
+const MEMORY_CATEGORIES = ["", "偏好", "约定", "项目背景", "事实", "其他"];
+
+function MemoryFields({ value, onChange, disabled, error, onSave }: {
+  value: MemoryDraft;
+  onChange: (value: MemoryDraft) => void;
+  disabled: boolean;
+  error: string;
+  onSave: () => void | Promise<void>;
+}) {
+  const id = useId();
+  // Preserve categories saved by a Bot, even when they are outside the presets.
+  const categories = MEMORY_CATEGORIES.includes(value.category) ? MEMORY_CATEGORIES : [...MEMORY_CATEGORIES, value.category];
+  return (
+    <fieldset disabled={disabled} className="min-w-0 space-y-5 disabled:opacity-60">
+      <div>
+        <label htmlFor={`${id}-title`} className="label text-ink">标题 <span className="ml-1 font-normal text-faint">可选</span></label>
+        <input id={`${id}-title`} className="field" maxLength={120} placeholder="用一句话概括，方便之后查找" value={value.title} onChange={e => onChange({ ...value, title: e.target.value })} />
+      </div>
+      <fieldset className="min-w-0" aria-describedby={`${id}-category-hint`}>
+        <legend className="label text-ink">分类</legend>
+        <div className="flex flex-wrap gap-2">
+          {categories.map(category => <label key={category} className={`relative inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] transition-colors ${value.category === category ? "border-line2 bg-accent/10 text-accent" : "border-line text-muted hover:border-line2 hover:bg-panel2"}`}>
+            <input type="radio" name={`${id}-category`} value={category} checked={value.category === category} onChange={() => onChange({ ...value, category })} className="sr-only" />
+            <Check size={12} className={`shrink-0 ${value.category === category ? "opacity-100" : "opacity-0"}`} aria-hidden="true" /><span className="break-words [overflow-wrap:anywhere]">{category || "未分类"}</span>
+          </label>)}
+        </div>
+        <p id={`${id}-category-hint`} className="mt-2 text-[11px] text-faint">选择一个分类，便于整理记忆；也可以保持未分类。</p>
+      </fieldset>
+      <div>
+        <label htmlFor={`${id}-content`} className="label text-ink">记忆内容 <span className="ml-1 text-accent">*</span></label>
+        <textarea id={`${id}-content`} rows={5} className="field min-h-[140px] resize-y leading-7" placeholder="例如：回答时优先使用简洁的中文，先给结论，再说明原因。" value={value.content} aria-required="true" aria-invalid={!!error} aria-describedby={`${id}-content-hint${error ? ` ${id}-error` : ""}`} onChange={e => onChange({ ...value, content: e.target.value })} onKeyDown={e => {
+          if (e.nativeEvent.isComposing) return;
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void onSave(); }
+        }} />
+        <div id={`${id}-content-hint`} className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-faint"><span>Enter 换行 · Ctrl / ⌘ + Enter 保存</span><span className="tabular-nums">{value.content.length.toLocaleString()} 字</span></div>
+        {error && <p id={`${id}-error`} role="alert" className="mt-3 rounded-lg border border-danger/20 bg-danger/5 px-3 py-2 text-[12px] text-danger">{error}</p>}
+      </div>
+    </fieldset>
   );
 }

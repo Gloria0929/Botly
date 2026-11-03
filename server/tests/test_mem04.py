@@ -12,10 +12,13 @@ from tests.conftest import register, setup_workspace
 def test_parse_memory_candidates():
     assert _parse_memory_candidates(
         '[{"title":"偏好","content":"喜欢简洁中文"}]'
-    ) == [{"title": "偏好", "content": "喜欢简洁中文"}]
+    ) == [{"title": "偏好", "content": "喜欢简洁中文", "category": ""}]
+    assert _parse_memory_candidates(
+        '[{"title":"偏好","content":"喜欢简洁中文","category":"偏好"}]'
+    ) == [{"title": "偏好", "content": "喜欢简洁中文", "category": "偏好"}]
     assert _parse_memory_candidates(
         '```json\n[{"content":"不用感叹号"}]\n```'
-    ) == [{"title": "", "content": "不用感叹号"}]
+    ) == [{"title": "", "content": "不用感叹号", "category": ""}]
     assert _parse_memory_candidates("没有值得记住的") == []
     assert _parse_memory_candidates("[]") == []
     # 最多 3 条

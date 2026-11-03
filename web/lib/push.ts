@@ -1,5 +1,7 @@
 /** NTF-06 Web Push：Service Worker 注册、订阅与注销。 */
 
+import { api } from "./api";
+
 export type PushSupport =
   | "unsupported" // 浏览器没有 Service Worker / PushManager
   | "insecure" // 非 HTTPS（localhost 除外），浏览器不提供推送
@@ -65,7 +67,7 @@ export async function subscribePush(): Promise<SubscribeResult> {
   const perm = await Notification.requestPermission();
   if (perm !== "granted") throw new Error("通知权限被拒绝，请到浏览器设置里开启");
   const reg = (await navigator.serviceWorker.register("/sw.js")) ?? (await navigator.serviceWorker.ready);
-  const cfg = await api_pushConfig();
+  const cfg = await api.pushConfig();
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlB64ToUint8Array(cfg.public_key) as BufferSource,
@@ -76,7 +78,7 @@ export async function subscribePush(): Promise<SubscribeResult> {
     throw new Error("浏览器没有返回有效的订阅密钥");
   }
   try {
-    await api_pushSubscribe({
+    await api.pushSubscribe({
       endpoint: json.endpoint,
       keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
       user_agent: navigator.userAgent.slice(0, 300),
@@ -93,13 +95,8 @@ export async function unsubscribePush(): Promise<void> {
   const reg = await navigator.serviceWorker.getRegistration();
   const sub = reg ? await reg.pushManager.getSubscription() : null;
   if (sub) {
-    await fetch("/api/push/unsubscribe", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", "X-Botly-Client": "web" },
-      body: JSON.stringify({ endpoint: sub.endpoint }),
-    }).catch(() => {});
-    await sub.unsubscribe().catch(() => {});
+    await api.pushUnsubscribe(sub.endpoint);
+    await sub.unsubscribe();
   }
 }
 
@@ -110,38 +107,4 @@ export function isIOS(): boolean {
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
   );
-}
-
-// ---- 内部 fetch（避免与 lib/api 相互依赖成环） ----
-
-async function api_pushConfig(): Promise<{ enabled: boolean; public_key: string }> {
-  const res = await fetch("/api/push/config", {
-    credentials: "same-origin",
-    headers: { "X-Botly-Client": "web" },
-  });
-  if (!res.ok) throw new Error("无法获取推送配置");
-  return res.json();
-}
-
-async function api_pushSubscribe(body: {
-  endpoint: string;
-  keys: { p256dh: string; auth: string };
-  user_agent?: string;
-}): Promise<void> {
-  const res = await fetch("/api/push/subscriptions", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", "X-Botly-Client": "web" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let msg = "订阅上报失败";
-    try {
-      const d = await res.json();
-      if (typeof d.detail === "string") msg = d.detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(msg);
-  }
 }

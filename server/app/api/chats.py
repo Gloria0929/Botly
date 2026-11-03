@@ -42,6 +42,7 @@ from app.core.models import (
 from app.agent.orchestrator import add_message
 from app.core.redis_bus import enqueue
 from app.agent.serializers import bot_out, chat_out, iso, message_out, run_out, task_out
+from app.services.chat_templates import CHAT_TEMPLATES, TEMPLATE_BY_ID, assemble_members, template_out
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -53,6 +54,10 @@ class ChatIn(BaseModel):
     name: str
     member_ids: list[str] = []
     supervisor_bot_id: str | None = None
+
+
+class ChatTemplateIn(BaseModel):
+    template_id: str
 
 
 class ChatPatch(BaseModel):
@@ -260,6 +265,28 @@ def create_chat(
 
     background.add_task(linux_sandbox.warm_container, user.id, chat.id)
     return chat_out(chat, by_id.get(sup_id), _members(db, chat.id))
+
+
+@router.get("/templates")
+def list_chat_templates(user: User = Depends(current_user)):
+    return [template_out(template) for template in CHAT_TEMPLATES]
+
+
+@router.post("/from-template", status_code=201)
+def create_chat_from_template(
+    payload: ChatTemplateIn,
+    background: BackgroundTasks,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    template = TEMPLATE_BY_ID.get(payload.template_id)
+    if not template:
+        raise HTTPException(404, "群聊模板不存在")
+    members, created_ids, setup_required = assemble_members(db, user.id, template)
+    chat = create_chat(ChatIn(
+        name=template["name"], member_ids=[b.id for b in members], supervisor_bot_id=members[0].id,
+    ), background, user, db)
+    return {**chat, "created_bot_ids": created_ids, "model_setup_required": setup_required}
 
 
 @router.get("/{chat_id}")
@@ -809,12 +836,23 @@ def list_messages(
     serialized = []
     run_ids = {m.run_id for m in rows if m.run_id}
     run_map = {r.id: r for r in db.scalars(select(Run).where(Run.id.in_(run_ids))).all()} if run_ids else {}
+    # 主 Agent 没有 Task；按执行与发送者汇总自己的模型用量，历史消息也能补齐。
+    agent_usage = {
+        (run_id, bot_id): int(tokens or 0)
+        for run_id, bot_id, tokens in db.execute(
+            select(UsageLog.run_id, UsageLog.bot_id, func.sum(UsageLog.input_tokens + UsageLog.output_tokens))
+            .where(UsageLog.user_id == user.id, UsageLog.run_id.in_(run_ids), UsageLog.task_id.is_(None))
+            .group_by(UsageLog.run_id, UsageLog.bot_id)
+        ).all()
+    } if run_ids else {}
     approval_ids = {(m.meta or {}).get("approval_id") for m in rows if m.type == "approval"} - {None}
     approval_map = {a.id: a for a in db.scalars(select(Approval).where(Approval.id.in_(approval_ids)))} if approval_ids else {}
     question_ids = {(m.meta or {}).get("question_id") for m in rows if m.type == "question"} - {None}
     question_map = {q.id: q for q in db.scalars(select(Question).where(Question.id.in_(question_ids)))} if question_ids else {}
     for m in rows:
         data = message_out(m, sender_bots.get(m.sender_bot_id or ""))
+        if m.sender_type == "bot" and not (m.meta or {}).get("task_id") and (m.run_id, m.sender_bot_id) in agent_usage:
+            data["meta"] = {**data["meta"], "agent_tokens": agent_usage[(m.run_id, m.sender_bot_id)]}
         if m.run_id in run_map:
             data["meta"] = {**data["meta"], "run_status": run_map[m.run_id].status}
             if m.type == "plan" and data["meta"].get("status") == "pending" and run_map[m.run_id].status in ("completed", "failed", "stopped"):

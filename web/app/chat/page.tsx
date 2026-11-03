@@ -24,7 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
-import ChatList from "@/components/chat/ChatList";
+import ChatList, { NewChatDialog } from "@/components/chat/ChatList";
 import ChatSettings from "@/components/chat/ChatSettings";
 import Composer from "@/components/chat/Composer";
 import MembersModal from "@/components/chat/MembersModal";
@@ -36,6 +36,7 @@ import ActionMenu from "@/components/ui/Menu";
 import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api, toastError } from "@/lib/api";
+import { acceptMessageEvent, applyAgentUsage, createMessageSync, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
 import type { Chat, ChatFile, ChatSummary, Message, PlanStep, Run, Task, Branch } from "@/lib/types";
 import { num } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
@@ -49,6 +50,7 @@ export default function ChatPage() {
 function ChatContent() {
   const searchParams = useSearchParams();
   const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [newChatOpen, setNewChatOpen] = useState(false);
   const [chatsLoading, setChatsLoading] = useState(true);
   const [chatId, setChatId] = useState<string | null>(null);
   const [chat, setChat] = useState<Chat | null>(null);
@@ -61,6 +63,7 @@ function ChatContent() {
     branchRef.current = branch;
   }, [branch]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const messageSync = useRef(createMessageSync());
   const [eventStart, setEventStart] = useState<{ chatId: string; threadId: string; after: number } | null>(null);
   const [me, setMe] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -94,8 +97,8 @@ function ChatContent() {
 
   const maxPanelWidth = useCallback(() => {
     if (typeof window === "undefined") return 720;
-    // 左侧导航 68 + 群聊列表 248 + 中间至少 360，剩余空间给右侧面板
-    return Math.max(280, Math.min(760, window.innerWidth - 68 - 248 - 360));
+    // Reserve the full navigation, conversation list, and a readable message column.
+    return Math.max(280, Math.min(760, window.innerWidth - 232 - 264 - 420));
   }, []);
 
   const clampPanelWidth = useCallback(
@@ -277,16 +280,14 @@ function ChatContent() {
 
   const reloadMessages = useCallback((id: string) => {
     const anchor = focusRef.current;
+    const branchId = branchRef.current?.id;
     api
-      .messages(id, { limit: 80, around: anchor || undefined, thread_id: branchRef.current?.id })
+      .messages(id, { limit: 80, around: anchor || undefined, thread_id: branchId })
       .then((d) => {
-        if (chatIdRef.current !== id || anchor !== focusRef.current) return;
-        if (anchor) setMessages(d.messages);
-        else setMessages((prev) => {
-          const first = d.messages[0]?.seq ?? 0;
-          const older = prev.filter((m) => m.seq < first && m.thread_id === d.messages[0]?.thread_id);
-          return [...older, ...d.messages];
-        });
+        if (chatIdRef.current !== id || anchor !== focusRef.current || branchId !== branchRef.current?.id) return;
+        const sync = messageSync.current;
+        sync.cursor = Math.max(sync.cursor, d.event_cursor);
+        setMessages((prev) => mergeMessageSnapshot(prev, d.messages, d.event_cursor, sync, !anchor));
       })
       .catch(() => {});
   }, []);
@@ -308,6 +309,7 @@ function ChatContent() {
     localStorage.setItem("botly-chat", chatId);
     setChat(null);
     setMessages([]);
+    messageSync.current = createMessageSync();
     branchRef.current = null;
     setBranch(null);
     setMessagesLoading(true);
@@ -329,6 +331,7 @@ function ChatContent() {
         if (canceled || chatIdRef.current !== chatId) return;
         setChat(currentChat);
         setMessages(history.messages);
+        messageSync.current.cursor = history.event_cursor;
         setHasEarlier(history.has_more);
         if (currentChat.main_thread_id) setEventStart({ chatId, threadId: currentChat.main_thread_id, after: history.event_cursor });
         if (pendingTarget.current?.chatId === chatId) {
@@ -394,7 +397,7 @@ function ChatContent() {
       es.addEventListener("message.created", (ev) => {
         if (closed || chatIdRef.current !== chatId) return;
         const p = JSON.parse((ev as MessageEvent).data);
-        const mainId = eventStart.threadId;
+        const mainId = branchRef.current?.id || eventStart.threadId;
         if (!mainId) {
           // 群聊详情还没加载完，先不动本地列表，等刷新补齐
           scheduleRefresh();
@@ -404,11 +407,12 @@ function ChatContent() {
           scheduleRefresh();
           return;
         }
+        if (!acceptMessageEvent(messageSync.current, p.id, Number((ev as MessageEvent).lastEventId))) return;
         setMessages((prev) => {
           const i = prev.findIndex((m) => m.id === p.id);
           if (i >= 0) {
             const next = [...prev];
-            next[i] = { ...next[i], ...p };
+            next[i] = mergeMessageUpdate(next[i], p);
             return next;
           }
           // 本机乐观插入的临时用户消息：SSE 先到时直接原位替换，
@@ -432,23 +436,26 @@ function ChatContent() {
       es.addEventListener("message.delta", (ev) => {
         if (closed || chatIdRef.current !== chatId) return;
         const p = JSON.parse((ev as MessageEvent).data);
+        if (!acceptMessageEvent(messageSync.current, p.message_id, Number((ev as MessageEvent).lastEventId))) return;
         setMessages((prev) =>
-          prev.map((m) => (m.id === p.message_id ? { ...m, content: p.content } : m))
+          prev.map((m) => (m.id === p.message_id && m.status === "streaming"
+            ? mergeMessageUpdate(m, { content: p.content }) : m))
         );
       });
 
       es.addEventListener("message.completed", (ev) => {
         if (closed || chatIdRef.current !== chatId) return;
         const p = JSON.parse((ev as MessageEvent).data);
+        if (!acceptMessageEvent(messageSync.current, p.message_id, Number((ev as MessageEvent).lastEventId))) return;
         setMessages((prev) =>
           prev.map((m) =>
             m.id === p.message_id
-              ? {
-                  ...m,
+              ? mergeMessageUpdate(m, {
                   content: p.content,
                   status: p.status,
+                  type: p.type || m.type,
                   meta: p.meta ? { ...m.meta, ...p.meta } : m.meta,
-                }
+                })
               : m
           )
         );
@@ -457,6 +464,7 @@ function ChatContent() {
       es.addEventListener("message.deleted", (ev) => {
         if (closed || chatIdRef.current !== chatId) return;
         const p = JSON.parse((ev as MessageEvent).data);
+        if (!acceptMessageEvent(messageSync.current, p.id, Number((ev as MessageEvent).lastEventId), true)) return;
         setMessages((prev) => prev.filter((m) => m.id !== p.id));
       });
 
@@ -495,6 +503,11 @@ function ChatContent() {
           ? { ...m, meta: { ...m.meta, status: p.status, closed_reason: p.closed_reason } } : m));
         scheduleRefresh();
         scheduleMessages();
+      });
+      es.addEventListener("usage.updated", (ev) => {
+        if (closed || chatIdRef.current !== chatId) return;
+        const p = JSON.parse((ev as MessageEvent).data);
+        setMessages((prev) => applyAgentUsage(prev, p));
       });
       ["task.status", "files.updated", "usage.updated", "chat.always_allow"].forEach((t) =>
         es!.addEventListener(t, scheduleRefresh)
@@ -568,6 +581,7 @@ function ChatContent() {
   /* ---------------- 操作 ---------------- */
   const run: Run | null = chat?.active_run || chat?.last_run || null;
   const running = !!run && ACTIVE.has(run.status);
+  const dispatchHint = branch ? "" : runStatusText(run, chat?.tasks || [], messages);
   const waiting = run?.status === "waiting";
   const resumeKind = run?.resume?.kind;
 
@@ -879,11 +893,12 @@ function ChatContent() {
   const selectedTask = activeTask ? activeTasks.find((t) => t.id === activeTask.id) || activeTask : null;
 
   return (
-    <AppShell>
-      <div className="flex h-full min-h-0">
+    <AppShell rightPanelOpen={!!chatId && panel}>
+      <div className={`chat-layout relative h-full min-h-0 ${panel && chatId ? "has-detail" : ""}`}>
         {/* 左：群聊列表 */}
-        <aside className="hidden w-[248px] shrink-0 lg:block">
+        <aside className="hidden min-h-0 lg:block">
           <ChatList
+            onNewChat={() => setNewChatOpen(true)}
             chats={chats}
             loading={chatsLoading}
             activeId={chatId}
@@ -902,6 +917,7 @@ function ChatContent() {
             <div className="absolute inset-0 bg-black/60" onClick={() => setListOpen(false)} />
             <div className="absolute left-0 top-0 h-full w-[280px]">
               <ChatList
+                onNewChat={() => { setListOpen(false); setNewChatOpen(true); }}
                 chats={chats}
                 loading={chatsLoading}
                 activeId={chatId}
@@ -921,11 +937,12 @@ function ChatContent() {
         )}
 
         {/* 中：消息流 */}
-        <section className="flex min-w-0 flex-1 flex-col bg-canvas">
-          <header className="flex h-[56px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3 sm:px-4">
+        <section className="chat-message-column flex min-h-0 min-w-0 flex-1 flex-col bg-panel">
+          <header className="flex h-[64px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3 sm:px-4">
             <button
               onClick={() => setListOpen(true)}
-              className="p-1.5 text-muted hover:text-ink lg:hidden"
+              className="icon-btn lg:hidden"
+              aria-label="打开会话列表"
             >
               <MenuIcon size={17} />
             </button>
@@ -953,10 +970,8 @@ function ChatContent() {
                 </div>
               ) : (
                 <div className="min-w-0 leading-tight">
-                  <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-faint">
-                    Session
-                  </div>
-                  <div className="truncate text-[13px] font-semibold">{chat?.name || "…"}</div>
+                  <div className="mb-1 text-[10px] text-faint">{chat ? `${chat.members.length} 位团队成员` : "团队协作"}</div>
+                  <div className="truncate text-[14px] font-semibold">{chat?.name || "团队工作空间"}</div>
                 </div>
               )}
             </div>
@@ -1122,7 +1137,7 @@ function ChatContent() {
             }}
             emptyState={
               !chatId ? (
-                <NoChatState onOpenList={() => setListOpen(true)} />
+                <NoChatState onCreate={() => setNewChatOpen(true)} />
               ) : messagesLoading ? (
                 <div className="flex h-full items-center justify-center">
                   <Loader2 size={18} className="animate-spin text-faint" />
@@ -1149,10 +1164,10 @@ function ChatContent() {
             </div>
           )}
 
-          {running && (
+          {dispatchHint && (
             <div className="flex items-center gap-1.5 border-t border-line bg-panel/60 px-4 py-0.5">
               <Loader2 size={10} className="animate-spin text-accent" />
-              <span className="text-[10.5px] leading-4 text-muted">{runStatusText(run)}</span>
+              <span className="text-[10.5px] leading-4 text-muted">{dispatchHint}</span>
               <button
                 onClick={doStop}
                 disabled={busy}
@@ -1182,7 +1197,7 @@ function ChatContent() {
         </section>
 
         {/* 右：任务与文件（可拖拽调整宽度） */}
-        {panel && (
+        {panel && chatId && (
           <>
             <div
               role="separator"
@@ -1198,9 +1213,9 @@ function ChatContent() {
               onPointerCancel={endPanelResize}
               onDoubleClick={resetPanelWidth}
               onKeyDown={onPanelKeyDown}
-              className="hidden w-1.5 shrink-0 cursor-col-resize touch-none transition-colors hover:bg-accent/30 focus:bg-accent/30 focus:outline-none lg:block"
+              className="chat-detail-resize hidden w-1.5 shrink-0 cursor-col-resize touch-none transition-colors hover:bg-accent/30 focus:bg-accent/30 focus:outline-none lg:block"
             />
-            <aside className="hidden shrink-0 border-l border-line lg:block" style={{ width: panelWidth }}>
+            <aside className="chat-detail hidden min-h-0 shrink-0 border-l border-line lg:block" style={{ width: panelWidth }}>
               <SidePanel
                 chatId={chatId || ""}
                 tasks={activeTasks}
@@ -1318,6 +1333,8 @@ function ChatContent() {
         />
       )}
 
+      {newChatOpen && <NewChatDialog onClose={() => setNewChatOpen(false)} onCreated={id => { setNewChatOpen(false); setChatId(id); api.chats().then(setChats).catch(() => {}); }} />}
+
       {mobilePanel && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-black/60" onClick={() => setMobilePanel(false)} />
@@ -1341,20 +1358,16 @@ function ChatContent() {
   );
 }
 
-function NoChatState({ onOpenList }: { onOpenList: () => void }) {
+function NoChatState({ onCreate }: { onCreate: () => void }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-      <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-panel">
-        <MessageSquare size={20} />
+    <div className="chat-welcome flex h-full flex-col items-center justify-center overflow-y-auto px-6 py-10 text-center">
+      <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-panel2 text-ink"><Workflow size={30} strokeWidth={1.3} /></div>
+      <h1 className="text-[28px] font-medium tracking-tight sm:text-[32px]">和你的 AI 团队，一起工作。</h1>
+      <p className="mt-4 max-w-[400px] text-[14px] leading-7 text-muted">从一个目标开始。让不同角色的智能体<br className="hidden sm:block" />一起研究、协作，并把结果交付给你。</p>
+      <button className="btn-primary mt-7 rounded-full px-5" onClick={onCreate}><Plus size={15} />新建团队会话</button>
+      <div className="mt-12 flex flex-wrap justify-center gap-5 text-[11px] text-faint">
+        {[{ icon: Users, label: "多角色协作" }, { icon: Workflow, label: "过程可见" }, { icon: SlidersHorizontal, label: "关键操作可控" }].map(({ icon: Icon, label }) => <span key={label} className="flex items-center gap-1.5"><Icon size={13} />{label}</span>)}
       </div>
-      <div className="text-[12.5px] font-medium">还没有群聊</div>
-      <p className="mt-1.5 max-w-[280px] text-[12px] leading-relaxed text-muted">
-        新建一个群聊，选好成员和总指挥，就可以开始交代任务了。
-      </p>
-      <button className="btn-primary mt-4 lg:hidden" onClick={onOpenList}>
-        打开群聊列表
-      </button>
-      <p className="mt-4 hidden text-[11px] text-faint lg:block">在左侧列表点「+」新建群聊</p>
     </div>
   );
 }
@@ -1379,13 +1392,18 @@ function TypingDots({ size = 4 }: { size?: number }) {
   );
 }
 
-function runStatusText(run: Run | null) {
-  if (!run) return "";
-  if (run.status === "queued") return "排队中，等待 Worker…";
-  if (run.status === "waiting") return "等待你的处理";
-  // RUN-12：同时跑多个子任务时，说明在等它们全部返回再汇总
-  if (run.status === "waiting_children") return "等待并行子任务返回…";
-  return "总指挥正在调度…";
+function runStatusText(run: Run | null, tasks: Task[], messages: Message[]) {
+  if (!run || run.target_bot_id || !["running", "waiting_children"].includes(run.status)) return "";
+  const activeTasks = tasks.some((task) => task.run_id === run.id
+    && ["queued", "running", "waiting_approval", "waiting_reply"].includes(task.status));
+  const answered = new Set(messages.filter((m) => m.run_id === run.id && m.type === "tool_result")
+    .map((m) => m.meta?.tool_call_id));
+  const dispatching = messages.some((m) => m.run_id === run.id && m.type === "tool_call"
+    && m.status === "done" && !m.meta?.subtask_tool
+    && m.meta?.tool_calls?.some((call: { id: string; function?: { name?: string } }) =>
+      call.function?.name === "delegate" && !answered.has(call.id)));
+  if (!activeTasks && !dispatching) return "";
+  return run.status === "waiting_children" ? "等待并行子任务返回…" : "总指挥正在调度…";
 }
 
 function EmptyState({ onPick }: { onPick: (t: string) => void }) {
@@ -1395,13 +1413,13 @@ function EmptyState({ onPick }: { onPick: (t: string) => void }) {
     "查一下最近一周 AI Agent 领域的三个重要发布，整理成简报。",
   ];
   return (
-    <div className="flex h-full flex-col items-center justify-center px-6">
+    <div className="chat-welcome flex h-full flex-col items-center justify-center overflow-y-auto px-6 py-8">
       <div className="w-full max-w-[560px]">
         <div className="mb-6 text-center">
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-panel">
             <Compass size={20} />
           </div>
-          <h2 className="text-[17px] font-semibold tracking-tight">交代一件事，团队自己跑</h2>
+          <h2 className="text-[26px] font-semibold tracking-tight">今天，和团队一起完成什么？</h2>
           <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted">
             总指挥会判断复杂度、拆解任务、派给合适的成员。涉及高风险动作时会停下来等你审批。
           </p>
@@ -1411,9 +1429,9 @@ function EmptyState({ onPick }: { onPick: (t: string) => void }) {
             <button
               key={s}
               onClick={() => onPick(s)}
-              className="w-full rounded-lg border border-line bg-panel px-3.5 py-2.5 text-left text-[12.5px] text-muted transition-colors hover:border-accent/40 hover:text-ink"
+              className="group flex w-full items-center gap-4 rounded-xl bg-panel2/70 px-5 py-4 text-left text-[13px] leading-relaxed text-muted transition-colors hover:bg-panel3 hover:text-ink"
             >
-              {s}
+              <span className="flex-1">{s}</span><Plus size={15} className="shrink-0 text-faint group-hover:text-accent" />
             </button>
           ))}
         </div>
