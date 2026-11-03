@@ -35,3 +35,17 @@ def test_metrics_for_logged_in_user(client, invite):
     r = client.get("/api/metrics")
     assert r.status_code == 200, r.text
     assert "botly_runs_active" in r.text
+
+
+def test_loopback_proxy_cannot_bypass_metrics_auth(monkeypatch):
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    from app.core.db import SessionLocal
+    import pytest
+
+    monkeypatch.setattr(metrics_module, "METRICS_TOKEN", "")
+    request = Request({"type": "http", "method": "GET", "path": "/api/metrics",
+        "client": ("127.0.0.1", 1000), "headers": [(b"x-forwarded-for", b"203.0.113.1")]})
+    with SessionLocal() as db, pytest.raises(HTTPException) as error:
+        metrics_module._scope(request, db)
+    assert error.value.status_code == 403

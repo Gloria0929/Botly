@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.sandbox import files as sandbox
+from app.sandbox.artifacts import visible_files
 from app.agent.capabilities import supervisor_block_reason
 from app.core.db import IS_SQLITE, get_db
 from app.core.config import DELEGATION_DEPTH, SANDBOX_FILE_MAX_MB
@@ -34,6 +35,7 @@ from app.core.models import (
     Run,
     Task,
     Thread,
+    TerminalCommand,
     UsageLog,
     User,
     UserSettings,
@@ -185,29 +187,39 @@ def list_chats(user: User = Depends(current_user), db: Session = Depends(get_db)
         .where(Chat.user_id == user.id, Chat.archived.is_(False))
         .order_by(Chat.last_active_at.desc())
     ).all()
-    out = []
-    for c in chats:
-        active = _active_run(db, c.id)
-        last = db.scalar(
-            select(Message)
-            .join(Thread, Thread.id == Message.thread_id)
-            .where(Thread.chat_id == c.id, Message.type == "text")
-            .order_by(Message.created_at.desc())
-        )
-        out.append(
+    if not chats:
+        return []
+    chat_ids = [c.id for c in chats]
+    active_rows = db.scalars(select(Run).where(
+        Run.user_id == user.id, Run.chat_id.in_(chat_ids), Run.status.in_(ACTIVE),
+        Run.parent_run_id.is_(None),
+    ).order_by(Run.created_at.desc())).all()
+    active_by_chat = {}
+    for run in active_rows:
+        active_by_chat.setdefault(run.chat_id, run.status)
+    latest = select(
+        Thread.chat_id.label("chat_id"), Message.content.label("content"),
+        func.row_number().over(partition_by=Thread.chat_id,
+            order_by=(Message.created_at.desc(), Message.seq.desc(), Message.id.desc())).label("rank"),
+    ).join(Thread, Thread.id == Message.thread_id).where(
+        Message.user_id == user.id, Thread.chat_id.in_(chat_ids), Message.type == "text",
+    ).subquery()
+    previews = dict(db.execute(select(latest.c.chat_id, latest.c.content).where(latest.c.rank == 1)).all())
+    member_counts = dict(db.execute(select(ChatMember.chat_id, func.count(ChatMember.bot_id)).where(
+        ChatMember.user_id == user.id, ChatMember.chat_id.in_(chat_ids),
+    ).group_by(ChatMember.chat_id)).all())
+    return [
             {
                 "id": c.id,
                 "name": c.name,
                 "run_mode": c.run_mode,
                 "last_active_at": c.last_active_at.isoformat() if c.last_active_at else None,
-                "run_status": active.status if active else None,
-                "preview": (last.content or "")[:60] if last else "",
-                "member_count": db.scalar(
-                    select(func.count(ChatMember.bot_id)).where(ChatMember.chat_id == c.id)
-                ),
+                "run_status": active_by_chat.get(c.id),
+                "preview": (previews.get(c.id) or "")[:60],
+                "member_count": member_counts.get(c.id, 0),
             }
-        )
-    return out
+        for c in chats
+    ]
 
 
 @router.post("", status_code=201)
@@ -259,11 +271,10 @@ def create_chat(
         db.add(ChatMember(chat_id=chat.id, bot_id=bid, user_id=user.id))
     db.add(Thread(user_id=user.id, chat_id=chat.id, type="main", title="主线程"))
     db.flush()
-    # 建群就把这台 Ubuntu 起起来：后台执行，不拖慢建群；首次拉镜像失败也只是
-    # 记日志，之后用到工具时 ensure_container 还会再兜底一次。
-    from app.sandbox import linux as linux_sandbox
+    # 仅预热已配置的沙箱后端；未接入时建群不启动任何容器。
+    from app.sandbox import runtime as linux_sandbox
 
-    background.add_task(linux_sandbox.warm_container, user.id, chat.id)
+    background.add_task(linux_sandbox.warm, user.id, chat.id)
     return chat_out(chat, by_id.get(sup_id), _members(db, chat.id))
 
 
@@ -356,9 +367,9 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
         "bot_name": db.get(Bot, a.bot_id).name if db.get(Bot, a.bot_id) else "Bot"} for a in pending]
     data["files"] = [
         {"id": f.id, "path": f.path, "size": f.size, "updated_at": f.updated_at.isoformat()}
-        for f in db.scalars(
+        for f in visible_files(db.scalars(
             select(FileRec).where(FileRec.chat_id == chat.id).order_by(FileRec.path)
-        ).all()
+        ).all())
     ]
     settings = db.get(UserSettings, user.id)
     chat_limits = chat.limits_override or {}
@@ -587,6 +598,14 @@ async def delete_chat(chat_id: str, user: User = Depends(current_user), db: Sess
     if _active_run(db, chat.id):
         raise HTTPException(409, "该群聊有执行正在进行，请先停止")
 
+    # 在业务删除事务前清理远端实例，避免 SQLite 写锁与后台清理相互等待。
+    db.commit()
+    from app.sandbox import runtime as linux_sandbox
+    try:
+        await linux_sandbox.release(user.id, chat.id)
+    except Exception:
+        raise HTTPException(400, "Cube 沙箱释放失败，群聊已保留，请检查沙箱连接后重试")
+
     thread_ids = list(db.scalars(select(Thread.id).where(Thread.chat_id == chat.id)).all())
     run_ids = list(db.scalars(select(Run.id).where(Run.chat_id == chat.id)).all())
     if run_ids:
@@ -611,6 +630,7 @@ async def delete_chat(chat_id: str, user: User = Depends(current_user), db: Sess
     db.execute(delete(Event).where(Event.chat_id == chat.id))
     # 通知里的 chat_id/target 会指向已删除的群聊，一并清掉
     db.execute(delete(Notification).where(Notification.chat_id == chat.id))
+    db.execute(delete(TerminalCommand).where(TerminalCommand.chat_id == chat.id, TerminalCommand.user_id == user.id))
     db.flush()
 
     db.delete(chat)
@@ -620,13 +640,6 @@ async def delete_chat(chat_id: str, user: User = Depends(current_user), db: Sess
     try:
         sandbox.delete_chat_dir(user.id, chat.id)
     except sandbox.SandboxError:
-        pass
-    # 常驻 Linux 环境也一并清掉（best-effort）
-    try:
-        from app.sandbox import linux as linux_sandbox
-
-        linux_sandbox.stop_container_sync(chat.id)
-    except Exception:  # noqa: BLE001
         pass
     return {"ok": True}
 
@@ -1146,6 +1159,11 @@ def post_message(
         raise HTTPException(400, "消息不能为空")
 
     active = _active_run(db, chat.id)
+    terminal_busy = db.scalar(select(TerminalCommand.id).where(TerminalCommand.user_id == user.id,
+        TerminalCommand.chat_id == chat.id, TerminalCommand.bot_id.is_(None),
+        TerminalCommand.status.in_(("queued", "running"))).limit(1))
+    if terminal_busy:
+        raise HTTPException(409, "终端命令正在执行，请等待完成后发起任务")
     # CHT-07：分支线程里的消息单独触发执行，上下文与回复都落在分支，不打断主线程
     if payload.thread_id:
         if active:
@@ -1286,9 +1304,9 @@ def post_message(
 @router.get("/{chat_id}/files")
 def list_files(chat_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     chat = owned_or_404(db, Chat, chat_id, user.id)
-    rows = db.scalars(
+    rows = visible_files(db.scalars(
         select(FileRec).where(FileRec.chat_id == chat.id).order_by(FileRec.path)
-    ).all()
+    ).all())
     return [
         {
             "id": f.id,

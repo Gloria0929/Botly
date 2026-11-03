@@ -19,8 +19,9 @@ import redis.asyncio as aredis
 
 from app.core.config import REDIS_URL
 
-QUEUE_KEY = "botly:queue"
-WAKE_PREFIX = "botly:events:"
+_KEY_PREFIX = os.getenv("BOTLY_REDIS_PREFIX", "botly")
+QUEUE_KEY = f"{_KEY_PREFIX}:queue"
+WAKE_PREFIX = f"{_KEY_PREFIX}:events:"
 
 _sync: redis.Redis | None = None
 _async: aredis.Redis | None = None

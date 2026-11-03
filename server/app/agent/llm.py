@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 import math
@@ -20,8 +21,10 @@ from typing import AsyncIterator
 import httpx
 
 from app.core.config import LLM_MAX_RETRIES, LLM_RETRY_BACKOFF, LLM_TIMEOUT_SECONDS
+from app.core.logging_setup import get_logger
 
 _CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+log = get_logger("llm")
 
 
 def estimate_tokens(text: str) -> int:
@@ -44,10 +47,13 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, *, retry_after: float | None = None, retryable: bool = True):
+    def __init__(self, message: str, *, retry_after: float | None = None, retryable: bool = True,
+                 status_code: int | None = None, request_id: str | None = None):
         super().__init__(message)
         self.retry_after = retry_after
         self.retryable = retryable
+        self.status_code = status_code
+        self.request_id = request_id
 
 
 # --------------------------------------------------------------------------- #
@@ -94,7 +100,7 @@ async def _stream_openai(
                     body = body.replace(api_key, "[密钥已隐藏]")
                 body = body[:600]
                 delay = None
-                if resp.status_code == 429 and resp.headers.get("Retry-After"):
+                if resp.headers.get("Retry-After"):
                     header = resp.headers["Retry-After"]
                     try:
                         delay = float(header)
@@ -108,6 +114,12 @@ async def _stream_openai(
                             pass
                     if delay is not None:
                         delay = max(0, delay) if math.isfinite(delay) else None
+                match = re.search(r'request[_-]?id["\s:]+([a-zA-Z0-9_-]{8,120})', body, re.IGNORECASE)
+                request_id = match.group(1) if match else resp.headers.get("x-request-id")
+                if request_id and api_key:
+                    request_id = request_id.replace(api_key, "[密钥已隐藏]")
+                log.warning("模型接口错误 model=%s status=%d request_id=%s detail=%s",
+                            model, resp.status_code, request_id or "-", body)
                 raise LLMError(
                     f"模型接口返回 {resp.status_code}: {body}",
                     retry_after=delay,
@@ -115,6 +127,8 @@ async def _stream_openai(
                     retryable=resp.status_code == 429
                     or resp.status_code == 408
                     or resp.status_code >= 500,
+                    status_code=resp.status_code,
+                    request_id=request_id,
                 )
             async for raw in resp.aiter_lines():
                 if not raw or not raw.startswith("data:"):
@@ -240,7 +254,7 @@ def _mock_decide(messages: list[dict], tools: list[dict], ctx: dict) -> tuple[st
 
     # 子 Bot
     if role == "worker":
-        writer = "写" in (ctx.get("bot_name") or "")
+        writer = any(label in (ctx.get("bot_name") or "") for label in ("写", "架构师"))
         if writer:
             # 架构师：先读资料，再直接成稿，不重复写 research.md
             if "file_read" in names and _called(messages, "file_read") == 0:
@@ -316,7 +330,7 @@ async def _stream_mock(
             "两份文件都在右侧文件面板，可直接预览或下载。\n\n"
             "结论：该方向已进入工程化竞争阶段，建议先验证接入成本，再评估长期总拥有成本。"
         )
-    elif "写" in (ctx.get("bot_name") or ""):
+    elif any(label in (ctx.get("bot_name") or "") for label in ("写", "架构师")):
         text = (
             "稿件已完成并写入 report.md。整体按「总体判断—关键发现—建议」三段组织，"
             "篇幅控制在 800 字左右，可直接交付。"
@@ -382,13 +396,29 @@ async def stream_chat(
             if isinstance(exc, LLMError) and not exc.retryable:
                 break
             delay = getattr(exc, "retry_after", None)
-            await asyncio.sleep(delay if delay is not None else LLM_RETRY_BACKOFF[min(attempt, len(LLM_RETRY_BACKOFF) - 1)])
+            if delay is None:
+                backoff = LLM_RETRY_BACKOFF[min(attempt, len(LLM_RETRY_BACKOFF) - 1)]
+                delay = backoff + random.uniform(0, min(1, backoff * .1))
+            log.warning("模型请求自动重试 model=%s retry=%d/%d delay=%.1fs status=%s",
+                        model, attempt + 1, LLM_MAX_RETRIES, delay, getattr(exc, "status_code", None) or "网络异常")
+            await asyncio.sleep(delay)
     detail = str(last_err).strip() if last_err is not None else ""
+    status_code = getattr(last_err, "status_code", None)
+    request_id = getattr(last_err, "request_id", None)
+    if status_code == 429 or status_code is not None and status_code >= 500:
+        detail = ("模型服务请求过于频繁" if status_code == 429 else "模型服务暂时繁忙或不可用")
+        detail += f"（HTTP {status_code}）"
+        if attempt:
+            detail += f"，已自动重试 {attempt} 次仍未恢复"
+        detail += "。请稍后重试，或在 Bot 设置中更换模型接入。"
+        if request_id:
+            detail += f"请求 ID：{request_id}"
     if not detail:
         detail = (f"模型请求超时（{LLM_TIMEOUT_SECONDS} 秒）"
                   if isinstance(last_err, (httpx.TimeoutException, asyncio.TimeoutError))
                   else type(last_err).__name__ if last_err is not None else "模型调用失败")
-    raise LLMError(detail)
+    raise LLMError(detail, retry_after=getattr(last_err, "retry_after", None),
+                   retryable=getattr(last_err, "retryable", True), status_code=status_code, request_id=request_id)
 
 
 def _redact(text: str, key: str | None) -> str:

@@ -179,6 +179,9 @@ export default function NotificationsPage() {
                         {n.body}
                       </div>
                     )}
+                    {n.email_status && <p className={`mt-1 text-[10.5px] ${n.email_status === "failed" ? "text-danger" : "text-faint"}`}>
+                      {{ pending: "审批邮件等待发送", sending: "审批邮件发送中", sent: "审批邮件已发送", dev: "审批邮件：开发模式未实际投递", failed: "审批邮件发送失败，请联系管理员", skipped: "审批邮件未发送（已关闭或无需处理）" }[n.email_status]}
+                    </p>}
                   </div>
                 </button>
               );

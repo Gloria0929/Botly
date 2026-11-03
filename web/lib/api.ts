@@ -261,7 +261,7 @@ export const api = {
     req<import("./types").Skill>("/skills", { method: "POST", body: JSON.stringify(body) }),
   patchSkill: (id: string, body: any) =>
     req<import("./types").Skill>(`/skills/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  deleteSkill: (id: string) => req(`/skills/${id}`, { method: "DELETE" }),
+  deleteSkill: (id: string) => req<{ ok: boolean; installation?: import("./types").Skill["installation"] }>(`/skills/${id}`, { method: "DELETE" }),
   importSkillFile: (file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -391,6 +391,7 @@ export const api = {
     const res = await request(`/files/${fileId}/content`, {}, "无法读取文件");
     return res.text();
   },
+  deleteFile: (fileId: string) => req<{ ok: boolean }>(`/files/${fileId}`, { method: "DELETE" }),
 
   // 日志（只读）
   logs: (params: Record<string, string | number | undefined> = {}) => {
@@ -504,6 +505,12 @@ export const api = {
   // 设置
   settings: () => req<any>("/settings"),
   patchSettings: (body: any) => req<any>("/settings", { method: "PATCH", body: JSON.stringify(body) }),
+  sandbox: () => req<import("./types").SandboxStatus>("/sandbox"),
+  terminal: (chatId: string) => req<import("./types").TerminalHistory>(`/chats/${chatId}/terminal`),
+  terminalCommand: (chatId: string, command: string) => req<import("./types").TerminalEntry>(`/chats/${chatId}/terminal`, { method: "POST", body: JSON.stringify({ command }) }),
+  saveCube: (body: any) => req<import("./types").SandboxStatus>("/sandbox/cube", { method: "PUT", body: JSON.stringify(body) }),
+  testCube: (body: any) => req<{ ok: boolean; message: string; sandbox?: import("./types").SandboxStatus }>("/sandbox/cube/test", { method: "POST", body: JSON.stringify(body) }),
+  disconnectCube: () => req<{ ok: boolean }>("/sandbox/cube", { method: "DELETE" }),
 
   // 用量与费用
   usage: (days = 30) =>

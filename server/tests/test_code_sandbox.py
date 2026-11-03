@@ -22,7 +22,8 @@ def test_code_exec_registered():
 
 
 def test_code_exec_disabled(monkeypatch):
-    monkeypatch.setattr(linux_sandbox, "CODE_SANDBOX_ENABLED", False)
+    from app.sandbox import runtime
+    monkeypatch.setattr(runtime, "CODE_SANDBOX_ENABLED", False)
     ctx = SimpleNamespace(user_id="u1", chat_id="c1")
     out = asyncio.run(tools._code_exec(ctx, "print(1)"))
     assert "未启用" in out

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Download, Github, Link2, Loader2, Plus, Save, Sparkles, Trash2, Upload, Search, Blocks, CircleCheck, AlertTriangle } from "lucide-react";
+import { Copy, Download, Github, Link2, Loader2, Plus, Save, Sparkles, Trash2, Upload, Search, Blocks, CircleCheck, AlertTriangle } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Modal from "@/components/ui/Modal";
 import PageHeader from "@/components/ui/PageHeader";
@@ -72,6 +72,19 @@ export default function SkillsPage() {
     });
   };
 
+  const reportInstallation = (skill: Skill, action: string) => {
+    const result = skill.installation;
+    if (result?.errors.length) {
+      toast(`${action}「${skill.name}」，沙箱安装待重试：${result.errors[0].message}`, "error");
+    } else if (result?.synced) {
+      toast(`${action}「${skill.name}」，已安装到 ${result.synced} 个沙箱`, "ok");
+    } else if (result) {
+      toast(`${action}「${skill.name}」，沙箱首次使用时自动安装`, "info");
+    } else {
+      toast(`${action}「${skill.name}」`, "ok");
+    }
+  };
+
   const save = async () => {
     if (!editing?.name?.trim()) return toast("请填写技能名称", "error");
     setSaving(true);
@@ -84,9 +97,8 @@ export default function SkillsPage() {
         tools: editing.tools || [],
         enabled: editing.enabled !== false,
       };
-      if (editing.id) await api.patchSkill(editing.id, body);
-      else await api.createSkill(body);
-      toast("已保存", "ok");
+      const skill = editing.id ? await api.patchSkill(editing.id, body) : await api.createSkill(body);
+      reportInstallation(skill, "已保存");
       setEditing(null);
       setSaveError(null);
       load();
@@ -99,7 +111,7 @@ export default function SkillsPage() {
   };
 
   const finishImport = (skill: Skill) => {
-    toast(`已导入「${skill.name}」`, "ok");
+    reportInstallation(skill, "已导入");
     setImportOpen(false);
     setImportUrl("");
     setImportFile(null);
@@ -172,8 +184,12 @@ export default function SkillsPage() {
     });
     if (!ok) return;
     try {
-      await api.deleteSkill(s.id);
-      toast("已删除", "ok");
+      const result = await api.deleteSkill(s.id);
+      if (result.installation?.errors.length) {
+        toast(`技能已删除，部分沙箱清理待重试：${result.installation.errors[0].message}`, "error");
+      } else {
+        toast("已删除", "ok");
+      }
       load();
     } catch (e: any) {
       toastError(e);
@@ -278,6 +294,20 @@ export default function SkillsPage() {
                 <p className="mb-4 mt-3 line-clamp-2 text-[12px] leading-relaxed text-muted">
                   {s.description || s.prompt || "（无说明）"}
                 </p>
+                {s.sandbox_path && <button type="button" title="复制沙箱安装目录"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(s.sandbox_path!);
+                      toast("沙箱目录已复制", "ok");
+                    } catch {
+                      toast("复制失败，请手动选中目录", "error");
+                    }
+                  }}
+                  className="mb-4 flex min-w-0 items-center gap-2 rounded-lg bg-panel2 px-2.5 py-2 text-left text-faint hover:text-ink">
+                  <span className="min-w-0 flex-1"><span className="block text-[10.5px]">沙箱安装目录</span>
+                    <code className="block break-all text-[10.5px]">{s.sandbox_path}</code></span>
+                  <Copy size={13} className="shrink-0" />
+                </button>}
                 <div className="mt-auto flex flex-wrap gap-1.5 border-t border-line pt-4">
                   {s.tools.slice(0, 6).map((t) => (
                     <span key={t} className="chip font-mono">
@@ -497,7 +527,7 @@ export default function SkillsPage() {
                 placeholder="写下这个技能的工作方法、步骤和边界。绑定后会追加到 Bot 的系统提示词。"
               />
               <p className="mt-1 text-[10.5px] text-faint">
-                提示词按「技能名 + 说明 + 内容」注入；多个技能合计最多注入 6,000 字。
+                名称、用途和沙箱目录会提供给 Bot；完整说明按需读取，脚本及资源安装到沙箱目录。
               </p>
             </div>
 
@@ -512,7 +542,7 @@ export default function SkillsPage() {
                   ))}
                 </div>
                 <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
-                  绑定到 Bot 后可用 skill_file_read 读取这些文件；重新导入会新建一个技能，不会覆盖当前内容。
+                  这些文件会随技能安装到沙箱，绑定后可用 skill_file_read 读取；重新导入会新建技能。
                 </p>
               </div>
             )}
@@ -563,7 +593,7 @@ export default function SkillsPage() {
                 )}
               </div>
               <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
-                技能里的工具会并入绑定 Bot 的可用工具；L3 工具执行时仍会逐次审批。
+                技能里的工具会并入绑定 Bot 的可用工具；L3 工具默认需要审批，可在审批卡片上设为本群聊始终允许。
               </p>
             </div>
 

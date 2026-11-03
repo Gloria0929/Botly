@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,9 +20,11 @@ from .api import (
     providers,
     push,
     runs,
+    sandbox,
     settings,
     skills,
     stats,
+    terminal,
     stream,
     uploads,
     usage,
@@ -37,7 +40,14 @@ async def lifespan(app: FastAPI):
     setup_logging("api")
     get_logger("main").info("API 启动，日志目录 %s", LOG_DIR)
     init_db()
-    yield
+    from app.sandbox import live_terminal
+    reaper = asyncio.create_task(live_terminal.reap_idle())
+    try:
+        yield
+    finally:
+        reaper.cancel()
+        await asyncio.gather(reaper, return_exceptions=True)
+        await live_terminal.close_all()
 
 
 app = FastAPI(title="Botly · 多智能体工作台", version="1.0.0", lifespan=lifespan)
@@ -67,6 +77,7 @@ for r in (
         bots.router,
         chats.router,
         runs.router,
+        sandbox.router,
         memories.router,
         metrics.router,
         files.router,
@@ -77,6 +88,7 @@ for r in (
         settings.router,
         skills.router,
         stats.router,
+        terminal.router,
         stream.router,
         uploads.router,
         usage.router,

@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 from app.tools import skills as skillmod
 from app.core.db import get_db
 from app.core.deps import current_user, owned_or_404
+from app.core.logging_setup import get_logger
 from app.core.models import Bot, Skill, User
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+log = get_logger("skills")
 
 
 class SkillIn(BaseModel):
@@ -56,6 +58,7 @@ def _out(s: Skill) -> dict:
         "source": s.source or "manual",
         "source_url": s.source_url,
         "files": s.files or [],
+        "sandbox_path": skillmod.sandbox_path(s),
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }
 
@@ -84,22 +87,39 @@ def _unique_name(db: Session, user_id: str, name: str) -> str:
     return candidate
 
 
-def _create_from_package(db: Session, user: User, pkg: skillmod.SkillPackage) -> dict:
+async def _installation(user_id: str) -> dict:
+    from app.services.skill_installation import sync_user
+    try:
+        return await sync_user(user_id)
+    except Exception as exc:
+        log.exception("技能沙箱安装失败")
+        return {"provider": "none", "synced": 0, "pending": True,
+                "errors": [{"message": f"沙箱安装失败：{type(exc).__name__}"}]}
+
+
+async def _create_from_package(db: Session, user: User, pkg: skillmod.SkillPackage) -> dict:
     allowed = skillmod.valid_tool_names(db, user.id)
     skill = Skill(
         user_id=user.id,
         name=_unique_name(db, user.id, pkg.name),
         description=(pkg.description or "")[:200],
-        prompt=(pkg.prompt or "")[:20000],
+        prompt=pkg.prompt or "",
         tools=[t for t in pkg.tools if t in allowed],
         source=pkg.source,
         source_url=pkg.source_url,
     )
     db.add(skill)
     db.flush()
-    skill.files = skillmod.save_package(user.id, skill.id, pkg.files)
+    try:
+        skill.files = skillmod.save_package(user.id, skill.id, pkg.files)
+    except skillmod.SkillPackageError as exc:
+        raise HTTPException(400, str(exc))
     db.flush()
-    return _out(skill)
+    result = _out(skill)
+    # 先提交技能源文件，再连接远端，避免 SQLite 写锁与沙箱同步互相等待。
+    db.commit()
+    result["installation"] = await _installation(user.id)
+    return result
 
 
 @router.post("/import", status_code=201)
@@ -114,7 +134,7 @@ async def import_skill_file(
         pkg = skillmod.parse_package(raw, file.filename or "SKILL.md")
     except skillmod.SkillPackageError as exc:
         raise HTTPException(400, str(exc))
-    return _create_from_package(db, user, pkg)
+    return await _create_from_package(db, user, pkg)
 
 
 @router.post("/import-url", status_code=201)
@@ -128,7 +148,7 @@ async def import_skill_url(
         pkg = await skillmod.fetch_package(payload.url)
     except skillmod.SkillPackageError as exc:
         raise HTTPException(400, str(exc))
-    return _create_from_package(db, user, pkg)
+    return await _create_from_package(db, user, pkg)
 
 
 @router.post("/import-clawhub", status_code=201)
@@ -142,7 +162,7 @@ async def import_skill_clawhub(
         pkg = await skillmod.fetch_clawhub(payload.slug)
     except skillmod.SkillPackageError as exc:
         raise HTTPException(400, str(exc))
-    return _create_from_package(db, user, pkg)
+    return await _create_from_package(db, user, pkg)
 
 
 @router.post("/import-github", status_code=201)
@@ -156,7 +176,7 @@ async def import_skill_github(
         pkg = await skillmod.fetch_github(payload.repo)
     except skillmod.SkillPackageError as exc:
         raise HTTPException(400, str(exc))
-    return _create_from_package(db, user, pkg)
+    return await _create_from_package(db, user, pkg)
 
 
 @router.get("")
@@ -172,18 +192,21 @@ def list_skills(user: User = Depends(current_user), db: Session = Depends(get_db
 
 
 @router.post("", status_code=201)
-def create_skill(payload: SkillIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+async def create_skill(payload: SkillIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
     data = payload.model_dump()
     data["name"] = data["name"].strip()
     _validate(db, user.id, data)
     skill = Skill(user_id=user.id, **data)
     db.add(skill)
     db.flush()
-    return _out(skill)
+    result = _out(skill)
+    db.commit()
+    result["installation"] = await _installation(user.id)
+    return result
 
 
 @router.patch("/{skill_id}")
-def update_skill(
+async def update_skill(
     skill_id: str,
     payload: SkillPatch,
     user: User = Depends(current_user),
@@ -197,7 +220,10 @@ def update_skill(
     for key, value in data.items():
         setattr(skill, key, value)
     db.flush()
-    return _out(skill)
+    result = _out(skill)
+    db.commit()
+    result["installation"] = await _installation(user.id)
+    return result
 
 
 @router.get("/{skill_id}/files")
@@ -227,7 +253,7 @@ def download_skill_file(
 
 
 @router.delete("/{skill_id}")
-def delete_skill(
+async def delete_skill(
     skill_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     skill = owned_or_404(db, Skill, skill_id, user.id)
@@ -238,4 +264,5 @@ def delete_skill(
     skillmod.delete_package(user.id, skill.id)
     db.delete(skill)
     db.flush()
-    return {"ok": True}
+    db.commit()
+    return {"ok": True, "installation": await _installation(user.id)}

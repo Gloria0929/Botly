@@ -3,7 +3,7 @@
 权限分级对应需求 5.8 节：
   L1 只读     —— 不产生副作用，无需审批
   L2 沙箱写入 —— 只影响自己的沙箱，默认免审批，可在群聊设置里改为需要审批
-  L3 外部副作用 —— 必须审批，不可关闭
+  L3 外部副作用 —— 默认审批，可显式设为本群聊始终允许此工具
 """
 from __future__ import annotations
 
@@ -488,7 +488,13 @@ async def _skill_file_read(ctx, path: str) -> str:
     rows = skillmod.for_bot(ctx.db, ctx.user_id, ctx.bot)
     if not rows:
         return "当前 Bot 没有启用技能。"
-    rel_path = (path or "").strip().lstrip("/")
+    requested = (path or "").strip()
+    for skill in rows:
+        installed = skillmod.sandbox_path(skill) + "/"
+        if requested.startswith(installed):
+            requested = f"{skill.name}/{requested[len(installed):]}"
+            break
+    rel_path = requested.lstrip("/")
     target: tuple | None = None
     if "/" in rel_path:
         prefix, rel = rel_path.split("/", 1)
@@ -501,6 +507,7 @@ async def _skill_file_read(ctx, path: str) -> str:
                 f"技能「{skill.name}」的完整说明（用户启用的技能配置 SKILL.md）：\n\n"
                 + (body or "（未填写说明）")
             )
+            result += f"\n\n沙箱安装目录：{skillmod.sandbox_path(skill)}\n脚本和资源位于该目录，执行脚本时使用此路径作为工作目录。"
             if skill.files:
                 result += "\n\n参考文件（需要时用 skill_file_read 读取）：\n" + "\n".join(
                     f"- {skill.name}/{rel}" for rel in skill.files
@@ -618,15 +625,47 @@ def _strip_fence(code: str) -> str:
 
 # 各语言的解释器与入口（python/node 用 stdin，bash/sh 用 -s）由 linux_sandbox 负责，
 # 容器就是该群聊那台 Ubuntu，和 run_command 共用 /workspace。
+def _file_state(ctx) -> dict:
+    import hashlib
+    from app.sandbox.artifacts import is_artifact_file
+    return {item["path"]: hashlib.sha256(sandbox.safe_path(ctx.user_id, ctx.chat_id, item["path"]).read_bytes()).hexdigest()
+        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_artifact_file(ctx.user_id, ctx.chat_id, item["path"])}
+
+
+def _record_execution_files(ctx, before=None) -> None:
+    entries = sandbox.list_files(ctx.user_id, ctx.chat_id)
+    paths = {item["path"] for item in entries}
+    for rec in ctx.db.scalars(select(FileRec).where(FileRec.user_id == ctx.user_id, FileRec.chat_id == ctx.chat_id)):
+        if rec.path not in paths:
+            ctx.db.delete(rec)
+    if before is not None:
+        after = _file_state(ctx)
+        for item in entries:
+            if item["path"] in after and before.get(item["path"]) != after[item["path"]]:
+                ctx.record_file(item["path"], item["size"])
+    ctx.db.flush()
+    emit(ctx.db, ctx.user_id, ctx.chat_id, "files.updated", {"chat_id": ctx.chat_id})
+
+
 async def _code_exec(ctx, code: str, language: str = "python") -> str:
-    from app.sandbox import linux as linux_sandbox  # 局部导入：linux_sandbox 依赖本模块的 UNTRUSTED_PREFIX
+    from app.sandbox import runtime as linux_sandbox
+    if not linux_sandbox.CODE_SANDBOX_ENABLED:
+        return "代码执行未启用。"
 
     code = _strip_fence(code)
     if not code:
         return "代码为空，请提供要执行的代码。"
     if len(code) > 100_000:
         code = code[:100_000] + "\n# [代码过长，已截断]"
-    return await linux_sandbox.run_code(ctx.user_id, ctx.chat_id, code, language)
+    from app.sandbox import terminal
+    cube_connected = linux_sandbox.status(ctx.user_id)["provider"] == "cube"
+    before = None if cube_connected else _file_state(ctx)
+    ctx.db.commit()
+    command_id = terminal.create(ctx.user_id, ctx.chat_id, code, "code", language,
+        ctx.bot.id, ctx.run.id, getattr(ctx, "tool_call_id", None))
+    out = await terminal.execute(command_id)
+    _record_execution_files(ctx, before)
+    return out
 
 
 register(
@@ -661,12 +700,20 @@ register(
 
 
 # --------------------------------------------------------------------------- #
-# 常驻 Linux 运行环境（每个群聊一个容器，root + 联网，L3 每次审批）
+# 常驻 Linux 运行环境（每个群聊一个容器，root + 联网，L3 默认审批）
 # --------------------------------------------------------------------------- #
 async def _run_command(ctx, command: str) -> str:
-    from app.sandbox import linux as linux_sandbox  # 局部导入，避免循环
+    from app.sandbox import runtime as linux_sandbox
 
-    return await linux_sandbox.run_command(ctx.user_id, ctx.chat_id, command)
+    from app.sandbox import terminal
+    cube_connected = linux_sandbox.status(ctx.user_id)["provider"] == "cube"
+    before = None if cube_connected else _file_state(ctx)
+    ctx.db.commit()
+    command_id = terminal.create(ctx.user_id, ctx.chat_id, command, bot_id=ctx.bot.id,
+        run_id=ctx.run.id, call_id=getattr(ctx, "tool_call_id", None))
+    out = await terminal.execute(command_id)
+    _record_execution_files(ctx, before)
+    return out
 
 
 register(

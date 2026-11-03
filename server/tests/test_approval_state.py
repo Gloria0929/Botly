@@ -93,3 +93,18 @@ def test_current_approval_still_approves_with_allow_setting(client, invite):
     with SessionLocal() as db:
         assert db.get(Approval, aid).status == "approved"
         assert db.get(Message, mid).meta["status"] == "approved"
+
+
+def test_l3_command_can_be_whitelisted_when_requested(client, invite):
+    chat_id, rid, aid, mid = approval_fixture(client, invite, "l3-whitelist")
+    with SessionLocal() as db:
+        ap = db.get(Approval, aid)
+        ap.level, ap.tool, ap.args = "L3", "run_command", {"command": "pwd"}
+        ap.args_hash = args_hash(ap.args)
+        card = db.get(Message, mid)
+        card.meta = {**card.meta, "level": ap.level, "tool": ap.tool, "args": ap.args}
+        db.commit()
+    response = client.post(f"/api/approvals/{aid}/approve", json={"always_allow": True})
+    assert response.status_code == 200
+    assert "run_command" in client.get(f"/api/chats/{chat_id}").json()["always_allow_tools"]
+    assert card_snapshot(client, chat_id, mid)["meta"]["status"] == "approved"

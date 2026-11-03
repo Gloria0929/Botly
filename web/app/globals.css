@@ -445,7 +445,7 @@ button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
 }
 .chat-welcome { background: var(--panel); }
 .settings-layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 28px; align-items: start; }
-.settings-index { position: sticky; top: 0; }
+.settings-index { position: sticky; top: var(--settings-index-offset, 24px); max-height: calc(100dvh - 100px); overflow-y: auto; }
 .settings-index a { border-left: 2px solid transparent; }
 .settings-index a:hover, .settings-index a:focus { border-color: var(--accent); background: rgb(var(--accent-rgb) / .07); color: var(--accent); }
 .settings-section { scroll-margin-top: 24px; }
@@ -465,7 +465,7 @@ button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
 @media (max-width: 1023px) {
   .chat-layout, .chat-layout.has-detail { display: flex; }
   .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  .settings-index { position: static; display: flex; overflow-x: auto; gap: 4px; padding-bottom: 8px; }
+  .settings-index { position: static; display: flex; max-height: none; overflow-x: auto; overflow-y: hidden; gap: 4px; padding-bottom: 8px; }
   .settings-index a { flex-shrink: 0; }
 }
 @media (max-width: 767px) {

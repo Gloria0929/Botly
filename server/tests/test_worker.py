@@ -21,9 +21,8 @@ def test_worker_executes_without_redis(client, invite, monkeypatch):
     monkeypatch.setattr(worker.redis_bus, "dequeue", no_queue)
     monkeypatch.setattr(worker.redis_bus, "enqueue", lambda _: False)
     monkeypatch.setattr(worker.signal, "signal", lambda *args: None)
-    collect = worker._recover_and_collect
-    # 共享测试库中其他用例故意留下了 queued 执行；--once 只应消费本用例的任务。
-    monkeypatch.setattr(worker, "_recover_and_collect", lambda: [rid for rid in collect() if rid == run_id])
+    # 共享测试库前 50 条可能全是其它用例的排队任务；此回归只调度自己的执行。
+    monkeypatch.setattr(worker, "_recover_and_collect", lambda: [run_id])
     asyncio.run(worker.main(once=True))
     result = client.get(f"/api/runs/{run_id}").json()
     assert result["status"] == "waiting", result

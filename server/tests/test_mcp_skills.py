@@ -430,7 +430,7 @@ def test_import_skill_from_url(client, invite, fake_mcp, monkeypatch):
     assert skill["source"] == "url"
     assert skill["source_url"] == f"{base}/skill.md"
     assert "先写提纲" in skill["prompt"]
-    assert skill["files"] == []
+    assert skill["files"] == ["SKILL.md"]
 
 
 def test_skill_package_rejects_path_traversal_and_missing_manifest(client, invite, monkeypatch):
@@ -520,4 +520,4 @@ def test_fetch_github_precise_lookup(monkeypatch):
     # 精确命中 skills/coding-agent/SKILL.md（路径最浅），而不是 other/SKILL.md 或根目录兜底
     assert any("skills/coding-agent/SKILL.md" in u for u in downloaded)
     assert "reference.md" in pkg.files
-    assert "scripts/run.py" not in pkg.files  # 只在 SKILL.md 同目录收参考文件
+    assert "scripts/run.py" in pkg.files  # 子目录脚本也要随技能安装到沙箱。

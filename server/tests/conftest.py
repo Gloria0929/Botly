@@ -16,6 +16,7 @@ os.environ["BOTLY_SECRET_KEY"] = "test-secret-key"
 # ACC-08：测试不发真实邮件，走「写日志 + 返回 dev 链接」的开发模式
 os.environ["BOTLY_SMTP_HOST"] = ""
 os.environ["BOTLY_MAIL_DEV"] = "1"
+os.environ["BOTLY_SANDBOX_PROVIDER"] = "docker"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -45,7 +46,7 @@ def _no_container_warm(monkeypatch):
 @pytest.fixture(scope="session")
 def invite():
     with SessionLocal() as db:
-        code = InviteCode(code="TEST-INVITE-0001", max_uses=200, used_count=0)
+        code = InviteCode(code="TEST-INVITE-0001", max_uses=2000, used_count=0)
         db.add(code)
         db.commit()
     return "TEST-INVITE-0001"

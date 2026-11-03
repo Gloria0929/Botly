@@ -158,6 +158,8 @@ def send_to_subscription(
 
 def _deliver(user_id: str, payload: str, notif_type: str) -> None:
     """后台线程：查订阅并逐个发送；404/410 的订阅清理掉。"""
+    if notif_type in ("approval", "approval_expired"):
+        return
     dead: list[str] = []
     try:
         with SessionLocal() as db:

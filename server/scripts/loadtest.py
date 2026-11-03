@@ -1,154 +1,152 @@
-"""50 用户 / 20 并发压测脚本（核心读写路径）。
+"""独立测试环境多用户验收：隔离、首屏性能、真实 Worker 执行。
 
-用法（先起一个空库的 API，再做压测）：
-    cd server
-    DATABASE_URL=sqlite:////tmp/botly_lt.db PORT=8200 ./run-api.sh
-    ./venv/bin/python scripts/loadtest.py --base http://127.0.0.1:8200 \
-        --concurrency 20 --requests 200 --messages 1000
-
-脚本做的事：
-  1. 经 HTTP 播种：邀请码、注册用户、绑定 mock 模型；
-  2. 直连 DB 往主线程插入 N 条消息（绕开执行队列，快）；
-  3. 经 HTTP 压测：首屏消息拉取、群聊列表、发送消息；
-  4. 输出 p50 / p95 / p99、吞吐、错误数。
+启动同一测试数据库的 API 和 Worker 后执行：
+python -m scripts.loadtest --base http://127.0.0.1:8200 --users 50 --concurrency 20
+仅使用 mock 模型；每次创建唯一测试账号，不覆盖已有数据。
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import os
+import json
 import statistics
-import sys
 import time
+from pathlib import Path
+from uuid import uuid4
 
 import httpx
+from sqlalchemy import select
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.core.db import init_db, session_scope
+from app.core.models import InviteCode, Message, Run, Thread
 
-from sqlalchemy import text  # noqa: E402
-
-from app.core.db import SessionLocal, init_db  # noqa: E402
-from app.core.models import InviteCode, Message  # noqa: E402
-
-INVITE = "LOADTEST-INVITE"
-EMAIL = "loadtest@example.dev"
-PASSWORD = "loadtest-password-123"
 HEADERS = {"X-Botly-Client": "web"}
+PASSWORD = "loadtest-password-123"
 
 
-def _seed(base: str, n_messages: int) -> str:
+async def verify(args) -> dict:
     init_db()
-    with SessionLocal() as db:
-        if not db.query(InviteCode).filter(InviteCode.code == INVITE).first():
-            db.add(InviteCode(code=INVITE, max_uses=1000, used_count=0))
-            db.commit()
-
-    with httpx.Client(base_url=base, timeout=120, headers=HEADERS) as c:
-        login = c.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
-        if login.status_code == 401:
-            r = c.post(
-                "/api/auth/register",
-                json={"email": EMAIL, "password": PASSWORD, "invite_code": INVITE, "name": "压测用户"},
-            )
+    prefix = "loadtest-" + uuid4().hex[:10]
+    invite = prefix.upper()
+    with session_scope() as db:
+        db.add(InviteCode(code=invite, max_uses=args.users, used_count=0))
+    clients = [httpx.AsyncClient(base_url=args.base, headers=HEADERS, timeout=60) for _ in range(args.users)]
+    workspaces = []
+    report = {"prefix": prefix, "users": args.users, "concurrency": args.concurrency, "performance": {}}
+    sem = asyncio.Semaphore(args.concurrency)
+    try:
+        for i, client in enumerate(clients):
+            r = await client.post("/api/auth/register", json={"email": f"{prefix}-{i}@example.dev",
+                "password": PASSWORD, "invite_code": invite, "name": f"压测用户 {i}"})
             r.raise_for_status()
-            c.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
+            account = r.json()
+            r = await client.post("/api/providers", json={"vendor_id": "mock", "kind": "mock"})
+            r.raise_for_status()
+            provider = r.json()["provider"]["id"]
+            bots = (await client.get("/api/bots")).json()
+            for bot in bots:
+                r = await client.patch(f"/api/bots/{bot['id']}", json={"provider_id": provider,
+                    "model": "botly-mock", "tools": []})
+                r.raise_for_status()
+            chat = (await client.get(f"/api/chats/{account['chat_id']}")).json()
+            workspaces.append({"user": account["id"], "chat": chat["id"], "thread": chat["main_thread_id"],
+                "bot": bots[1]["id"], "name": bots[1]["name"], "provider": provider})
+        with session_scope() as db:
+            for i, w in enumerate(workspaces):
+                db.add_all([Message(user_id=w["user"], thread_id=w["thread"], seq=j + 1,
+                    sender_type="user", type="text", content=f"{prefix} 用户 {i} 的消息 {j}")
+                    for j in range(args.messages)])
+                db.get(Thread, w["thread"]).seq_counter = args.messages
 
-        # 绑定 mock 模型，保证发消息能创建执行（不会因未配模型被拒）
-        prov = c.post("/api/providers", json={"vendor_id": "mock", "kind": "mock"}).json()
-        pid = prov["provider"]["id"]
-        for b in c.get("/api/bots").json():
-            c.patch(f"/api/bots/{b['id']}", json={"provider_id": pid, "model": "botly-mock"})
-
-        chat = c.get("/api/chats").json()[0]
-        chat_id = chat["id"]
-        thread_id = c.get(f"/api/chats/{chat_id}").json().get("main_thread_id")
-
-    # 直接插消息，绕开执行队列
-    with SessionLocal() as db:
-        existing = db.execute(
-            text("SELECT COUNT(*) FROM messages WHERE thread_id = :t"), {"t": thread_id}
-        ).scalar()
-        if existing < n_messages:
-            real_uid = db.execute(text("SELECT id FROM users LIMIT 1")).scalar()
-            rows = [
-                Message(
-                    user_id=real_uid,
-                    thread_id=thread_id,
-                    seq=i + 1,
-                    sender_type="user" if i % 2 else "bot",
-                    type="text",
-                    content=(
-                        f"第 {i + 1} 条压测消息。这是一段用于首屏拉取延迟测试的较长正文，"
-                        "内容长度会影响序列化与网络传输，用来模拟真实群聊里的一条普通回复。"
-                    ),
-                )
-                for i in range(n_messages)
-            ]
-            db.add_all(rows)
-            db.execute(
-                text("UPDATE threads SET seq_counter = :n WHERE id = :t"),
-                {"n": n_messages, "t": thread_id},
-            )
-            db.commit()
-    return chat_id
-
-
-async def _load(base: str, chat_id: str, concurrency: int, requests: int) -> None:
-    limits = httpx.Limits(max_connections=concurrency + 5, max_keepalive_connections=concurrency)
-    sem = asyncio.Semaphore(concurrency)
-
-    async with httpx.AsyncClient(base_url=base, timeout=120, limits=limits, headers=HEADERS) as client:
-        await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
-
-        async def timed(fn):
+        async def timed(i, path):
             async with sem:
-                t0 = time.perf_counter()
-                try:
-                    r = await fn()
-                    return (time.perf_counter() - t0) * 1000, r.status_code < 400
-                except Exception:  # noqa: BLE001
-                    return (time.perf_counter() - t0) * 1000, False
+                started = time.perf_counter()
+                response = await clients[i].get(path)
+                response.raise_for_status()
+                return (time.perf_counter() - started) * 1000
 
-        async def run(name: str, fn, n: int):
-            results = await asyncio.gather(*(timed(fn) for _ in range(n)))
-            lat = sorted(r[0] for r in results)
-            ok = sum(1 for r in results if r[1])
-            p50 = statistics.median(lat)
-            p95 = lat[min(len(lat) - 1, int(len(lat) * 0.95))]
-            p99 = lat[min(len(lat) - 1, int(len(lat) * 0.99))]
-            total = sum(lat) / 1000
-            print(
-                f"{name}: 请求 {n} 成功 {ok}/{n} | "
-                f"p50 {p50:.1f}ms p95 {p95:.1f}ms p99 {p99:.1f}ms | "
-                f"{n / max(total, 1e-9):.1f} req/s"
-            )
+        for label, make_path in (
+            ("messages", lambda w: f"/api/chats/{w['chat']}/messages?limit=50"),
+            ("chats", lambda w: "/api/chats"),
+        ):
+            started = time.perf_counter()
+            lat = sorted(await asyncio.gather(*(timed(i % args.users, make_path(workspaces[i % args.users]))
+                for i in range(args.requests))))
+            elapsed = time.perf_counter() - started
+            report["performance"][label] = {"requests": len(lat), "p50_ms": round(statistics.median(lat), 1),
+                "p95_ms": round(lat[min(len(lat) - 1, int(len(lat) * .95))], 1),
+                "p99_ms": round(lat[min(len(lat) - 1, int(len(lat) * .99))], 1),
+                "requests_per_second": round(len(lat) / elapsed, 1)}
 
-        await run(
-            "首屏消息 GET /messages?limit=50",
-            lambda: client.get(f"/api/chats/{chat_id}/messages", params={"limit": 50}),
-            requests,
-        )
-        await run("群聊列表 GET /chats", lambda: client.get("/api/chats"), requests // 4)
-        # 同群聊 CHT-03 只允许一个执行，并发发送会部分 409，属预期串行化
-        await run(
-            "发送消息 POST /messages",
-            lambda: client.post(f"/api/chats/{chat_id}/messages", json={"content": "压测发送消息"}),
-            max(10, requests // 20),
-        )
+        checks = 0
+        for i, client in enumerate(clients):
+            foreign = workspaces[(i + 1) % args.users]
+            if args.users > 1:
+                for path in (f"/api/chats/{foreign['chat']}", f"/api/chats/{foreign['chat']}/messages",
+                    f"/api/bots/{foreign['bot']}", f"/api/providers/{foreign['provider']}"):
+                    r = await client.patch(path, json={"name": "不能修改"}) if "/providers/" in path else await client.get(path)
+                    assert r.status_code == 404, (path, r.status_code, r.text)
+                    checks += 1
+            rows = (await client.get("/api/chats")).json()
+            assert {row["id"] for row in rows} == {workspaces[i]["chat"]}
+            assert rows[0]["member_count"] == 3
+            metrics = (await client.get("/api/metrics")).text
+            assert "botly_users_total 1" in metrics
+            checks += 2
+
+        async def submit(i):
+            async with sem:
+                w = workspaces[i]
+                r = await clients[i].post(f"/api/chats/{w['chat']}/messages",
+                    json={"content": f"@{w['name']} 用户 {i} 并发测试：请直接回答"})
+                r.raise_for_status()
+                return r.json()["run"]["id"]
+
+        run_ids = await asyncio.gather(*(submit(i) for i in range(args.users)))
+        peak, completed = 0, set()
+        started = time.monotonic()
+        while len(completed) < len(run_ids):
+            if time.monotonic() - started > args.timeout:
+                raise AssertionError(f"执行超时：{len(completed)}/{len(run_ids)} 完成")
+            with session_scope() as db:
+                rows = list(db.scalars(select(Run).where(Run.id.in_(run_ids))))
+                peak = max(peak, sum(r.status == "running" for r in rows))
+                assert peak <= args.concurrency, f"并发上限失效：{peak}"
+                failed = [r for r in rows if r.status in ("failed", "stopped")]
+                assert not failed, [(r.id, r.end_reason) for r in failed]
+                completed = {r.id for r in rows if r.status == "completed"}
+            await asyncio.sleep(.1)
+        for i, client in enumerate(clients):
+            own = (await client.get(f"/api/runs/{run_ids[i]}")).json()
+            assert own["status"] == "completed"
+            if args.users > 1:
+                r = await client.get(f"/api/runs/{run_ids[(i + 1) % args.users]}")
+                assert r.status_code == 404
+                checks += 1
+        report.update({"isolation_checks": checks, "completed_runs": len(completed),
+            "peak_running": peak, "run_elapsed_seconds": round(time.monotonic() - started, 1), "passed": True})
+        return report
+    finally:
+        await asyncio.gather(*(c.aclose() for c in clients))
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default=os.getenv("LOADTEST_BASE", "http://127.0.0.1:8200"))
-    ap.add_argument("--concurrency", type=int, default=20)
-    ap.add_argument("--requests", type=int, default=200)
-    ap.add_argument("--messages", type=int, default=1000)
-    args = ap.parse_args()
-
-    print(f"==> 播种 {args.messages} 条消息 ...")
-    chat_id = _seed(args.base, args.messages)
-    print(f"==> 压测 chat={chat_id} concurrency={args.concurrency} requests={args.requests} ...")
-    asyncio.run(_load(args.base, chat_id, args.concurrency, args.requests))
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default="http://127.0.0.1:8200")
+    parser.add_argument("--users", type=int, default=50)
+    parser.add_argument("--concurrency", type=int, default=20)
+    parser.add_argument("--requests", type=int, default=200)
+    parser.add_argument("--messages", type=int, default=1000)
+    parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if min(args.users, args.concurrency, args.requests, args.messages) < 1:
+        parser.error("数量必须大于 0")
+    report = asyncio.run(verify(args))
+    rendered = json.dumps(report, ensure_ascii=False, indent=2)
+    print(rendered)
+    if args.output:
+        args.output.write_text(rendered + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

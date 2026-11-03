@@ -107,6 +107,10 @@ def list_tools(user: User = Depends(current_user), db: Session = Depends(get_db)
         available, reason = True, None
         if t.name == "web_search" and not search_ready:
             reason = "未配置搜索 Key，将使用 DuckDuckGo 免密钥搜索（结果可能不稳定）"
+        if t.name in ("code_exec", "run_command"):
+            from app.sandbox import runtime
+            state = runtime.status(user.id)
+            available, reason = state["available"], state["reason"] or None
         out.append(
             {
                 "name": t.name,

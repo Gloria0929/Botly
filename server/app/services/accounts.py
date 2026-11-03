@@ -25,19 +25,26 @@ from app.core.models import (
     Bot,
     Chat,
     ChatMember,
+    CubeConnection,
+    CubeSession,
     EmailToken,
     Event,
     FileRec,
     LoginAttempt,
     Memory,
+    MemoryCandidate,
+    McpServer,
     Message,
     Notification,
+    OAuthAccount,
     Provider,
     PushSubscription,
     Question,
     Run,
+    Skill,
     Task,
     Thread,
+    TerminalCommand,
     Upload,
     UsageLog,
     User,
@@ -51,6 +58,13 @@ OPEN_TASK_STATUSES = ("queued", "running", "waiting_approval", "waiting_reply")
 
 # 彻底清除的顺序：先子表后主表，满足外键约束。
 _PURGE_ORDER = (
+    TerminalCommand,
+    CubeSession,
+    CubeConnection,
+    MemoryCandidate,
+    OAuthAccount,
+    McpServer,
+    Skill,
     Event,
     UsageLog,
     Approval,
@@ -113,6 +127,13 @@ def disable_user(db: Session, user: User) -> None:
 def purge_user(db: Session, user: User) -> dict[str, int]:
     """删除该用户的全部数据与磁盘文件，返回各表删除行数。"""
     user_id, email = user.id, user.email
+    connection = db.scalar(select(CubeConnection).where(CubeConnection.user_id == user_id))
+    if connection:
+        from app.sandbox.cube import CubeBackend
+        backend = CubeBackend(connection)
+        for chat_id in db.scalars(select(CubeSession.chat_id).where(CubeSession.user_id == user_id)).all():
+            # 主清理事务会删除 CubeSession；远端清理不能另开 SQLite 写事务。
+            backend._release(user_id, chat_id, delete_record=False)
     counts: dict[str, int] = {}
     for model in _PURGE_ORDER:
         result = db.execute(delete(model).where(model.user_id == user_id))

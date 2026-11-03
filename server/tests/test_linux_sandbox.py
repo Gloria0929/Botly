@@ -10,7 +10,7 @@ def test_run_command_registered():
     tool = tools.BUILTIN_TOOLS.get("run_command")
     assert tool is not None
     assert tool.kind == "builtin"
-    assert tool.level == "L3"  # root + 联网 = 每次审批
+    assert tool.level == "L3"  # root + 联网 = 默认审批，支持显式群聊授权
     # 容器内命令自身 60 秒超时，外层必须更宽，否则永远取不到结果
     assert tool.timeout and tool.timeout > 60
 

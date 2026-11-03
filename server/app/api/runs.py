@@ -202,7 +202,7 @@ class RejectIn(BaseModel):
 
 
 class ApproveIn(BaseModel):
-    # APV-06：勾选后把该工具加入当前群聊的白名单（L3 不支持）
+    # APV-06：勾选后把该工具加入当前群聊的白名单，支持 L1/L2/L3。
     always_allow: bool = False
 
 
@@ -222,8 +222,8 @@ def _resolve_approval(
     run = db.get(Run, ap.run_id)
     if not run or run.status not in ACTIVE:
         raise HTTPException(400, "所属执行已结束，无法处理该审批")
-    # APV-06：勾选「本群聊始终允许」时写入白名单；L3 工具不可绕过审批
-    if approved and always_allow and ap.level != "L3":
+    # APV-06：显式批准「本群聊始终允许」后，只授权当前群聊的这个工具。
+    if approved and always_allow:
         chat = db.get(Chat, run.chat_id)
         if chat:
             tools = list(chat.always_allow_tools or [])

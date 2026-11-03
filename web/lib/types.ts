@@ -38,6 +38,13 @@ export type Skill = {
   source?: "manual" | "url" | "zip" | "github" | "clawhub" | string;
   source_url?: string | null;
   files?: string[];
+  sandbox_path?: string;
+  installation?: {
+    provider: string;
+    synced: number;
+    pending: boolean;
+    errors: { chat_id?: string; message: string }[];
+  };
   created_at?: string;
 };
 
@@ -212,6 +219,40 @@ export type Run = {
 
 export type ChatFile = { id: string; path: string; size: number; updated_at: string | null };
 
+export type TerminalEntry = {
+  id: string; actor: string; bot_id: string | null; kind: "command" | "code"; language: string;
+  command: string; output: string; status: "queued" | "running" | "completed" | "failed";
+  created_at: string; started_at: string | null; ended_at: string | null;
+};
+export type TerminalHistory = {
+  items: TerminalEntry[]; provider: string; available: boolean; reason: string;
+  workspace: string; sandbox_id: string | null; agent_running: boolean; event_cursor: number;
+};
+
+export type SandboxStatus = {
+  provider: string;
+  available: boolean;
+  local_test: boolean;
+  reason?: string;
+  api_url?: string;
+  template_id?: string;
+  proxy_node_ip?: string;
+  proxy_port?: number;
+  sandbox_domain?: string;
+  api_key_configured?: boolean;
+  last_checked_at?: string | null;
+  last_check_error?: string | null;
+  verification?: "untested" | "passed" | "failed";
+  session_count?: number;
+  sessions?: {
+    chat_id: string;
+    chat_name: string;
+    sandbox_id: string;
+    last_executed_at: string | null;
+    last_exit_code: number | null;
+  }[];
+};
+
 /** CHT-07：从主线程某条消息拉出的分支线程 */
 export type Branch = {
   id: string;
@@ -270,6 +311,7 @@ export type Notification = {
   target_id: string | null;
   read: boolean;
   created_at: string;
+  email_status?: "pending" | "sending" | "sent" | "dev" | "failed" | "skipped" | null;
 };
 
 export type Memory = {
@@ -312,6 +354,7 @@ export type Me = {
     token_budget: number;
     delegation_depth?: number;
     notifications_enabled: boolean;
+    approval_email_enabled?: boolean;
     approval_ttl_hours: number;
     search_configured: boolean;
   };

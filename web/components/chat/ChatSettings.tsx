@@ -283,11 +283,11 @@ export default function ChatSettings({
             </div>
           ) : (
             <div className="rounded-lg border border-dashed border-line px-3 py-4 text-center text-[11.5px] leading-relaxed text-faint">
-              还没有始终允许的工具。审批卡片上勾选「在本群聊始终允许」后会出现在这里。
+              还没有始终允许的工具。在审批卡片上点击「在本群聊始终允许」后会出现在这里。
             </div>
           )}
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
-            只对 L1 / L2 工具生效；L3（外部副作用）每次都必须审批，不能加入白名单。
+            支持 L1 / L2 / L3 工具，仅对当前群聊生效。撤销后恢复该工具默认的审批规则。
           </p>
         </div>
       </div>

@@ -79,6 +79,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _light_migrate()
     _ensure_alembic()
+    _upgrade_alembic()
     _backfill_thread_seq()
     _migrate_bot_name_uniqueness()
     _ensure_message_search_index()
@@ -109,6 +110,23 @@ def _ensure_alembic() -> None:
         command.stamp(cfg, "head")
     except Exception:  # noqa: BLE001 - 已 stamp / 只读库等
         pass
+
+
+def _upgrade_alembic() -> None:
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import text
+
+    base = Path(__file__).resolve().parents[2]
+    cfg = Config(str(base / "alembic.ini"))
+    cfg.set_main_option("script_location", str(base / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+    # API、Worker 同时启动时让版本迁移串行；共用连接避免检查与升级间的竞态。
+    with engine.begin() as conn:
+        if not IS_SQLITE:
+            conn.execute(text("SELECT pg_advisory_xact_lock(782341993)"))
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "head")
 
 
 def _backfill_thread_seq() -> None:
@@ -278,7 +296,18 @@ def _light_migrate() -> None:
             "email_verified_at": "TIMESTAMP",
             "session_epoch": "INTEGER DEFAULT 0",
         },
-        "user_settings": {"delegation_depth": "INTEGER"},
+        "user_settings": {
+            "delegation_depth": "INTEGER",
+            "approval_email_enabled": "BOOLEAN DEFAULT TRUE",
+        },
+        "notifications": {
+            "dismissed_at": "TIMESTAMP",
+            "email_status": "VARCHAR(16)",
+            "email_attempts": "INTEGER DEFAULT 0",
+            "email_next_attempt_at": "TIMESTAMP",
+            "email_lease_until": "TIMESTAMP",
+            "email_last_error": "VARCHAR(200)",
+        },
         "skills": {
             "source": "VARCHAR(20) DEFAULT 'manual'",
             "source_url": "VARCHAR(500)",
@@ -290,6 +319,8 @@ def _light_migrate() -> None:
             "args": "JSON",
             "env": "JSON",
         },
+        "cube_connections": {"last_check_error": "VARCHAR(500)"},
+        "cube_sessions": {"last_executed_at": "TIMESTAMP", "last_exit_code": "INTEGER", "pty_pid": "INTEGER", "skills_manifest": "JSON"},
     }
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())

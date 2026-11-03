@@ -1,7 +1,7 @@
 """群聊的常驻 Linux 环境：一个群聊一个 Docker 容器（Ubuntu，root + 联网，可装包）。
 
 这里同时承载两个工具，容器是同一个：
-- `run_command`：执行 shell 命令，L3（每次审批）
+- `run_command`：执行 shell 命令，L3（默认审批，可按群聊设为始终允许）
 - `code_exec`：执行一段 python / node / bash / sh 代码，代码走 stdin
 
 工作区挂载为群聊沙箱目录（`sandbox.chat_root`），因此容器里 `/workspace` 与
@@ -214,7 +214,7 @@ async def run_command(user_id: str, chat_id: str, command: str) -> str:
         # 容器内自负其责地限时：即使这边把 docker 客户端杀掉，容器里的
         # `timeout` 仍会在 N 秒后 KILL 掉命令，不会留下跑飞的进程。
         out, err, code = await _docker(
-            "exec", "-w", "/workspace", name,
+            "exec", "-e", "TERM=xterm-256color", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8", "-w", "/workspace", name,
             "timeout", "-s", "KILL", str(LINUX_SANDBOX_TIMEOUT), "bash", "-lc", command,
             timeout=LINUX_SANDBOX_TIMEOUT + 15,
         )
@@ -280,7 +280,7 @@ async def run_code(user_id: str, chat_id: str, code: str, language: str = "pytho
             if failure:
                 return failure
         out, err, code_ret = await _docker(
-            "exec", "-i", "-w", "/workspace", name,
+            "exec", "-i", "-e", "TERM=xterm-256color", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8", "-w", "/workspace", name,
             "timeout", "-s", "KILL", str(CODE_SANDBOX_TIMEOUT), binary, *argv,
             stdin=code.encode("utf-8"),
             timeout=CODE_SANDBOX_TIMEOUT + 15,

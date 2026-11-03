@@ -29,6 +29,7 @@ from app.agent import graph as graphmod
 from app.agent import llm
 from app.tools import mcp as mcpmod
 from app.sandbox import files as sandbox
+from app.sandbox.artifacts import is_artifact_file
 from app.tools import skills as skillmod
 from app.tools import registry as toolmod
 from app.core.config import (
@@ -452,6 +453,8 @@ class ToolCtx:
         self.search_key = key
 
     def record_file(self, path: str, size: int) -> None:
+        if not is_artifact_file(self.user_id, self.chat_id, path):
+            return
         rec = self.db.scalar(
             select(FileRec).where(
                 FileRec.chat_id == self.chat_id, FileRec.path == path
@@ -459,6 +462,7 @@ class ToolCtx:
         )
         if rec:
             rec.size = size
+            rec.created_by_bot_id, rec.run_id = self.bot.id, self.run.id
         else:
             rec = FileRec(
                 user_id=self.user_id,
@@ -2299,7 +2303,7 @@ class RunExecutor:
             needs = tool.level == "L3" or (
                 tool.level == "L2" and bool(chat.require_approval_for_write)
             )
-            if tool.name in (chat.always_allow_tools or []) and tool.level != "L3":
+            if tool.name in (chat.always_allow_tools or []):
                 needs = False
             if not needs:
                 return None
@@ -2425,6 +2429,7 @@ class RunExecutor:
             bot = execution_bot(db, run, bot_id)
             task = db.get(Task, task_id) if task_id else None
             ctx = ToolCtx(db, run, chat, bot, task)
+            ctx.tool_call_id = call.get("id")
             try:
                 assert tool.executor is not None
                 # 每个工具可以声明自己的超时；容器类工具需要比默认 30 秒更宽，

@@ -41,7 +41,9 @@ fi
 echo "==> 检查 Redis"
 ( cd server && ./venv/bin/python -c "from app.core import redis_bus; print('redis ok' if redis_bus.available() else 'redis 不可用，将降级为 DB 轮询')" )
 
-echo "==> 检查沙箱预装镜像"
+SANDBOX_PROVIDER="${BOTLY_SANDBOX_PROVIDER:-$(cd server && ./venv/bin/python -c 'from app.core.config import SANDBOX_PROVIDER; print(SANDBOX_PROVIDER)')}"
+if [ "$SANDBOX_PROVIDER" = "docker" ]; then
+echo "==> 检查本地测试沙箱镜像"
 SANDBOX_IMAGE="$(grep -E '^BOTLY_LINUX_SANDBOX_IMAGE=' server/.env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-botly-sandbox:24.04}"
 if [ "${SKIP_SANDBOX_IMAGE:-0}" = "1" ]; then
@@ -53,6 +55,9 @@ else
   if ! ./server/scripts/build_sandbox.sh "$SANDBOX_IMAGE"; then
     echo "构建失败，容器将退回基础镜像 ubuntu:24.04（python/node 首次用到时现装）"
   fi
+fi
+else
+  echo "部署默认沙箱：${SANDBOX_PROVIDER}；个人 Cube 连接按账号优先使用（Docker 仅本机测试）"
 fi
 
 # 每个子进程放进独立进程组（set -m），退出时整组杀掉。

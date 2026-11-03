@@ -79,12 +79,15 @@ def test_memory_save_run_limit(client, invite):
     run_id = r.json()["run"]["id"]
 
     ctx = _ctx_for(run_id)
-    for i in range(3):
-        out = asyncio.run(_memory_save(ctx, content=f"用户约定第 {i} 条：交付前必须跑测试。"))
-        assert out.startswith("已保存")
-    out4 = asyncio.run(_memory_save(ctx, content="用户约定第 4 条：文档放 docs 目录。"))
-    ctx.db.commit()
-    assert "最多自动保存 3 条" in out4
+    try:
+        for content in ("用户偏好交付前运行全部回归测试。", "项目部署使用 Postgres 数据库。", "每周五需要发送项目进度报告。"):
+            out = asyncio.run(_memory_save(ctx, content=content))
+            assert out.startswith("已保存")
+        out4 = asyncio.run(_memory_save(ctx, content="用户约定第 4 条：文档放 docs 目录。"))
+        ctx.db.commit()
+        assert "最多自动保存 3 条" in out4
+    finally:
+        ctx.db.close()
     count = (
         SessionLocal()
         .query(Memory)

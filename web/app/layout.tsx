@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import "@xterm/xterm/css/xterm.css";
 import { Toaster } from "@/lib/ui";
 import { ConfirmProvider } from "@/components/ui/Confirm";
 import GlobalError from "@/components/ui/GlobalError";

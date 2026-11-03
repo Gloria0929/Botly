@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.core.deps import current_user
+from app.core.deps import current_user, is_admin
 from app.core.models import Alert, Chat, Run, User, now
 from app.core.redis_bus import queue_depth
 
@@ -36,7 +36,9 @@ def acknowledge_alert(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    """确认（关闭）一条系统告警。告警是部署级、不含隐私，任意登录用户可确认。"""
+    """仅管理员可确认部署级告警。"""
+    if not is_admin(user):
+        raise HTTPException(403, "仅管理员可处理系统告警")
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "告警不存在")
@@ -124,7 +126,7 @@ def overview(
 
     alerts = db.scalars(
         select(Alert).order_by(Alert.created_at.desc()).limit(10)
-    ).all()
+    ).all() if is_admin(user) else []
     queued_now = db.scalar(
         select(func.count(Run.id)).where(
             Run.user_id == user.id,
@@ -150,7 +152,7 @@ def overview(
         "daily": daily,
         "failures": failures,
         "recent_failures": recent_failures,
-        "queue": {"depth": queue_depth(), "queued": int(queued_now)},
+        "queue": {"depth": queue_depth() if is_admin(user) else int(queued_now), "queued": int(queued_now)},
         "alerts": [
             {
                 "id": a.id,

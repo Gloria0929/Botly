@@ -16,3 +16,4 @@ langgraph-checkpoint-sqlite>=3.0
 langgraph-checkpoint-postgres>=2.0
 aiosqlite>=0.20
 pywebpush>=2.0
+cubesandbox==0.7.3

@@ -30,7 +30,7 @@ import Composer from "@/components/chat/Composer";
 import MembersModal from "@/components/chat/MembersModal";
 import MessageStream from "@/components/chat/MessageStream";
 import SearchModal from "@/components/chat/SearchModal";
-import SidePanel, { FilePreview } from "@/components/chat/SidePanel";
+import SidePanel from "@/components/chat/SidePanel";
 import Avatar from "@/components/ui/Avatar";
 import ActionMenu from "@/components/ui/Menu";
 import Modal from "@/components/ui/Modal";
@@ -302,6 +302,13 @@ function ChatContent() {
       .catch(() => {});
   }, []);
 
+  const onFileDeleted = useCallback((id: string, file: ChatFile) => {
+    setChat((current) => current?.id === id
+      ? { ...current, files: current.files.filter((f) => f.path !== file.path) }
+      : current);
+    setPreviewFile((current) => current?.id === file.id ? null : current);
+  }, []);
+
   /* ---------------- 切换群聊 ---------------- */
   useEffect(() => {
     if (!chatId) return;
@@ -552,6 +559,8 @@ function ChatContent() {
       if (p.type === "run_completed") {
         api.chats().then(setChats).catch(() => {});
       }
+      // 审批提醒只走邮件；审批卡片由群聊事件刷新。
+      if (p.type === "approval" || p.type === "approval_expired") return;
       // 当前正在查看的群聊不弹浏览器通知（NTF-05）
       const viewing = chatRef.current?.id === p.chat_id && document.visibilityState === "visible";
       if (viewing) return;
@@ -573,7 +582,6 @@ function ChatContent() {
           /* ignore */
         }
       }
-      if (p.type === "approval") toast(p.title, "info");
     });
     return () => es.close();
   }, [openTarget]);
@@ -768,7 +776,8 @@ function ChatContent() {
     act(() =>
       approve
         ? api.approve(msg.meta.approval_id, alwaysAllow)
-        : api.reject(msg.meta.approval_id, reason)
+        : api.reject(msg.meta.approval_id, reason),
+      approve && alwaysAllow ? "已批准，并在本会话始终允许此工具" : approve ? "已允许本次调用" : "已拒绝"
     );
 
   const onAnswer = (msg: Message, answer: string) =>
@@ -850,7 +859,7 @@ function ChatContent() {
     const p = await Notification.requestPermission();
     setNotifyPerm(p);
     if (p === "granted") toast("已开启浏览器通知", "ok");
-    else toast("已拒绝，审批会显示在页面内通知中心", "info");
+    else toast("已拒绝浏览器通知，审批仍通过邮件提醒", "info");
   };
 
   const disabledReason = useMemo(() => {
@@ -1002,13 +1011,6 @@ function ChatContent() {
               {chat && chat.members.length > 5 && (
                 <span className="text-[10.5px] text-faint">+{chat.members.length - 5}</span>
               )}
-              {/* CHT-04：成员栏显示「正在输入」——任一成员处理中就在头像旁标出 */}
-              {chat?.members?.some((m) => m.status === "working") && (
-                <span className="ml-1 hidden items-center gap-1 text-[10.5px] text-faint md:flex">
-                  <TypingDots size={4} />
-                  正在输入…
-                </span>
-              )}
               {chat && (
                 <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-dashed border-line text-faint transition-colors group-hover:border-accent/50 group-hover:text-accent">
                   <Plus size={12} />
@@ -1076,7 +1078,7 @@ function ChatContent() {
               </button>
               <button
                 onClick={requestNotify}
-                title={notifyPerm === "granted" ? "浏览器通知已开启" : "开启浏览器通知"}
+                title={notifyPerm === "granted" ? "任务浏览器通知已开启（审批使用邮件）" : "开启任务浏览器通知（审批使用邮件）"}
                 className={`p-1.5 ${notifyPerm === "granted" ? "text-ok" : "text-faint hover:text-ink"}`}
               >
                 {notifyPerm === "granted" ? <Bell size={15} /> : <BellOff size={15} />}
@@ -1116,6 +1118,7 @@ function ChatContent() {
 
           <MessageStream
             chatId={chatId || ""}
+            typingRunId={running && !messagesLoading && !focusMessage ? run?.id : undefined}
             messages={messages}
             members={chat?.members || []}
             tasks={activeTasks}
@@ -1132,7 +1135,10 @@ function ChatContent() {
               onApproval,
               onAnswer,
               onOpenTask,
-              onOpenFile: setPreviewFile,
+              onOpenFile: file => {
+                setPreviewFile(file); setActiveTask(null); setPanelPersist(true);
+                if (!window.matchMedia("(min-width: 1024px)").matches) setMobilePanel(true);
+              },
               busy,
             }}
             emptyState={
@@ -1227,6 +1233,9 @@ function ChatContent() {
                 onCollapse={() => setPanelPersist(false)}
                 messages={messages}
                 supervisor={chat?.supervisor || null}
+                previewFile={previewFile}
+                onPreviewClose={() => setPreviewFile(null)}
+                onFileDeleted={onFileDeleted}
               />
             </aside>
           </>
@@ -1234,7 +1243,6 @@ function ChatContent() {
       </div>
 
       {/* 移动端底部抽屉 */}
-      {previewFile && <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />}
       <Modal
         open={renameOpen}
         onClose={() => setRenameOpen(false)}
@@ -1350,6 +1358,9 @@ function ChatContent() {
               onClose={() => setMobilePanel(false)}
               messages={messages}
               supervisor={chat?.supervisor || null}
+              previewFile={previewFile}
+              onPreviewClose={() => setPreviewFile(null)}
+              onFileDeleted={onFileDeleted}
             />
           </div>
         </div>
@@ -1373,23 +1384,7 @@ function NoChatState({ onCreate }: { onCreate: () => void }) {
 }
 
 function statusLabel(s?: string) {
-  // CHT-04：成员栏的进行中文案对齐需求文档
-  return s === "working" ? "正在输入…" : s === "waiting" ? "等待处理" : "空闲";
-}
-
-/** 三点跳动：成员栏的「正在输入」指示。 */
-function TypingDots({ size = 4 }: { size?: number }) {
-  return (
-    <span className="flex items-center gap-0.5" role="status" aria-label="正在输入">
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="animate-bounce rounded-full bg-faint"
-          style={{ height: size, width: size, animationDelay: `${i * 0.15}s` }}
-        />
-      ))}
-    </span>
-  );
+  return s === "working" ? "执行中" : s === "waiting" ? "等待处理" : "空闲";
 }
 
 function runStatusText(run: Run | null, tasks: Task[], messages: Message[]) {

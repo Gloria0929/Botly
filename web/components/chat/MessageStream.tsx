@@ -38,6 +38,7 @@ export default function MessageStream({
   handlers,
   emptyState,
   chatId,
+  typingRunId,
   files = [],
   hasEarlier = false,
   loadingEarlier = false,
@@ -53,6 +54,7 @@ export default function MessageStream({
   handlers: Handlers;
   emptyState?: React.ReactNode;
   chatId?: string;
+  typingRunId?: string;
   files?: ChatFile[];
   hasEarlier?: boolean;
   loadingEarlier?: boolean;
@@ -89,7 +91,7 @@ export default function MessageStream({
     const out: Message[] = [];
     const seen = new Set<string>();
     messages.forEach((m) => {
-      // 空草稿可能从刷新快照读到；等待状态由成员栏展示，不让每个工具轮闪一个空气泡。
+      // 空草稿可能从刷新快照读到；输入提示按成员状态在消息末尾统一显示。
       if (!isVisibleChatMessage(m)) return;
       // CHT-05/RUN-08：task / task_done / handoff 的结构化兼容消息只在
       // 导出与第三方接入里消费；群聊交互保持现状（派任务 @ 消息 + 概要行），
@@ -106,6 +108,12 @@ export default function MessageStream({
     });
     return out;
   }, [messages]);
+
+  const typingBots = useMemo(() => typingRunId
+    ? members.filter((bot) => bot.status === "working"
+      && !items.some((message) => message.sender_bot_id === bot.id && message.status === "streaming"
+        && (message.run_id === typingRunId || tasks.some((task) => task.id === message.meta?.task_id))))
+    : [], [typingRunId, members, items, tasks]);
 
   useLayoutEffect(() => {
     if (lastChat.current !== chatId) {
@@ -133,7 +141,7 @@ export default function MessageStream({
       }
     }
     // 历史消息异步加载；空列表阶段保持首次定位到底部的状态。
-    if (!el || !items.length) {
+    if (!el || (!items.length && !typingBots.length)) {
       stick.current = true;
       return;
     }
@@ -141,7 +149,7 @@ export default function MessageStream({
     // 历史加载、刷新和流式内容都只调整本容器，绘制前直接定位。
     // scrollIntoView 会平滑滚动并影响祖先容器，切页时尤其明显。
     el.scrollTop = el.scrollHeight;
-  }, [items, chatId, focusMessageId, loadingEarlier]);
+  }, [items, typingBots, chatId, focusMessageId, loadingEarlier]);
 
   const onScroll = () => {
     const el = scroller.current;
@@ -149,7 +157,7 @@ export default function MessageStream({
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   };
 
-  if (!items.length && emptyState) {
+  if (!items.length && !typingBots.length && emptyState) {
     return <div className="flex-1 overflow-y-auto">{emptyState}</div>;
   }
 
@@ -178,7 +186,26 @@ export default function MessageStream({
           />
           </div>
         ))}
+        {typingBots.map((bot) => <TypingMessage key={`typing-${typingRunId}-${bot.id}`} bot={bot} />)}
         <div className="h-1" />
+      </div>
+    </div>
+  );
+}
+
+function TypingMessage({ bot }: { bot: Bot }) {
+  return (
+    <div className="flex gap-2.5" aria-label={`${bot.name}正在输入`}>
+      <Avatar value={bot.avatar} size={32} alt={bot.name} className="mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-[12.5px] font-semibold">{bot.name}</span>
+          {bot.role && <span className="font-mono text-[9.5px] uppercase tracking-wide text-faint">{bot.role}</span>}
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-2xl rounded-tl-md border border-line bg-panel2/60 px-3.5 py-2.5">
+          <TypingDots />
+          <span className="text-[11px] text-faint">正在输入…</span>
+        </div>
       </div>
     </div>
   );

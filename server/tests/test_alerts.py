@@ -4,13 +4,17 @@ from __future__ import annotations
 from datetime import timedelta
 
 from app.services.alerts import check_alerts
+from app.services import alerts
 from app.core.db import SessionLocal
 from app.core.models import Run, now
 from tests.conftest import register
 
 
-def test_alerts_fire_and_cooldown(client, invite):
+def test_alerts_fire_and_cooldown(client, invite, monkeypatch):
     data = register(client, invite, "alerts@test.dev")
+    # 系统级聚合不应被前面测试留下的执行稀释，使用独立时间窗口。
+    stamp = now() + timedelta(hours=2)
+    monkeypatch.setattr(alerts, "now", lambda: stamp)
     with SessionLocal() as db:
         user_id, chat_id = data["id"], data["chat_id"]
         base = dict(user_id=user_id, chat_id=chat_id, mode="auto", config_snapshot={})
@@ -21,7 +25,7 @@ def test_alerts_fire_and_cooldown(client, invite):
         db.add(
             Run(
                 status="running",
-                started_at=now() - timedelta(minutes=30),
+                started_at=stamp - timedelta(minutes=30),
                 **base,
             )
         )
@@ -31,7 +35,7 @@ def test_alerts_fire_and_cooldown(client, invite):
                 Run(
                     status="failed",
                     end_reason="模型调用失败：HTTP 401",
-                    ended_at=now() - timedelta(minutes=5),
+                    ended_at=stamp - timedelta(minutes=5),
                     **base,
                 )
             )
@@ -39,7 +43,7 @@ def test_alerts_fire_and_cooldown(client, invite):
             Run(
                 status="completed",
                 end_reason="已完成",
-                ended_at=now() - timedelta(minutes=5),
+                ended_at=stamp - timedelta(minutes=5),
                 **base,
             )
         )
@@ -48,6 +52,9 @@ def test_alerts_fire_and_cooldown(client, invite):
         fired = check_alerts(db)
         kinds = {a.kind for a in fired}
         assert kinds == {"queue_backlog", "run_stuck", "fail_rate"}, kinds
+        for alert in fired:
+            alert.created_at = stamp
+        db.flush()
 
         # 冷却期内同类告警不重复写
         assert check_alerts(db) == []

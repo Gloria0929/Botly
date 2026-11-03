@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, X } from "lucide-react";
-import { api, errText } from "@/lib/api";
+import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, Trash2, X } from "lucide-react";
+import { api, errText, toastError } from "@/lib/api";
 import { acceptMessageEvent, createMessageSync, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
 import Avatar from "@/components/ui/Avatar";
+import { useConfirm } from "@/components/ui/Confirm";
 import type { Bot, ChatFile, Message, Task } from "@/lib/types";
 import { bytes, clock, num, timeAgo } from "@/lib/fmt";
+import { toast } from "@/lib/ui";
 
 import { ToolBlock } from "./cards";
 import Markdown from "./Markdown";
+import SandboxTerminal from "./SandboxTerminal";
 
 const TASK_STATUS: Record<string, string> = {
   queued: "排队中",
@@ -33,6 +36,9 @@ export default function SidePanel({
   onOpenApproval,
   messages = [],
   supervisor = null,
+  previewFile = null,
+  onPreviewClose,
+  onFileDeleted,
 }: {
   chatId: string;
   tasks: Task[];
@@ -46,15 +52,44 @@ export default function SidePanel({
   /** 主线程消息：总指挥自己的工具调用留在这里，群聊不展示 */
   messages?: Message[];
   supervisor?: Bot | null;
+  previewFile?: ChatFile | null;
+  onPreviewClose?: () => void;
+  onFileDeleted: (chatId: string, file: ChatFile) => void;
 }) {
-  const [tab, setTab] = useState<"tasks" | "files">("tasks");
+  const [tab, setTab] = useState<"tasks" | "files" | "terminal">("tasks");
   const [preview, setPreview] = useState<ChatFile | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const confirm = useConfirm();
+  const [terminalOpenedFor, setTerminalOpenedFor] = useState<string | null>(null);
   // 总指挥执行过程（工具调用）单独一屏；子任务线程由 activeTask 控制
   const [supervisorOpen, setSupervisorOpen] = useState(false);
   // 保留本次/最近一次执行的所有任务，结束后仍能从侧边栏打开完整过程。
   const ACTIVE_TASK = new Set(["queued", "running", "waiting_approval", "waiting_reply"]);
   const activeTasks = tasks.filter((t) => ACTIVE_TASK.has(t.status));
   const endedTasks = tasks.filter((t) => !ACTIVE_TASK.has(t.status));
+  useEffect(() => { setPreview(null); }, [chatId]);
+  useEffect(() => { if (previewFile) { setPreview(previewFile); setTab("files"); } }, [previewFile, chatId]);
+
+  const deleteArtifact = async (file: ChatFile) => {
+    if (deletingId) return;
+    setDeletingId(file.id);
+    try {
+      if (!await confirm({
+        title: "删除产物？",
+        description: `将删除 ${file.path} 的文件和产物记录，此操作无法撤销。`,
+        confirmText: "删除",
+        danger: true,
+      })) return;
+      await api.deleteFile(file.id);
+      setPreview((current) => current?.id === file.id ? null : current);
+      onFileDeleted(chatId, file);
+      toast("产物已删除");
+    } catch (e) {
+      toastError(e, "产物删除失败");
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   // 总指挥在主线程里的工具调用：群聊只显示聊天记录，过程统一收进面板
   const supervisorTools = useMemo(
@@ -98,9 +133,14 @@ export default function SidePanel({
             tab === "files" ? "bg-panel2 text-ink" : "text-muted hover:text-ink"
           }`}
         >
-          <FileText size={13} /> 文件
+          <FileText size={13} /> 产物
           {files.length > 0 && <span className="text-[10.5px] text-faint">{files.length}</span>}
         </button>
+        <button
+          onClick={() => { setTerminalOpenedFor(chatId); setTab("terminal"); }}
+          aria-pressed={tab === "terminal"}
+          className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12px] transition-colors ${tab === "terminal" ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}
+        ><Terminal size={13} /> 终端</button>
         <div className="ml-auto flex items-center">
           {onCollapse && (
             <button
@@ -200,13 +240,16 @@ export default function SidePanel({
             ))}
           </div>
         )
+      ) : tab === "terminal" ? null : preview ? (
+        <FilePreview key={preview.id} file={preview} onClose={() => { setPreview(null); onPreviewClose?.(); }}
+          onDelete={() => deleteArtifact(preview)} deleting={deletingId === preview.id} deleteDisabled={!!deletingId} />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {files.length === 0 && (
             <div className="px-3 py-8 text-center text-[12px] leading-relaxed text-faint">
               暂无产物
               <br />
-              Bot 写入文件后会出现在这里
+              Agent 的交付文件会出现在这里
             </div>
           )}
           {files.map((f) => (
@@ -228,12 +271,24 @@ export default function SidePanel({
               >
                 <Download size={13} />
               </a>
+              <button
+                onClick={() => deleteArtifact(f)}
+                disabled={!!deletingId}
+                className="p-1 text-faint hover:text-danger disabled:cursor-wait disabled:opacity-50"
+                title="删除产物"
+                aria-label={`删除产物 ${f.path}`}
+              >
+                {deletingId === f.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              </button>
             </div>
           ))}
         </div>
       )}
 
-      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
+      {(terminalOpenedFor === chatId || tab === "terminal") && <div className={`${tab === "terminal" ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
+        <SandboxTerminal key={chatId} chatId={chatId} visible={tab === "terminal"} />
+      </div>}
+
     </div>
   );
 }
@@ -444,18 +499,30 @@ function TaskThread({ chatId, task, onBack }: {
   );
 }
 
-export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => void }) {
+export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled }: {
+  file: ChatFile;
+  onClose: () => void;
+  onDelete: () => void;
+  deleting: boolean;
+  deleteDisabled: boolean;
+}) {
   const [content, setContent] = useState<string>("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
+  const isImage = /\.(png|jpe?g|gif|webp|avif)$/i.test(file.path);
+  const isPdf = /\.pdf$/i.test(file.path);
 
   useEffect(() => {
+    let active = true;
+    setLoading(true); setContent(""); setErr("");
+    if (isImage || isPdf) { setLoading(false); return; }
     api
       .fileContent(file.id)
-      .then(setContent)
-      .catch((e) => setErr(errText(e, "无法读取文件")))
-      .finally(() => setLoading(false));
-  }, [file.id]);
+      .then(text => { if (active) setContent(text); })
+      .catch((e) => { if (active) setErr(errText(e, "无法读取文件")); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [file.id, isImage, isPdf]);
 
   const isMarkdown = /\.(md|markdown)$/i.test(file.path);
   const isHtml = /\.html?$/i.test(file.path);
@@ -463,11 +530,10 @@ export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => 
   const [reloadKey, setReloadKey] = useState(0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-card ${isHtml ? "max-w-5xl" : "max-w-2xl"}`}>
-        <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
-          <FileText size={14} className="text-accent" />
-          <span className="font-mono text-[12.5px]">{file.path}</span>
+    <section aria-label="产物预览" className="flex min-h-0 flex-1 flex-col overflow-hidden bg-panel">
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2.5">
+          <button onClick={onClose} title="返回产物列表" aria-label="返回产物列表" className="shrink-0 p-1 text-faint hover:text-ink"><ChevronLeft size={15} /></button>
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={file.path}>{file.path}</span>
           <span className="text-[10.5px] text-faint">{bytes(file.size)}</span>
           {isHtml && (
             <div className="ml-auto flex items-center gap-0.5 rounded-lg bg-panel2 p-0.5">
@@ -498,13 +564,16 @@ export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => 
           >
             <Download size={14} />
           </a>
-          <button onClick={onClose} className="p-1 text-faint hover:text-ink">
-            <X size={15} />
+          <button onClick={onDelete} disabled={deleteDisabled} title="删除产物" aria-label={`删除产物 ${file.path}`}
+            className="shrink-0 p-1 text-faint hover:text-danger disabled:cursor-wait disabled:opacity-50">
+            {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
           </button>
         </div>
-        {isHtml && htmlView === "preview" ? (
+        {isImage ? <div className="min-h-0 flex-1 overflow-auto p-3"><img src={`/api/files/${file.id}/preview`} alt={file.path} className="h-auto max-w-full rounded" /></div> : isPdf ? (
+          <iframe title={file.path} src={`/api/files/${file.id}/preview`} className="min-h-0 w-full flex-1 border-0" />
+        ) : isHtml && htmlView === "preview" ? (
           // srcDoc 直接渲染，沙箱只放行脚本：不能碰宿主页面的 Cookie/存储，也不能读 /api
-          <div className="min-h-0 flex-1 bg-white">
+          <div className="flex min-h-0 flex-1 flex-col bg-white">
             {loading ? (
               <div className="p-4"><Loader2 size={16} className="animate-spin text-faint" /></div>
             ) : err ? (
@@ -514,9 +583,9 @@ export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => 
                 key={reloadKey}
                 title={file.path}
                 srcDoc={content}
-                sandbox="allow-scripts allow-modals allow-popups allow-forms"
+                sandbox="allow-scripts"
                 referrerPolicy="no-referrer"
-                className="h-[70vh] w-full border-0"
+                className="min-h-0 w-full flex-1 border-0"
               />
             )}
           </div>
@@ -535,7 +604,6 @@ export function FilePreview({ file, onClose }: { file: ChatFile; onClose: () => 
           )}
         </div>
         )}
-      </div>
-    </div>
+    </section>
   );
 }

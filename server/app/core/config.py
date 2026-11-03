@@ -62,8 +62,8 @@ MAX_CONCURRENT_RUNS_PER_USER = max(1, int(os.getenv("BOTLY_MAX_CONCURRENT_RUNS_P
 MAX_CONCURRENT_RUNS = max(1, int(os.getenv("BOTLY_MAX_CONCURRENT_RUNS", "20")))
 WORKER_CONCURRENCY = max(1, int(os.getenv("BOTLY_WORKER_CONCURRENCY", "20")))
 LLM_TIMEOUT_SECONDS = 120
-LLM_MAX_RETRIES = 3
-LLM_RETRY_BACKOFF = (2, 4, 8)
+LLM_MAX_RETRIES = 5
+LLM_RETRY_BACKOFF = (2, 4, 8, 16, 32)
 MAX_REASSIGN = 1
 # RUN-12：一个计划批次最多并行几个子任务。超过上限的批次会被拆成多轮，
 # 避免一次把 Worker 的并发名额占满。
@@ -92,6 +92,7 @@ MAIL_FROM = os.getenv("BOTLY_MAIL_FROM", "").strip() or (SMTP_USER or "no-reply@
 MAIL_DEV = os.getenv("BOTLY_MAIL_DEV", "1").lower() in ("1", "true", "yes")
 # 邮件里的链接前缀。留空则按请求头推导（同域反向代理下是正确的）
 PUBLIC_BASE_URL = os.getenv("BOTLY_BASE_URL", "").rstrip("/")
+ADMIN_EMAILS = {e.strip().lower() for e in os.getenv("BOTLY_ADMIN_EMAILS", "").split(",") if e.strip()}
 RESET_TOKEN_TTL_MINUTES = max(5, int(os.getenv("BOTLY_RESET_TOKEN_TTL_MINUTES", "60")))
 VERIFY_TOKEN_TTL_HOURS = max(1, int(os.getenv("BOTLY_VERIFY_TOKEN_TTL_HOURS", "24")))
 SANDBOX_QUOTA_MB = 200
@@ -143,13 +144,16 @@ CODE_SANDBOX_ENABLED = os.getenv("BOTLY_CODE_SANDBOX_ENABLED", "1").lower() not 
 CODE_SANDBOX_TIMEOUT = max(5, int(os.getenv("BOTLY_CODE_SANDBOX_TIMEOUT", "30")))
 CODE_SANDBOX_MAX_OUTPUT = max(1000, int(os.getenv("BOTLY_CODE_SANDBOX_MAX_OUTPUT", "20000")))
 # 代码执行默认按 L2（沙箱内写入、免审批）；容器是 root + 联网，想让它和
-# run_command 一样每次审批就设成 L3。
+# run_command 一样默认需要审批就设成 L3，仍支持当前群聊的工具白名单。
 CODE_EXEC_LEVEL = os.getenv("BOTLY_CODE_EXEC_LEVEL", "L2").upper()
 if CODE_EXEC_LEVEL not in ("L1", "L2", "L3"):
     CODE_EXEC_LEVEL = "L2"
 
 # ---- 常驻 Linux 运行环境（每个群聊一个容器，root + 联网，可装包）----
 LINUX_SANDBOX_ENABLED = os.getenv("BOTLY_LINUX_SANDBOX_ENABLED", "1").lower() not in ("0", "false", "no")
+# Docker 仅供本地测试；云沙箱通过受信任的服务端适配器接入，未配置时不启动容器。
+SANDBOX_PROVIDER = os.getenv("BOTLY_SANDBOX_PROVIDER", "none").strip().lower()
+SANDBOX_ADAPTER = os.getenv("BOTLY_SANDBOX_ADAPTER", "").strip()
 # 预装镜像（deploy/sandbox.Dockerfile 构建）；镜像不存在时自动回退到 BASELINE
 LINUX_SANDBOX_IMAGE = os.getenv("BOTLY_LINUX_SANDBOX_IMAGE", "botly-sandbox:24.04")
 LINUX_SANDBOX_BASELINE_IMAGE = os.getenv("BOTLY_LINUX_SANDBOX_BASELINE_IMAGE", "ubuntu:24.04")

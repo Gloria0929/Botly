@@ -1,7 +1,6 @@
 """事件总线。
 
-第一版不引入 Redis：事件落 events 表，SSE 端点按 id 增量轮询，
-因此 API 与 Worker 可以是两个独立进程，且天然支持 Last-Event-ID 断线补发。
+事件持久化并在提交后唤醒 SSE；审批邮件和通知同事务落库，Worker 后台投递。
 """
 from __future__ import annotations
 
@@ -53,6 +52,7 @@ def notify(
         chat_id=chat_id,
         target_type=target_type,
         target_id=target_id,
+        email_status="pending" if type_ in ("approval", "approval_expired") else None,
     )
     db.add(n)
     db.flush()
@@ -76,16 +76,17 @@ def notify(
     try:
         from app.services import push
 
-        push.push_notification(
-            user_id,
-            notif_id=n.id,
-            type_=type_,
-            title=title,
-            body=body,
-            chat_id=chat_id,
-            target_type=target_type,
-            target_id=target_id,
-        )
+        if type_ not in ("approval", "approval_expired"):
+            push.push_notification(
+                user_id,
+                notif_id=n.id,
+                type_=type_,
+                title=title,
+                body=body,
+                chat_id=chat_id,
+                target_type=target_type,
+                target_id=target_id,
+            )
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("Web Push 调度失败")
     return n

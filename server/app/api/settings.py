@@ -6,6 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.config import DELEGATION_DEPTH
+from app.services import mail
+from app.sandbox import runtime
 from app.core.db import get_db
 from app.core.deps import current_user
 from app.core.models import User, UserSettings
@@ -19,6 +21,7 @@ class SettingsPatch(BaseModel):
     token_budget: int | None = None
     delegation_depth: int | None = None  # RUN-09：1–5 层
     notifications_enabled: bool | None = None
+    approval_email_enabled: bool | None = None
     approval_ttl_hours: int | None = None
     search_api_key: str | None = None
     search_provider: str | None = None
@@ -30,6 +33,10 @@ def _out(s: UserSettings) -> dict:
         "token_budget": s.token_budget,
         "delegation_depth": s.delegation_depth or DELEGATION_DEPTH,
         "notifications_enabled": s.notifications_enabled,
+        "approval_email_enabled": s.approval_email_enabled,
+        "approval_email_channel": "email",
+        "mail_configured": mail.configured(),
+        "sandbox": runtime.status(s.user_id),
         "approval_ttl_hours": s.approval_ttl_hours,
         "search_provider": s.search_provider,
         "search_configured": bool(s.search_api_key_encrypted),
@@ -63,6 +70,8 @@ def update_settings(
         s.delegation_depth = payload.delegation_depth
     if payload.notifications_enabled is not None:
         s.notifications_enabled = payload.notifications_enabled
+    if payload.approval_email_enabled is not None:
+        s.approval_email_enabled = payload.approval_email_enabled
     if payload.approval_ttl_hours is not None:
         s.approval_ttl_hours = max(1, min(168, payload.approval_ttl_hours))
     if payload.search_provider is not None:

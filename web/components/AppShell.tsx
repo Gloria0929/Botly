@@ -180,6 +180,7 @@ export default function AppShell({
     const onCreated = (ev: Event) => {
       const p = JSON.parse((ev as MessageEvent).data);
       setUnread((n) => n + 1);
+      if (p.type === "approval" || p.type === "approval_expired") return;
       if (me?.settings?.notifications_enabled === false) return;
       if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
       try {

@@ -40,6 +40,12 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    existing = config.attributes.get("connection")
+    if existing is not None:
+        context.configure(connection=existing, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+        return
     with app_engine.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():

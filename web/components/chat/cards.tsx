@@ -463,11 +463,9 @@ export function ApprovalCard({
   const [open, setOpen] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
-  const [alwaysAllow, setAlwaysAllow] = useState(false);
   const runEnded = ["completed", "failed", "stopped"].includes(m.run_status);
   const status = m.status === "pending" && runEnded ? "invalidated" : m.status;
   const pending = status === "pending";
-  const canAlwaysAllow = m.level !== "L3";
   // 剩余有效期每 30 秒刷新一次，避免卡片长时间不动显示过期时间
   const [, tick] = useState(0);
   useEffect(() => {
@@ -522,26 +520,22 @@ export function ApprovalCard({
 
         {pending ? (
           <>
-            {canAlwaysAllow && (
-              <label className="mt-3 flex cursor-pointer items-center gap-2 text-[11.5px] text-muted">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 accent-[var(--warn)]"
-                  checked={alwaysAllow}
-                  onChange={(e) => setAlwaysAllow(e.target.checked)}
-                />
-                在本群聊始终允许 <code className="rounded bg-panel2 px-1 text-[11px]">{m.tool}</code>
-                <span className="text-faint">（可到群聊设置撤销）</span>
-              </label>
-            )}
-            <div className="mt-3 flex items-center gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
                 className="btn-primary bg-warn text-black hover:bg-warn/90"
                 disabled={busy}
-                onClick={() => onApprove(alwaysAllow)}
+                onClick={() => onApprove(false)}
               >
-                <Check size={14} /> 批准
+                <Check size={14} /> 仅允许这次
               </button>
+              {!rejecting && (
+                <button className="btn-ghost border border-warn/35 text-warn"
+                  disabled={busy}
+                  title={`批准这次调用，并在当前群聊始终允许 ${m.tool}`}
+                  onClick={() => onApprove(true)}>
+                  在本群聊始终允许
+                </button>
+              )}
               {rejecting ? (
                 <>
                   <button
@@ -561,6 +555,9 @@ export function ApprovalCard({
                 </button>
               )}
             </div>
+            {!rejecting && <p className="mt-2 text-[11px] leading-relaxed text-faint">
+              {`始终允许仅对本群聊的 ${m.tool} 生效，其后续调用不再请求审批，可在群聊设置中撤销。`}
+            </p>}
           </>
         ) : (
           <div className="mt-2 text-[11.5px] text-muted">

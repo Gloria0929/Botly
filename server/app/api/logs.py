@@ -13,11 +13,14 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import LOG_FILE_MAX_MB
-from app.core.deps import current_user
-from app.core.logging_setup import LOG_DIR
-from app.core.models import User
+from app.core.db import get_db
+from app.core.deps import current_user, is_admin
+from app.core.logging_setup import LOG_DIR, fingerprint
+from app.core.models import Run, User
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
@@ -33,6 +36,24 @@ _LINE = re.compile(
     r"(?P<level>[A-Z]+)\s+pid=(?P<pid>\d+) \[(?P<module>[^\]]+)\] "
     r"req=(?P<request_id>\S+) run=(?P<run_id>\S+) task=(?P<task_id>\S+) (?P<message>.*)$"
 )
+
+
+def _user_runs(user: User | None, db: Session | None) -> set[str] | None:
+    if user is None or is_admin(user):
+        return None
+    return set(db.scalars(select(Run.id).where(Run.user_id == user.id)))
+
+
+def _visible(m, user: User | None, runs: set[str] | None) -> bool:
+    if runs is None:
+        return True
+    if m["run_id"] in runs:
+        return True
+    # 请求日志的 uid 在请求体之前；正文里的伪造 uid 不能改变归属。
+    metadata = m["message"].split(" body=", 1)[0].split(" query=", 1)[0]
+    metadata = metadata.split(" ua=", 1)[0]
+    user_marks = re.findall(r"\buid=(\S+)", metadata)
+    return m["module"] == "access" and bool(user_marks) and user_marks[-1] == fingerprint(user.id)
 
 
 def _log_files() -> list[Path]:
@@ -71,6 +92,7 @@ def list_logs(
     run_id: str | None = Query(default=None, description="按执行编号串联一次执行"),
     limit: int = Query(default=300, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
 ):
     """返回最新的 limit 条（过滤后），倒序：第一页就是最近发生的事。"""
     want_level = (level or "").strip().upper()
@@ -78,6 +100,7 @@ def list_logs(
 
     matched: list[dict] = []
     hidden_sql = 0
+    runs = _user_runs(user, db)
     # _log_files 已按新到旧排序；只反转各文件内的行，不能再反转文件顺序。
     for path in _log_files():
         # 反向扫描时，堆栈/多行消息的续行出现在父行之前，先攒着，
@@ -91,6 +114,9 @@ def list_logs(
                 continue
             if _DB_LOGGER.match(m["module"]):
                 hidden_sql += 1
+                pending.clear()
+                continue
+            if not _visible(m, user, runs):
                 pending.clear()
                 continue
             if want_level and m["level"] != want_level:
@@ -143,7 +169,7 @@ def list_logs(
         "offset": offset,
         "limit": limit,
         "files": files,
-        "log_dir": str(LOG_DIR),
+        "log_dir": str(LOG_DIR) if runs is None else "",
         "max_file_mb": LOG_FILE_MAX_MB,
         # 本次读取时跳过的数据库语句条数（填满一页就停，所以是下限而非总数）
         "hidden_sql": hidden_sql,
@@ -151,12 +177,13 @@ def list_logs(
 
 
 @router.get("/modules")
-def list_modules(user: User = Depends(current_user)):
+def list_modules(user: User = Depends(current_user), db: Session = Depends(get_db)):
     """日志里出现过的模块名，用于前端下拉筛选。"""
     seen: dict[str, int] = {}
+    runs = _user_runs(user, db)
     for path in reversed(_log_files()):
         for raw in _read_lines(path):
             m = _LINE.match(raw)
-            if m and not _DB_LOGGER.match(m["module"]):
+            if m and not _DB_LOGGER.match(m["module"]) and _visible(m, user, runs):
                 seen[m["module"]] = seen.get(m["module"], 0) + 1
     return [{"module": k, "count": v} for k, v in sorted(seen.items(), key=lambda kv: -kv[1])]

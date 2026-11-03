@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, TYPE_CHECKING, TypedDict
 
@@ -56,15 +57,34 @@ def checkpoint_path() -> str:
     return str(DATA_DIR / "langgraph_checkpoints.db")
 
 
+_postgres_ready = False
+
+
 @asynccontextmanager
 async def open_checkpointer():
+    global _postgres_ready
     if DATABASE_URL.startswith("postgresql"):
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
         # psycopg 不认 SQLAlchemy 的 "+psycopg" 方言后缀
         conn = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
         async with AsyncPostgresSaver.from_conn_string(conn) as saver:
-            await saver.setup()
+            # setup 会建表和并发索引，不能包在事务里；使用同连接的会话锁，
+            # API 与多个 Worker 首次同时打开检查点时也只会有一方执行迁移。
+            if not _postgres_ready:
+                # 阻塞式锁查询会保留 statement snapshot，和 SDK 的 CREATE INDEX
+                # CONCURRENTLY 等待旧 snapshot 形成死锁。try-lock 每次立即结束查询。
+                while True:
+                    cur = await saver.conn.execute("SELECT pg_try_advisory_lock(782341994) AS acquired")
+                    if (await cur.fetchone())["acquired"]:
+                        break
+                    await asyncio.sleep(.05)
+                try:
+                    if not _postgres_ready:
+                        await saver.setup()
+                        _postgres_ready = True
+                finally:
+                    await saver.conn.execute("SELECT pg_advisory_unlock(782341994)")
             yield saver
     else:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver

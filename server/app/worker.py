@@ -13,6 +13,8 @@ from datetime import timedelta
 from sqlalchemy import delete, func, select, text, update
 from app.core import redis_bus
 from app.services.alerts import check_alerts
+from app.services.approval_email import deliver_pending
+from app.sandbox import terminal
 from app.core.config import (
     ALERT_CHECK_INTERVAL,
     MAX_CONCURRENT_RUNS,
@@ -222,8 +224,17 @@ async def main(once: bool = False) -> None:
         return
 
     running: dict[str, asyncio.Task] = {}
+    terminal_tasks: dict[str, asyncio.Task] = {}
+    mail_task: asyncio.Task | None = None
     try:
         while not _stop:
+            for cid, task in list(terminal_tasks.items()):
+                if task.done():
+                    terminal_tasks.pop(cid)
+                    try:
+                        task.result()
+                    except Exception:
+                        log.exception("用户终端命令失败 command=%s", cid)
             for rid, task in list(running.items()):
                 if task.done():
                     running.pop(rid)
@@ -234,6 +245,17 @@ async def main(once: bool = False) -> None:
             # 清理任务与过期交互不再被一次长执行阻塞。
             if time.time() - last_reconcile > RECONCILE_INTERVAL:
                 last_reconcile = time.time()
+                # 兼容旧版本遗留的 queued 手动命令；新命令由 API 直接执行。
+                for cid in terminal.pending():
+                    if cid not in terminal_tasks and len(terminal_tasks) < 2:
+                        terminal_tasks[cid] = asyncio.create_task(terminal.execute(cid, claim=True))
+                if mail_task is None or mail_task.done():
+                    if mail_task is not None:
+                        try:
+                            mail_task.result()
+                        except Exception:
+                            log.exception("审批邮件队列处理失败")
+                    mail_task = asyncio.create_task(asyncio.to_thread(deliver_pending))
                 # 事件与调用日志的过期清理按小时执行，避免每轮扫描整表。
                 if time.time() - _last_prune > PRUNE_INTERVAL:
                     _last_prune = time.time()
@@ -265,6 +287,10 @@ async def main(once: bool = False) -> None:
     finally:
         if running:
             await asyncio.gather(*running.values(), return_exceptions=True)
+        if mail_task is not None:
+            await asyncio.gather(mail_task, return_exceptions=True)
+        if terminal_tasks:
+            await asyncio.gather(*terminal_tasks.values(), return_exceptions=True)
     log.info("Worker 退出")
 
 

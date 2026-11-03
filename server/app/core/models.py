@@ -119,6 +119,7 @@ class UserSettings(Base, TimestampMixin):
     # 为空表示未设置，按环境变量 BOTLY_MAX_DELEGATION_DEPTH 的默认值执行。
     delegation_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    approval_email_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     search_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     search_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     approval_ttl_hours: Mapped[int] = mapped_column(Integer, default=24)
@@ -141,6 +142,54 @@ class Provider(Base, TimestampMixin):
     models: Mapped[list] = mapped_column(JSON, default=list)  # [{name, input_price, output_price}]
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="unchecked")
+
+
+class CubeConnection(Base, TimestampMixin):
+    """用户自己的 CubeSandbox 后端连接；密钥加密保存。"""
+    __tablename__ = "cube_connections"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), unique=True, index=True)
+    api_url: Mapped[str] = mapped_column(String(500))
+    template_id: Mapped[str] = mapped_column(String(200))
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_node_ip: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    proxy_port: Mapped[int] = mapped_column(Integer, default=80)
+    sandbox_domain: Mapped[str] = mapped_column(String(200), default="cube.app")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_check_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class CubeSession(Base, TimestampMixin):
+    """每账号每群聊的远端实例，跨 API/Worker 和重启复用。"""
+    __tablename__ = "cube_sessions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    chat_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    sandbox_id: Mapped[str] = mapped_column(String(200))
+    connection_hash: Mapped[str] = mapped_column(String(64))
+    files_manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    skills_manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pty_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class TerminalCommand(Base, TimestampMixin):
+    __tablename__ = "terminal_commands"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    chat_id: Mapped[str] = mapped_column(String(32), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    kind: Mapped[str] = mapped_column(String(12), default="command")
+    language: Mapped[str] = mapped_column(String(12), default="bash")
+    command: Mapped[str] = mapped_column(Text)
+    output: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Bot(Base, TimestampMixin):
@@ -455,6 +504,13 @@ class Notification(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(200), default="")
     body: Mapped[str] = mapped_column(Text, default="")
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 审批邮件与通知同事务落库；Worker 认领、投递和重试，不在请求中发信。
+    email_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    email_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    email_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    email_lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    email_last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class PushSubscription(Base, TimestampMixin):

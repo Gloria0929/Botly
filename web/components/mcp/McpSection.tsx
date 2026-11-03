@@ -34,7 +34,7 @@ export default function McpSection() {
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; text: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [importOpen, setImportOpen] = useState(false);
+  const [addMode, setAddMode] = useState<"manual" | "json">("manual");
   const [importText, setImportText] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState<{
@@ -52,9 +52,14 @@ export default function McpSection() {
 
   const openNew = () => {
     setSaveError(null);
+    setAddMode("manual");
+    setImportText("");
+    setImportResult(null);
     setEditing({ ...EMPTY });
   };
-  const openEdit = (s: McpServer) =>
+  const openEdit = (s: McpServer) => {
+    setSaveError(null);
+    setAddMode("manual");
     setEditing({
       id: s.id,
       name: s.name,
@@ -69,6 +74,7 @@ export default function McpSection() {
       level: s.level,
       enabled: s.enabled,
     });
+  };
 
   const save = async () => {
     if (!editing?.name?.trim()) return toast("请填写服务名称", "error");
@@ -188,6 +194,8 @@ export default function McpSection() {
     if (s.status === "error") return <span className="chip border-danger/40 text-danger">检测失败</span>;
     return <span className="chip text-faint">未检测</span>;
   };
+  const isJsonImport = !!editing && !editing.id && addMode === "json";
+  const formBusy = saving || importBusy;
 
   return (
     <section>
@@ -196,14 +204,9 @@ export default function McpSection() {
         title="工具连接"
         description="连接团队使用的服务与工具，扩展智能体的工作能力。"
         actions={
-          <>
-            <button className="btn-ghost" onClick={() => { setImportOpen(true); setImportText(""); setImportResult(null); }}>
-              <Braces size={13} /> 从 JSON 导入
-            </button>
-            <button className="btn-primary" onClick={openNew}>
-              <Plug size={13} /> 添加服务
-            </button>
-          </>
+          <button className="btn-primary" onClick={openNew}>
+            <Plug size={13} /> 添加服务
+          </button>
         }
       />
       <div className="mb-5 flex flex-wrap items-center gap-5 border-b border-line pb-4 text-[12px] text-muted">
@@ -304,22 +307,71 @@ export default function McpSection() {
 
       <Modal
         open={!!editing}
-        onClose={() => setEditing(null)}
+        onClose={() => { if (!formBusy) setEditing(null); }}
         title={editing?.id ? "编辑 MCP 服务" : "添加 MCP 服务"}
-        subtitle="保存后会立即检测 tools/list，通常 1–10 秒"
+        subtitle={isJsonImport
+          ? "支持 Claude Desktop 的 mcpServers 格式；stdio 用 command/args/env，远程用 url/headers"
+          : "保存后会立即检测 tools/list，通常 1–10 秒"}
         width="max-w-lg"
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setEditing(null)}>
+            <button className="btn-ghost" onClick={() => setEditing(null)} disabled={formBusy}>
               取消
             </button>
-            <button className="btn-primary" onClick={save} disabled={saving}>
-              {saving ? <Loader2 size={13} className="animate-spin" /> : <Plug size={13} />} 保存
+            <button className="btn-primary" onClick={isJsonImport ? importJson : save} disabled={formBusy}>
+              {formBusy ? <Loader2 size={13} className="animate-spin" />
+                : isJsonImport ? <Braces size={13} /> : <Plug size={13} />}
+              {isJsonImport ? "导入" : "保存"}
             </button>
           </>
         }
       >
-        {editing && (
+        {editing && !editing.id && (
+          <div className="segmented mb-4 w-full" role="group" aria-label="服务添加方式">
+            <button type="button" aria-pressed={addMode === "manual"} disabled={formBusy}
+              onClick={() => setAddMode("manual")}
+              className={`segmented-item flex flex-1 items-center justify-center gap-1.5 ${addMode === "manual" ? "segmented-item-active" : ""}`}>
+              <Plug size={13} /> 手动填写
+            </button>
+            <button type="button" aria-pressed={addMode === "json"} disabled={formBusy}
+              onClick={() => setAddMode("json")}
+              className={`segmented-item flex flex-1 items-center justify-center gap-1.5 ${addMode === "json" ? "segmented-item-active" : ""}`}>
+              <Braces size={13} /> 从 JSON 导入
+            </button>
+          </div>
+        )}
+        {isJsonImport ? (
+          <div className="space-y-3">
+            <label className="label" htmlFor="mcp-import-json">JSON 配置</label>
+            <textarea
+              id="mcp-import-json"
+              className="field h-64 resize-none font-mono text-[11.5px] leading-relaxed"
+              value={importText}
+              disabled={importBusy}
+              onChange={(e) => setImportText(e.target.value)}
+              placeholder={'{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"],\n      "env": { "GITHUB_TOKEN": "..." }\n    },\n    "远程知识库": {\n      "url": "https://example.com/mcp",\n      "headers": { "Authorization": "Bearer ..." },\n      "level": "L3"\n    }\n  }\n}'}
+            />
+            {importResult && (
+              <div className="space-y-1 text-[11.5px] leading-relaxed" role="status">
+                {importResult.created.length > 0 && (
+                  <div className="text-ok">
+                    新增 {importResult.created.length} 个：{importResult.created.map((c) => c.name).join("、")}
+                  </div>
+                )}
+                {importResult.skipped.map((s) => (
+                  <div key={s.name} className="text-faint">
+                    跳过「{s.name}」：{s.reason}
+                  </div>
+                ))}
+                {importResult.errors.map((e) => (
+                  <div key={e.name} className="break-words text-danger">
+                    「{e.name}」失败：{e.reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : editing && (
           <div className="space-y-4">
             {saveError && (
               <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
@@ -410,7 +462,7 @@ export default function McpSection() {
                   value={editing.level}
                   onChange={(v) => setEditing({ ...editing, level: v })}
                   options={[
-                    { value: "L3", label: "L3 · 每次审批", description: "外部副作用，默认" },
+                    { value: "L3", label: "L3 · 默认审批", description: "外部副作用，可按群聊授权" },
                     { value: "L2", label: "L2 · 沙箱级", description: "群聊可要求审批" },
                     { value: "L1", label: "L1 · 只读", description: "无需审批，请确认服务无副作用" },
                   ]}
@@ -431,55 +483,6 @@ export default function McpSection() {
         )}
       </Modal>
 
-      <Modal
-        open={importOpen}
-        onClose={() => setImportOpen(false)}
-        title={
-          <span className="flex items-center gap-2">
-            <Braces size={14} className="text-accent" /> 从 JSON 导入 MCP 服务
-          </span>
-        }
-        subtitle="支持 Claude Desktop 的 mcpServers 格式；stdio 用 command/args/env，远程用 url/headers"
-        width="max-w-lg"
-        footer={
-          <>
-            <button className="btn-ghost" onClick={() => setImportOpen(false)}>
-              取消
-            </button>
-            <button className="btn-primary" onClick={importJson} disabled={importBusy}>
-              {importBusy ? <Loader2 size={13} className="animate-spin" /> : <Braces size={13} />} 导入
-            </button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <textarea
-            className="field h-64 resize-none font-mono text-[11.5px] leading-relaxed"
-            value={importText}
-            onChange={(e) => setImportText(e.target.value)}
-            placeholder={'{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"],\n      "env": { "GITHUB_TOKEN": "..." }\n    },\n    "远程知识库": {\n      "url": "https://example.com/mcp",\n      "headers": { "Authorization": "Bearer ..." },\n      "level": "L3"\n    }\n  }\n}'}
-          />
-          {importResult && (
-            <div className="space-y-1 text-[11.5px] leading-relaxed">
-              {importResult.created.length > 0 && (
-                <div className="text-ok">
-                  新增 {importResult.created.length} 个：{importResult.created.map((c) => c.name).join("、")}
-                </div>
-              )}
-              {importResult.skipped.map((s) => (
-                <div key={s.name} className="text-faint">
-                  跳过「{s.name}」：{s.reason}
-                </div>
-              ))}
-              {importResult.errors.map((e) => (
-                <div key={e.name} className="break-words text-danger">
-                  「{e.name}」失败：{e.reason}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </Modal>
     </section>
   );
 }

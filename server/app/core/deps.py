@@ -5,6 +5,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.config import SESSION_COOKIE
+from app.core.config import ADMIN_EMAILS
 from app.core.db import get_db
 from app.core.logging_setup import fingerprint, get_logger
 from app.core.models import User
@@ -14,6 +15,10 @@ CSRF_HEADER = "x-botly-client"
 CSRF_VALUE = "web"
 
 security_log = get_logger("security")
+
+
+def is_admin(user: User) -> bool:
+    return user.email.lower() in ADMIN_EMAILS
 
 
 def _ip(request: Request) -> str:
