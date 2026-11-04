@@ -212,6 +212,8 @@ class Bot(Base, TimestampMixin):
     avatar: Mapped[str] = mapped_column(String(500), default="bot")
     role: Mapped[str] = mapped_column(String(40), default="通用助手")
     system_prompt: Mapped[str] = mapped_column(Text, default="")
+    persona: Mapped[str] = mapped_column(Text, default="")
+    proactivity: Mapped[float] = mapped_column(default=0.5)
     provider_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     temperature: Mapped[float] = mapped_column(default=0.4)
@@ -286,6 +288,10 @@ class Chat(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     supervisor_bot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mode: Mapped[str] = mapped_column(String(8), default="task")
+    max_speakers: Mapped[int] = mapped_column(Integer, default=3)
+    max_rounds: Mapped[int] = mapped_column(Integer, default=2)
+    muted: Mapped[bool] = mapped_column(Boolean, default=False)
     run_mode: Mapped[str] = mapped_column(String(20), default="auto")  # auto | step
     limits_override: Mapped[dict] = mapped_column(JSON, default=dict)
     always_allow_tools: Mapped[list] = mapped_column(JSON, default=list)
@@ -328,6 +334,8 @@ class Run(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     chat_id: Mapped[str] = mapped_column(String(32), ForeignKey("chats.id"), index=True)
     trigger_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    kind: Mapped[str] = mapped_column(String(12), default="task", index=True)
+    round: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     # queued | running | waiting | waiting_children（等并行子任务）| completed | failed | stopped
     steps_used: Mapped[int] = mapped_column(Integer, default=0)
@@ -342,6 +350,7 @@ class Run(Base, TimestampMixin):
     mode: Mapped[str] = mapped_column(String(20), default="auto")
     lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_token: Mapped[int] = mapped_column(Integer, default=0)
     # 最近一轮模型输出对应的消息 id：DB 已提交、检查点未写入时崩溃，重放
     # model 节点据此复用这一轮结果，避免重复调用、重复计步与重复消息（8.3）
     last_turn_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -382,7 +391,7 @@ class Task(Base, TimestampMixin):
 
 class Message(Base, TimestampMixin):
     __tablename__ = "messages"
-    __table_args__ = (Index("ix_msg_thread_seq", "thread_id", "seq"),)
+    __table_args__ = (UniqueConstraint("thread_id", "seq", name="uq_msg_thread_seq"),)
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     user_id: Mapped[str] = mapped_column(String(32), index=True)
     thread_id: Mapped[str] = mapped_column(String(32), ForeignKey("threads.id"), index=True)
@@ -529,6 +538,7 @@ class Event(Base):
     """SSE 事件表：id 递增作为事件序号，保留 7 天用于断线补发。"""
 
     __tablename__ = "events"
+    __table_args__ = (Index("ix_events_user_chat_id", "user_id", "chat_id", "id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(32), index=True)
     chat_id: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)

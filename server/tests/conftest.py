@@ -13,6 +13,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/test.db"
 # 指向一个没有服务的端口：连接被立即拒绝，测试不依赖 Redis
 os.environ["BOTLY_REDIS_URL"] = "redis://127.0.0.1:6399/0"
 os.environ["BOTLY_SECRET_KEY"] = "test-secret-key"
+os.environ["BOTLY_ENV"] = "development"
 # ACC-08：测试不发真实邮件，走「写日志 + 返回 dev 链接」的开发模式
 os.environ["BOTLY_SMTP_HOST"] = ""
 os.environ["BOTLY_MAIL_DEV"] = "1"
@@ -24,6 +25,18 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.core.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 from app.core.models import InviteCode  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_auth_rate_limits(client):
+    """共享测试库的不同用例不共用登录/邮件限流计数；用例内仍使用真实限流。"""
+    from sqlalchemy import delete
+    from app.core.models import EmailToken, LoginAttempt
+
+    with SessionLocal() as db:
+        db.execute(delete(LoginAttempt))
+        db.execute(delete(EmailToken))
+        db.commit()
 
 
 @pytest.fixture(scope="session")

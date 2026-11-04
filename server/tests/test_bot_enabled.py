@@ -72,7 +72,7 @@ def test_disabled_supervisor_blocks_new_run(client, invite):
 
 
 def test_delegate_to_disabled_bot_returns_hint(client, invite, monkeypatch):
-    """总指挥仍想派活给停用成员时，工具结果要明确告诉它换人。"""
+    """总指挥仍想派任务给停用成员时，工具结果要明确告诉它换人。"""
     register(client, invite, "bot-delegate@test.dev")
     chat_id, bots = setup_workspace(client)
     target = next(b for b in bots if b["name"] == "研究员")
@@ -108,7 +108,7 @@ def test_delegate_to_disabled_bot_returns_hint(client, invite, monkeypatch):
         yield {"type": "done", "content": "那就我自己来", "tool_calls": []}
 
     monkeypatch.setattr(orchestrator, "stream_chat", fake_stream)
-    run_id = client.post(f"/api/chats/{chat_id}/messages", json={"content": "派活"}).json()[
+    run_id = client.post(f"/api/chats/{chat_id}/messages", json={"content": "派任务"}).json()[
         "run"
     ]["id"]
     asyncio.run(process_one(run_id))

@@ -152,6 +152,8 @@ export default function BotsPage() {
         avatar: editing.avatar,
         role: editing.role,
         system_prompt: editing.system_prompt,
+        persona: editing.persona || "",
+        proactivity: editing.proactivity ?? 0.5,
         provider_id: editing.provider_id || null,
         model: editing.model || null,
         temperature: editing.temperature ?? 0.4,
@@ -422,6 +424,20 @@ export default function BotsPage() {
                 onChange={(e) => setEditing({ ...editing, system_prompt: e.target.value })}
                 placeholder="描述这个 Bot 的职责、方法与边界。"
               />
+            </div>
+
+            <div>
+              <label className="label">性格与说话方式</label>
+              <textarea className="field h-20 resize-none" maxLength={4000}
+                value={editing.persona || ""}
+                onChange={(e) => setEditing({ ...editing, persona: e.target.value })}
+                placeholder="例如：严谨但不拘谨，喜欢用短句说明结论，偶尔开个玩笑。" />
+              <label className="label mt-3">积极度（{(editing.proactivity ?? 0.5).toFixed(1)}）</label>
+              <input aria-label="积极度" type="range" min={0} max={1} step={0.1}
+                value={editing.proactivity ?? 0.5}
+                onChange={(e) => setEditing({ ...editing, proactivity: Number(e.target.value) })}
+                className="w-full accent-[var(--accent)]" />
+              <p className="mt-1 text-[10.5px] text-faint">自由群聊中，越高越愿意参与讨论。被 @ 时仍会回应。</p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

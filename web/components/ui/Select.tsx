@@ -30,6 +30,7 @@ export default function Select({
   className = "",
   size = "md",
   emptyText = "没有匹配项",
+  ariaLabel,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -41,6 +42,7 @@ export default function Select({
   className?: string;
   size?: "sm" | "md";
   emptyText?: string;
+  ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -96,6 +98,7 @@ export default function Select({
         onClick={() => setOpen(!open)}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-label={ariaLabel}
         className={`flex w-full items-center gap-2 rounded-lg border bg-panel2/70 px-2.5 ${h} text-left outline-none transition-colors ${
           disabled
             ? "cursor-not-allowed border-line opacity-50"

@@ -1,12 +1,12 @@
 "use client";
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { FileText, GitBranch } from "lucide-react";
+import { Clock3, FileText, GitBranch, Loader2, Reply } from "lucide-react";
 import type { Bot, ChatFile, Message, PlanStep, Task } from "@/lib/types";
 import { isVisibleChatMessage } from "@/lib/message-sync";
-import { taskFiles } from "@/lib/task-state";
+import { memberActivity, showMemberActivity, taskFiles } from "@/lib/task-state";
 import Avatar from "@/components/ui/Avatar";
-import { bytes, clock } from "@/lib/fmt";
+import { bytes, clock, fileName } from "@/lib/fmt";
 import Markdown from "./Markdown";
 import {
   ApprovalCard,
@@ -40,6 +40,7 @@ export default function MessageStream({
   emptyState,
   chatId,
   typingRunId,
+  typingRunIds,
   files = [],
   hasEarlier = false,
   loadingEarlier = false,
@@ -47,6 +48,7 @@ export default function MessageStream({
   focusMessageId,
   onOpenTaskDetail,
   onBranch,
+  onReply,
 }: {
   messages: Message[];
   members: Bot[];
@@ -56,6 +58,7 @@ export default function MessageStream({
   emptyState?: React.ReactNode;
   chatId?: string;
   typingRunId?: string;
+  typingRunIds?: string[];
   files?: ChatFile[];
   hasEarlier?: boolean;
   loadingEarlier?: boolean;
@@ -64,6 +67,7 @@ export default function MessageStream({
   onOpenTaskDetail?: (taskId: string, threadId: string) => void;
   /** CHT-07：从某条消息拉出分支；分支视图里不传 */
   onBranch?: (msg: Message) => void;
+  onReply?: (msg: Message) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -110,11 +114,13 @@ export default function MessageStream({
     return out;
   }, [messages]);
 
-  const typingBots = useMemo(() => typingRunId
+  const typingBots = useMemo(() => (typingRunId || typingRunIds?.length)
     ? members.filter((bot) => bot.status === "working"
+      && showMemberActivity(bot, messages, tasks, !!typingRunIds)
       && !items.some((message) => message.sender_bot_id === bot.id && message.status === "streaming"
-        && (message.run_id === typingRunId || tasks.some((task) => task.id === message.meta?.task_id))))
-    : [], [typingRunId, members, items, tasks]);
+        && (message.run_id === typingRunId || typingRunIds?.includes(message.run_id || "")
+          || typingRunIds?.includes(message.meta?.parent_run_id) || tasks.some((task) => task.id === message.meta?.task_id))))
+    : [], [typingRunId, typingRunIds, members, messages, items, tasks]);
 
   useLayoutEffect(() => {
     if (lastChat.current !== chatId) {
@@ -184,19 +190,24 @@ export default function MessageStream({
             onToggleDetail={() => toggleDetail(m.id)}
             onOpenTaskDetail={onOpenTaskDetail}
             onBranch={onBranch}
+            onReply={onReply}
           />
           </div>
         ))}
-        {typingBots.map((bot) => <TypingMessage key={`typing-${typingRunId}-${bot.id}`} bot={bot} />)}
+        {typingBots.map((bot) => <ActivityMessage key={`activity-${bot.id}`} bot={bot}
+          activity={memberActivity(bot, messages, tasks)} onOpenTask={handlers.onOpenTask} />)}
         <div className="h-1" />
       </div>
     </div>
   );
 }
 
-function TypingMessage({ bot }: { bot: Bot }) {
+function ActivityMessage({ bot, activity, onOpenTask }: {
+  bot: Bot; activity: ReturnType<typeof memberActivity>; onOpenTask: (taskId: string, threadId: string) => void;
+}) {
+  if (!activity) return null;
   return (
-    <div className="flex gap-2.5" aria-label={`${bot.name}正在输入`}>
+    <div className="flex gap-2.5" aria-label={`${bot.name}${activity.label}`}>
       <Avatar value={bot.avatar} size={32} alt={bot.name} className="mt-0.5" />
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -204,9 +215,14 @@ function TypingMessage({ bot }: { bot: Bot }) {
           {bot.role && <span className="font-mono text-[9.5px] uppercase tracking-wide text-faint">{bot.role}</span>}
         </div>
         <div className="inline-flex items-center gap-2 rounded-2xl rounded-tl-md border border-line bg-panel2/60 px-3.5 py-2.5">
-          <TypingDots />
-          <span className="text-[11px] text-faint">正在输入…</span>
+          {activity.kind === "waiting" ? <Clock3 size={12} className="text-faint" /> : <Loader2 size={12} className="animate-spin text-faint" />}
+          <span className="text-[11px] text-faint">{activity.label}</span>
+          {activity.task && <button type="button" className="text-[11px] text-accent hover:underline"
+            onClick={() => onOpenTask(activity.task!.id, activity.task!.thread_id)}>查看任务</button>}
         </div>
+        {activity.task && <p className="mt-1 truncate text-[10.5px] text-faint" title={activity.task.instruction}>
+          {activity.task.instruction.split("\n")[0]}
+        </p>}
       </div>
     </div>
   );
@@ -224,6 +240,7 @@ function MessageItem({
   onToggleDetail,
   onOpenTaskDetail,
   onBranch,
+  onReply,
 }: {
   msg: Message;
   bot?: Bot;
@@ -236,6 +253,7 @@ function MessageItem({
   onToggleDetail: () => void;
   onOpenTaskDetail?: (taskId: string, threadId: string) => void;
   onBranch?: (msg: Message) => void;
+  onReply?: (msg: Message) => void;
 }) {
   const streaming = msg.status === "streaming";
 
@@ -370,6 +388,11 @@ function MessageItem({
           )}
           <span className="inline-flex shrink-0 items-center gap-1.5">
             <span className="font-mono text-[9.5px] text-faint">{clock(msg.created_at)}</span>
+            {onReply && hasContent && !streaming && <button type="button" onClick={() => onReply(msg)}
+              title={`回复 ${botName}`} aria-label={`回复 ${botName}`}
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] text-faint hover:bg-panel3 hover:text-ink">
+              <Reply size={12} />回复
+            </button>}
             {onBranch && hasContent && (
               <button
                 type="button"
@@ -419,7 +442,7 @@ function MessageItem({
           <button key={file.id} onClick={() => handlers.onOpenFile(file)}
             className="mt-2 flex max-w-full items-center gap-2 rounded-lg border border-line bg-panel px-2.5 py-2 text-left hover:border-accent/40">
             <FileText size={14} className="shrink-0 text-accent" />
-            <span className="truncate text-[12px] text-ink">{file.path}</span>
+            <span className="truncate text-[12px] text-ink" title={fileName(file.path)}>{fileName(file.path)}</span>
             <span className="shrink-0 text-[10.5px] text-faint">{bytes(file.size)}</span>
           </button>
         ))}

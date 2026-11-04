@@ -98,6 +98,16 @@ async def open_checkpointer():
 # 节点
 # --------------------------------------------------------------------------- #
 def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
+    async def select_node(state: AgentState) -> dict:
+        if state.get("role") == "free":
+            return await ex.choose_free_peers()
+        if state.get("role") == "peer" and not state.get("task_id"):
+            return await ex.choose_peer()
+        return {}
+
+    def route_select(state: AgentState) -> str:
+        return END if state.get("done") else "model"
+
     async def model_node(state: AgentState) -> dict:
         role = state.get("role", "supervisor")
         try:
@@ -116,10 +126,10 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
         return {"has_calls": has_calls, "last": content, "cont": False}
 
     async def tool_node(state: AgentState) -> dict:
-        msg = ex.next_open_call(state["thread_id"])
+        msg = await asyncio.to_thread(ex.next_open_call, state["thread_id"])
         if msg is None:
             return {}
-        ex.begin_tool(msg.id)
+        await asyncio.to_thread(ex.begin_tool, msg.id)
         call = ((msg.meta or {}).get("tool_calls") or [{}])[0]
         name = (call.get("function") or {}).get("name") or ""
         role = state.get("role", "supervisor")
@@ -127,9 +137,10 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
         if name == "delegate":
             # RUN-09：总指挥可以派任务；领到子任务的成员在深度允许时也能再派一层。
             # @Bot 直连（worker 但没有 task_id）没有上级，派任务会切错角色。
-            if role != "supervisor" and not state.get("task_id"):
-                ex.write_tool_result(
-                    state["thread_id"], call, "只有总指挥或已领到子任务的成员可以派任务。"
+            if role not in ("supervisor", "peer") and not state.get("task_id"):
+                await asyncio.to_thread(
+                    ex.write_tool_result, state["thread_id"], call,
+                    "只有总指挥或已领到子任务的成员可以派任务。"
                 )
                 return {}
             return await ex.start_delegate(
@@ -153,48 +164,57 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
             # 此时审批/回答已落库，重放同一个调用就会拿到最终结果。
             interrupt(sig.payload)
             outcome = await ex.execute_tool(**args)
-        ex.write_tool_result(state["thread_id"], call, outcome)
+        await asyncio.to_thread(ex.write_tool_result, state["thread_id"], call, outcome)
         return {}
 
     async def after_node(state: AgentState) -> dict:
         # 子执行失败时 model 节点已经自己收尾（fail_task），这里不要再当成功处理
         if state.get("done"):
             return {"done": True}
-        if ex.has_pending_interjections(state["thread_id"]):
+        if await ex.has_pending_interjections(state["thread_id"]):
             # 插话在最后一轮输出时到达：仍在原任务/线程继续，不生成假完成结果。
             return {"cont": True}
         if state.get("role") == "worker" and state.get("task_id"):
             # RUN-12：并行子任务是独立执行，跑完关掉自己这条，不等总指挥
-            if ex.is_independent_task(state["task_id"]):
+            if await ex.is_independent_task(state["task_id"]):
                 return await ex.finish_child_task(
                     task_id=state["task_id"], content=state.get("last") or ""
                 )
             return await ex.finish_task(task_id=state["task_id"], content=state.get("last") or "")
-        ex.finish_run(state.get("last") or "")
+        if state.get("role") == "peer":
+            return await ex.finish_peer(state["bot_id"], state.get("last") or "")
+        await ex.finish_run(state.get("last") or "")
         return {"done": True, "cont": False}
 
-    def route_model(state: AgentState) -> str:
+    async def route_model(state: AgentState) -> str:
         if state.get("cont"):
             # 子 Bot 失败已切回总指挥，由总指挥处理失败结果后再结束。
-            return "tool" if ex.next_open_call(state["thread_id"]) else "model"
+            open_call = await asyncio.to_thread(ex.next_open_call, state["thread_id"])
+            return "tool" if open_call else "model"
         return "tool" if state.get("has_calls") else "after"
 
-    def route_tool(state: AgentState) -> str:
-        return "tool" if ex.next_open_call(state["thread_id"]) else "model"
+    async def route_tool(state: AgentState) -> str:
+        open_call = await asyncio.to_thread(ex.next_open_call, state["thread_id"])
+        return "tool" if open_call else "model"
 
-    def route_after(state: AgentState) -> str:
+    async def route_after(state: AgentState) -> str:
         if state.get("cont"):
-            return "tool" if ex.next_open_call(state["thread_id"]) else "model"
+            if state.get("role") == "peer" and not state.get("bot_id"):
+                return "select"
+            open_call = await asyncio.to_thread(ex.next_open_call, state["thread_id"])
+            return "tool" if open_call else "model"
         return END
 
     g = StateGraph(AgentState)
+    g.add_node("select", select_node)
     g.add_node("model", model_node)
     g.add_node("tool", tool_node)
     g.add_node("after", after_node)
-    g.add_edge(START, "model")
+    g.add_edge(START, "select")
+    g.add_conditional_edges("select", route_select, {"model": "model", END: END})
     g.add_conditional_edges("model", route_model, {"tool": "tool", "after": "after", "model": "model"})
     g.add_conditional_edges("tool", route_tool, {"tool": "tool", "model": "model"})
-    g.add_conditional_edges("after", route_after, {"tool": "tool", "model": "model", END: END})
+    g.add_conditional_edges("after", route_after, {"tool": "tool", "model": "model", "select": "select", END: END})
     return g.compile(checkpointer=checkpointer)
 
 
@@ -224,12 +244,15 @@ async def run_graph(
             # 僵尸执行回收：从最近一次检查点继续
             out = await app.ainvoke(None, cfg)
         elif started:
-            ex.finish_run(snap.values.get("last") or "")
+            await ex.finish_run(snap.values.get("last") or "")
             return None  # 这个 run 已经跑完，避免重复执行
         else:
             if resume is not None:
                 # 有暂停记录但没有检查点（旧数据/检查点被清理）：补好工具结果后重跑
-                ex.answer_open_calls("上一次工具调用因执行中断没有返回结果，请根据当前情况重新判断。")
+                await asyncio.to_thread(
+                    ex.answer_open_calls,
+                    "上一次工具调用因执行中断没有返回结果，请根据当前情况重新判断。",
+                )
             out = await app.ainvoke(state, cfg)
 
     pending = (out or {}).get("__interrupt__")

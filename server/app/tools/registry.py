@@ -265,7 +265,7 @@ _FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
 def _banned_ip(ip) -> bool:
     """IP 字面量的严格判定：私网/回环/链路本地/保留/组播都拒绝。"""
     return (
-        ip.is_private
+        not ip.is_global
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_reserved
@@ -273,10 +273,16 @@ def _banned_ip(ip) -> bool:
     )
 
 
-def _check_url(url: str) -> None:
+def _check_url(url: str) -> str:
     p = urlparse(url)
     if p.scheme not in ("http", "https"):
         raise ToolError("只支持 http/https")
+    if p.username or p.password:
+        raise ToolError("地址中不能包含用户名或密码")
+    try:
+        p.port
+    except ValueError:
+        raise ToolError("地址端口无效") from None
     host = (p.hostname or "").lower()
     if not host or host in _BLOCKED_HOSTS or host.endswith(".local") or host.endswith(".internal"):
         raise ToolError("禁止访问该地址")
@@ -288,24 +294,36 @@ def _check_url(url: str) -> None:
     if literal is not None:
         if _banned_ip(literal):
             raise ToolError("禁止访问内网或本机地址")
-        return
+        return str(literal)
     # 域名：解析后只拦「明确内网」的地址。reserved 段（如 198.18.0.0/15 的
     # 代理 fake-ip）放行，否则本机开代理/分流时所有公网域名都会被误杀成内网。
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
         raise ToolError("域名解析失败")
+    addresses = []
     for info in infos:
         try:
             resolved = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if resolved.is_loopback or resolved.is_link_local:
-            raise ToolError("禁止访问内网或本机地址")
-        if resolved.is_private:
+        if _banned_ip(resolved):
             fake_ip = resolved.version == 4 and resolved in _FAKE_IP_NET
             if not fake_ip:
                 raise ToolError("禁止访问内网或本机地址")
+        addresses.append(str(resolved))
+    if not addresses:
+        raise ToolError("域名解析失败")
+    return addresses[0]
+
+
+def _pin_url(url: str, address: str) -> str:
+    """把 HTTP 连接目标固定到刚校验过的地址，保留原主机名供 Host/SNI 使用。"""
+    p = urlparse(url)
+    ip = ipaddress.ip_address(address)
+    host = f"[{ip}]" if ip.version == 6 else str(ip)
+    netloc = f"{host}:{p.port}" if p.port else host
+    return p._replace(netloc=netloc, fragment="").geturl()
 
 
 # 读取网页时用常见浏览器的标识：Reddit、Medium 这类站点对非浏览器 UA 直接 429/403。
@@ -352,14 +370,22 @@ async def _web_read(ctx, url: str) -> str:
         retried_429 = False
         async with httpx.AsyncClient(timeout=25) as client:
             while hops < 5:
-                _check_url(current)
+                address = await asyncio.to_thread(_check_url, current)
+                parsed = urlparse(current)
+                request_url = _pin_url(current, address) if address else current
+                request_headers = {**_READ_HEADERS, "Host": parsed.netloc}
+                extensions = (
+                    {"sni_hostname": parsed.hostname.encode("idna").decode("ascii")}
+                    if parsed.scheme == "https" else {}
+                )
                 # 用流式读取并限制字节数：需求 8.4 要求限制响应大小，
                 # 不能把一个超大页面整体读进内存。
                 async with client.stream(
                     "GET",
-                    current,
+                    request_url,
                     follow_redirects=False,
-                    headers=_READ_HEADERS,
+                    headers=request_headers,
+                    extensions=extensions,
                 ) as r:
                     if r.status_code in (301, 302, 303, 307, 308):
                         loc = r.headers.get("location")
@@ -419,6 +445,7 @@ async def _web_read(ctx, url: str) -> str:
 # 文件工具
 # --------------------------------------------------------------------------- #
 async def _file_write(ctx, path: str, content: str) -> str:
+    ctx.assert_lease()
     path = ctx.file_path(path, write=True)
     size = sandbox.write_file(ctx.user_id, ctx.chat_id, path, content)
     ctx.record_file(path, size)
@@ -438,6 +465,7 @@ async def _file_list(ctx) -> str:
 
 
 async def _file_delete(ctx, path: str) -> str:
+    ctx.assert_lease()
     path = ctx.file_path(path, write=True)
     sandbox.delete_file(ctx.user_id, ctx.chat_id, path)
     # 同步删除产物记录并通知文件面板，否则删除后列表里会留下幽灵条目
@@ -630,25 +658,60 @@ def _strip_fence(code: str) -> str:
 # 容器就是该群聊那台 Ubuntu，和 run_command 共用 /workspace。
 def _file_state(ctx) -> dict:
     import hashlib
-    from app.sandbox.artifacts import is_artifact_file
+    from app.sandbox.artifacts import is_output_file
+    from app.sandbox.workspace import output_directory
+    output_dir = output_directory(ctx.workspace)
     return {item["path"]: hashlib.sha256(sandbox.safe_path(ctx.user_id, ctx.chat_id, item["path"]).read_bytes()).hexdigest()
-        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_artifact_file(ctx.user_id, ctx.chat_id, item["path"])
-        and (not ctx.workspace or item["path"].startswith(ctx.workspace + "/"))}
+        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_output_file(ctx.user_id, ctx.chat_id, item["path"])
+        and (not ctx.workspace or item["path"].startswith(output_dir + "/"))}
 
 
 def _record_execution_files(ctx, before=None) -> None:
+    from app.sandbox.workspace import output_directory
+    ctx.assert_lease()
     entries = sandbox.list_files(ctx.user_id, ctx.chat_id)
     paths = {item["path"] for item in entries}
+    output_dir = output_directory(ctx.workspace)
+    recorded_paths = set()
     for rec in ctx.db.scalars(select(FileRec).where(FileRec.user_id == ctx.user_id, FileRec.chat_id == ctx.chat_id)):
-        if rec.path not in paths and (not ctx.workspace or rec.path.startswith(ctx.workspace + "/")):
+        recorded_paths.add(rec.path)
+        if rec.path not in paths and (not ctx.workspace or rec.path.startswith(ctx.workspace + "/") or rec.path.startswith(output_dir + "/")):
             ctx.db.delete(rec)
     if before is not None:
         after = _file_state(ctx)
         for item in entries:
-            if item["path"] in after and before.get(item["path"]) != after[item["path"]]:
+            if item["path"] in after and (item["path"] not in recorded_paths or before.get(item["path"]) != after[item["path"]]):
                 ctx.record_file(item["path"], item["size"])
     ctx.db.flush()
     emit(ctx.db, ctx.user_id, ctx.chat_id, "files.updated", {"chat_id": ctx.chat_id})
+
+
+def _prepare_execution_files(ctx):
+    from app.core.db import session_scope
+    from app.sandbox import runtime
+
+    previous_db = ctx.db
+    previous_db.commit()
+    previous_db.close()
+    try:
+        with session_scope() as db:
+            ctx.db = db
+            ctx.assert_lease()
+            return None if runtime.status(ctx.user_id)["provider"] == "cube" else _file_state(ctx)
+    finally:
+        ctx.db = previous_db
+
+
+def _finish_execution_files(ctx, before) -> None:
+    from app.core.db import session_scope
+
+    previous_db = ctx.db
+    try:
+        with session_scope() as db:
+            ctx.db = db
+            _record_execution_files(ctx, before)
+    finally:
+        ctx.db = previous_db
 
 
 async def _code_exec(ctx, code: str, language: str = "python") -> str:
@@ -662,13 +725,11 @@ async def _code_exec(ctx, code: str, language: str = "python") -> str:
     if len(code) > 100_000:
         code = code[:100_000] + "\n# [代码过长，已截断]"
     from app.sandbox import terminal
-    cube_connected = linux_sandbox.status(ctx.user_id)["provider"] == "cube"
-    before = None if cube_connected else _file_state(ctx)
-    ctx.db.commit()
-    command_id = terminal.create(ctx.user_id, ctx.chat_id, code, "code", language,
+    before = await asyncio.to_thread(_prepare_execution_files, ctx)
+    command_id = await asyncio.to_thread(terminal.create, ctx.user_id, ctx.chat_id, code, "code", language,
         ctx.bot.id, ctx.run.id, getattr(ctx, "tool_call_id", None))
     out = await terminal.execute(command_id)
-    _record_execution_files(ctx, before)
+    await asyncio.to_thread(_finish_execution_files, ctx, before)
     return out
 
 
@@ -710,13 +771,11 @@ async def _run_command(ctx, command: str) -> str:
     from app.sandbox import runtime as linux_sandbox
 
     from app.sandbox import terminal
-    cube_connected = linux_sandbox.status(ctx.user_id)["provider"] == "cube"
-    before = None if cube_connected else _file_state(ctx)
-    ctx.db.commit()
-    command_id = terminal.create(ctx.user_id, ctx.chat_id, command, bot_id=ctx.bot.id,
+    before = await asyncio.to_thread(_prepare_execution_files, ctx)
+    command_id = await asyncio.to_thread(terminal.create, ctx.user_id, ctx.chat_id, command, bot_id=ctx.bot.id,
         run_id=ctx.run.id, call_id=getattr(ctx, "tool_call_id", None))
     out = await terminal.execute(command_id)
-    _record_execution_files(ctx, before)
+    await asyncio.to_thread(_finish_execution_files, ctx, before)
     return out
 
 
@@ -867,6 +926,7 @@ async def _memory_save(ctx, content: str, title: str = "") -> str:
     title = (title or "").strip()[:60]
     if not ctx.bot:
         return "保存失败：当前执行没有绑定 Bot，无法定位私有记忆。"
+    ctx.assert_lease()
 
     used = (
         ctx.db.scalar(

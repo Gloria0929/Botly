@@ -50,6 +50,8 @@ export default function MembersModal({
   };
 
   const members = chat?.members || [];
+  const free = chat?.mode === "free";
+  const leaderLabel = free ? "负责人" : "总指挥";
   const memberIds = useMemo(() => new Set(members.map((m) => m.id)), [members]);
   const available = useMemo(() => bots.filter((b) => !memberIds.has(b.id)), [bots, memberIds]);
   const filtered = useMemo(() => {
@@ -79,7 +81,7 @@ export default function MembersModal({
     setBusy(bot.id);
     try {
       await api.patchChat(chat.id, { supervisor_bot_id: bot.id });
-      toast(`「${bot.name}」已设为总指挥，下一次执行生效`, "ok");
+      toast(`「${bot.name}」已设为${leaderLabel}，下一次执行生效`, "ok");
       onChanged();
     } catch (e: any) {
       toastError(e);
@@ -114,7 +116,7 @@ export default function MembersModal({
       open={open}
       onClose={onClose}
       title="群聊成员"
-      subtitle="消息默认发给总指挥；@某个成员可以让它直接处理。"
+      subtitle={free ? "成员自己决定是否回应；@ 或回复消息可定向唤醒。" : "消息默认发给总指挥；@某个成员可以让它直接处理。"}
       width="max-w-lg"
     >
       <div className="space-y-5">
@@ -139,7 +141,7 @@ export default function MembersModal({
                       <span className="truncate text-[12.5px] font-medium">{m.name}</span>
                       {isSup && (
                         <span className="chip border-accent/30 bg-accent/10 text-accent">
-                          <Crown size={9} /> 总指挥
+                          <Crown size={9} /> {leaderLabel}
                         </span>
                       )}
                       {m.enabled === false && (
@@ -161,16 +163,16 @@ export default function MembersModal({
                   {!isSup && (
                     <button
                       onClick={() => promote(m)}
-                      disabled={!!busy || cap.bad}
+                      disabled={!!busy || (!free && cap.bad) || m.enabled === false}
                       className="rounded-md px-1.5 py-1 text-[10.5px] text-muted transition-colors hover:bg-panel hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
                       title={cap.bad ? `该模型${cap.text}，不能担任总指挥` : "设为群聊总指挥"}
                     >
-                      设为总指挥
+                      设为{leaderLabel}
                     </button>
                   )}
                   <button
                     onClick={() => remove(m)}
-                    disabled={!!busy || isSup || members.length <= 1}
+                    disabled={!!busy || isSup || members.length <= (free ? 2 : 1)}
                     title={isSup ? "请先把总指挥换成其他成员" : "移出群聊"}
                     className="rounded-md p-1.5 text-faint transition-colors hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-25 disabled:hover:bg-transparent disabled:hover:text-faint"
                   >
@@ -188,8 +190,13 @@ export default function MembersModal({
             )}
           </div>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
-            总指挥负责拆解任务并派任务；更换总指挥对下一次执行生效。
+            {free ? "负责人是可选的，只在无人回应时兜底，或在需要多人分工时出计划。" : "总指挥负责拆解任务并派任务；更换总指挥对下一次执行生效。"}
           </p>
+          {free && chat?.supervisor_bot_id && <button className="btn-ghost mt-2" disabled={!!busy} onClick={async () => {
+            setBusy("leader");
+            try { await api.patchChat(chat.id, { supervisor_bot_id: null }); onChanged(); toast("已取消负责人，由成员按判断分数兜底", "ok"); }
+            catch (e) { toastError(e); } finally { setBusy(null); }
+          }}>不设负责人</button>}
         </section>
 
         <section>
@@ -218,7 +225,7 @@ export default function MembersModal({
               <button
                 key={b.id}
                 onClick={() => add(b)}
-                disabled={!!busy}
+                disabled={!!busy || (free && members.length >= 6)}
                 className="flex w-full items-center gap-2.5 border-b border-line px-2.5 py-2 text-left transition-colors last:border-b-0 hover:bg-panel2 disabled:opacity-50"
               >
                 <Avatar value={b.avatar} size={28} alt={b.name} />

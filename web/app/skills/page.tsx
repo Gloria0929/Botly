@@ -263,14 +263,14 @@ export default function SkillsPage() {
                     <Sparkles size={16} />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[13.5px] font-medium">{s.name}</span>
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
+                      <span className="min-w-0 max-w-full break-words text-[13.5px] font-medium leading-5 [overflow-wrap:anywhere]">{s.name}</span>
                       {s.source && s.source !== "manual" && (
-                        <span className="chip border-accent/40 text-[9.5px] text-accent">
+                        <span className="chip shrink-0 whitespace-nowrap border-accent/40 text-[9.5px] text-accent">
                           导入 · {s.source === "github" ? "GitHub" : s.source.toUpperCase()}
                         </span>
                       )}
-                      {!s.enabled && <span className="chip text-faint">已停用</span>}
+                      {!s.enabled && <span className="chip shrink-0 whitespace-nowrap text-faint">已停用</span>}
                     </div>
                     <div className="mt-0.5 text-[11.5px] text-faint">
                       {s.bot_count ? `${s.bot_count} 个 Bot 在用` : "还没有 Bot 使用"}
@@ -310,8 +310,8 @@ export default function SkillsPage() {
                 </button>}
                 <div className="mt-auto flex flex-wrap gap-1.5 border-t border-line pt-4">
                   {s.tools.slice(0, 6).map((t) => (
-                    <span key={t} className="chip font-mono">
-                      {t}
+                    <span key={t} title={t} className="chip min-w-0 max-w-full font-mono">
+                      <span className="min-w-0 truncate">{t}</span>
                     </span>
                   ))}
                   {s.tools.length > 6 && (

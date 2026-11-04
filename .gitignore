@@ -7,10 +7,12 @@ venv/
 # 数据与密钥
 server/data/
 server/.env
+certs/
 
 # Node
 node_modules/
 .next/
+.next-dev/
 out/
 *.tsbuildinfo
 next-env.d.ts

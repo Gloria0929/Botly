@@ -73,7 +73,7 @@ def test_worker_reads_interjection_without_aborting_task(client, invite, monkeyp
         assert db.get(Task, task_id).status == "running"
         assert db.get(Run, run_id).last_interjection_seq == 0
         assert db.scalar(select(func.count(Task.id)).where(Task.run_id == run_id)) == 1
-    assert not ex.has_pending_interjections(thread_id)
+    assert not asyncio.run(ex.has_pending_interjections(thread_id))
 
 
 def test_pending_interjection_seq_and_mark_read(client, invite):

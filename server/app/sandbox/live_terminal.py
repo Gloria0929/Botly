@@ -9,15 +9,28 @@ import time
 
 from cubesandbox import PtySize
 from cubesandbox._exceptions import CubeSandboxError
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.db import session_scope
+from app.core.logging_setup import get_logger
 from app.core.models import CubeSession
 from app.sandbox import cube
 
 _sessions: dict[tuple[str, str], "LiveTerminal"] = {}
 _locks: dict[tuple[str, str], asyncio.Lock] = {}
 _HISTORY_LIMIT = 256 * 1024
+log = get_logger("sandbox.terminal")
+
+
+def _forget_pid(user_id, chat_id, sandbox_id, pid):
+    try:
+        with session_scope() as db:
+            db.execute(update(CubeSession).where(
+                CubeSession.user_id == user_id, CubeSession.chat_id == chat_id,
+                CubeSession.sandbox_id == sandbox_id, CubeSession.pty_pid == pid,
+            ).values(pty_pid=None))
+    except Exception:
+        log.warning("清理失效终端 PID 失败，重新连接时将再次检查")
 
 
 @dataclass
@@ -37,15 +50,18 @@ class LiveTerminal:
 
     def start_reader(self):
         def read():
-            error = None
+            failure = None
             try:
                 for chunk in self.handle:
                     self.loop.call_soon_threadsafe(self.publish, chunk)
                 if self.handle.error:
-                    error = str(self.handle.error)
+                    failure = RuntimeError(str(self.handle.error))
             except Exception as exc:
-                error = cube.safe_error(exc, self.connection)
+                failure = exc
             finally:
+                if cube.is_missing_process(failure) or self.handle.exit_code is not None:
+                    _forget_pid(self.user_id, self.chat_id, self.sandbox.sandbox_id, self.handle.pid)
+                error = cube.safe_error(failure, self.connection) if failure else None
                 try:
                     self.loop.call_soon_threadsafe(self.finish, error)
                 except RuntimeError:
@@ -54,6 +70,8 @@ class LiveTerminal:
         threading.Thread(target=read, name=f"cube-pty-{self.chat_id[:8]}", daemon=True).start()
 
     def publish(self, data: bytes):
+        if self.closed:
+            return
         self.history.extend(data)
         if len(self.history) > _HISTORY_LIMIT:
             del self.history[:-_HISTORY_LIMIT]
@@ -67,6 +85,8 @@ class LiveTerminal:
                 queue.put_nowait(data)
 
     def finish(self, error):
+        if self.closed:
+            return
         self.closed, self.error = True, error
         event = {"type": "error", "message": error} if error else {"type": "exit", "code": self.handle.exit_code}
         for queue in tuple(self.subscribers):
@@ -80,23 +100,50 @@ class LiveTerminal:
         self.subscribers.add(queue)
         if self.history:
             queue.put_nowait(bytes(self.history))
+        if self.closed:
+            queue.put_nowait({"type": "error", "message": self.error} if self.error
+                             else {"type": "exit", "code": self.handle.exit_code})
         return queue
 
     def unsubscribe(self, queue):
         self.subscribers.discard(queue)
         self.last_active = time.monotonic()
 
+    async def process_gone(self, exc):
+        self.finish(cube.safe_error(exc, self.connection))
+        key = (self.user_id, self.chat_id)
+        if _sessions.get(key) is self:
+            _sessions.pop(key, None)
+
+        def discard():
+            _forget_pid(self.user_id, self.chat_id, self.sandbox.sandbox_id, self.handle.pid)
+            cube.close_client(self.sandbox)
+        try:
+            await asyncio.to_thread(discard)
+        except Exception:
+            log.warning("关闭失效终端传输失败")
+
     async def input(self, data: str):
         if self.closed:
             raise RuntimeError("终端连接已关闭")
         self.last_active = time.monotonic()
         async with self.writing:
-            await asyncio.to_thread(self.handle.send_stdin, data, request_timeout=10)
+            try:
+                await asyncio.to_thread(self.handle.send_stdin, data, request_timeout=10)
+            except Exception as exc:
+                if cube.is_missing_process(exc):
+                    await self.process_gone(exc)
+                raise
 
     async def resize(self, cols: int, rows: int):
         if not self.closed:
             async with self.writing:
-                await asyncio.to_thread(self.handle.resize, PtySize(rows=rows, cols=cols), request_timeout=10)
+                try:
+                    await asyncio.to_thread(self.handle.resize, PtySize(rows=rows, cols=cols), request_timeout=10)
+                except Exception as exc:
+                    if cube.is_missing_process(exc):
+                        await self.process_gone(exc)
+                    raise
 
 
 def _open(connection, user_id, chat_id, cols, rows):
@@ -108,10 +155,11 @@ def _open(connection, user_id, chat_id, cols, rows):
         if row.pty_pid:
             try:
                 handle = sandbox.pty.connect(row.pty_pid, timeout=3600)
-            except CubeSandboxError as exc:
+            except (CubeSandboxError, RuntimeError) as exc:
                 # 已退出的 shell 可新建；鉴权、连接等错误不能悄悄覆盖。
-                if exc.status_code != 404 and "not_found" not in str(exc).lower():
+                if not cube.is_missing_process(exc) and getattr(exc, "status_code", None) != 404:
                     raise
+                _forget_pid(user_id, chat_id, sandbox.sandbox_id, row.pty_pid)
         if handle is None:
             env = {**cube.TERMINAL_ENV,
                 "PS1": r"\w\$ ",
@@ -142,8 +190,14 @@ async def connect(user_id: str, chat_id: str, cols: int, rows: int):
         if previous and not previous.closed:
             if not cube.same_config(previous.connection, connection):
                 raise ValueError("Cube 配置已变更，请先断开旧终端")
-            await previous.resize(cols, rows)
-            return previous
+            try:
+                await previous.resize(cols, rows)
+            except Exception as exc:
+                if not cube.is_missing_process(exc):
+                    raise
+            else:
+                if not previous.closed:
+                    return previous
         try:
             async with cube.chat_lock(user_id, chat_id):
                 sandbox, handle = await asyncio.to_thread(_open, connection, user_id, chat_id, cols, rows)

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 # server/ 目录：本文件在 app/core/ 下，往上三层才是工程根
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -30,6 +32,8 @@ def _load_env(path: Path) -> None:
 
 
 _load_env(BASE_DIR / ".env")
+APP_ENV = os.getenv("BOTLY_ENV", "development").strip().lower()
+DEVELOPMENT_ENVS = {"development", "dev", "test", "testing"}
 
 DATA_DIR = Path(os.getenv("BOTLY_DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,7 +58,10 @@ SESSION_MAX_AGE = 7 * 24 * 3600  # 7 天
 OAUTH_STATE_COOKIE = "botly_oauth_nonce"
 OAUTH_STATE_MAX_AGE = 600
 # 部署在反向代理/HTTPS 后面时，通过环境变量强制 Secure，不依赖代理头是否被信任
-COOKIE_SECURE = os.getenv("BOTLY_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+COOKIE_SECURE = (
+    os.getenv("BOTLY_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+    or os.getenv("BOTLY_BASE_URL", "").lower().startswith("https://")
+)
 
 # ---- 附录 A 默认参数 ----
 DEFAULT_TOKEN_BUDGET = 300_000
@@ -89,9 +96,16 @@ SMTP_PASSWORD = os.getenv("BOTLY_SMTP_PASSWORD", "")
 SMTP_SECURITY = os.getenv("BOTLY_SMTP_SECURITY", "starttls").strip().lower()
 MAIL_FROM = os.getenv("BOTLY_MAIL_FROM", "").strip() or (SMTP_USER or "no-reply@botly.local")
 # 没配 SMTP 时：1 = 把邮件写进日志并在接口里回一个可点的 dev 链接（本地/测试），0 = 直接报“邮件服务未配置”
-MAIL_DEV = os.getenv("BOTLY_MAIL_DEV", "1").lower() in ("1", "true", "yes")
-# 邮件里的链接前缀。留空则按请求头推导（同域反向代理下是正确的）
+MAIL_DEV = APP_ENV in DEVELOPMENT_ENVS and os.getenv("BOTLY_MAIL_DEV", "1").lower() in ("1", "true", "yes")
+# 邮件里的链接前缀；仅开发/测试环境允许留空并按请求推导。
 PUBLIC_BASE_URL = os.getenv("BOTLY_BASE_URL", "").rstrip("/")
+if APP_ENV in {"production", "prod"}:
+    if SECRET_KEY == "dev-insecure-secret-key-please-change":
+        raise RuntimeError("生产环境必须配置 BOTLY_SECRET_KEY")
+    if len(SECRET_KEY) < 32:
+        raise RuntimeError("生产环境 BOTLY_SECRET_KEY 至少需要 32 个字符")
+    if not _raw_enc:
+        raise RuntimeError("生产环境必须单独配置 BOTLY_ENCRYPTION_KEY")
 ADMIN_EMAILS = {e.strip().lower() for e in os.getenv("BOTLY_ADMIN_EMAILS", "").split(",") if e.strip()}
 RESET_TOKEN_TTL_MINUTES = max(5, int(os.getenv("BOTLY_RESET_TOKEN_TTL_MINUTES", "60")))
 VERIFY_TOKEN_TTL_HOURS = max(1, int(os.getenv("BOTLY_VERIFY_TOKEN_TTL_HOURS", "24")))
@@ -135,6 +149,15 @@ DELEGATION_DEPTH = max(1, min(5, int(os.getenv("BOTLY_MAX_DELEGATION_DEPTH", "2"
 # ---- TOL-05 MCP 工具 ----
 # 默认只允许公网地址（SSRF 防护）。自建/本机 MCP 服务把该开关设为 1。
 MCP_ALLOW_LOCAL = os.getenv("BOTLY_MCP_ALLOW_LOCAL", "0").lower() in ("1", "true", "yes")
+MCP_STDIO_ENABLED = os.getenv("BOTLY_MCP_STDIO_ENABLED", "0").lower() in ("1", "true", "yes")
+# 每项是完整 argv（绝对命令路径 + 固定参数），不允许任意解释器参数。
+MCP_STDIO_ALLOWED_COMMANDS = json.loads(os.getenv("BOTLY_MCP_STDIO_ALLOWED_COMMANDS", "[]"))
+if not isinstance(MCP_STDIO_ALLOWED_COMMANDS, list) or any(
+    not isinstance(argv, list) or not argv or any(not isinstance(arg, str) for arg in argv)
+    or not os.path.isabs(argv[0]) for argv in MCP_STDIO_ALLOWED_COMMANDS
+):
+    raise RuntimeError("BOTLY_MCP_STDIO_ALLOWED_COMMANDS 必须是完整命令参数数组的 JSON 列表，命令使用绝对路径")
+ALLOW_PRIVATE_BASE_URL = os.getenv("BOTLY_ALLOW_PRIVATE_BASE_URL", "0").lower() in ("1", "true", "yes")
 MCP_TIMEOUT = max(5, int(os.getenv("BOTLY_MCP_TIMEOUT", "30")))
 MCP_MAX_TOOLS = max(1, int(os.getenv("BOTLY_MCP_MAX_TOOLS", "80")))
 MCP_MAX_RESULT_CHARS = max(1000, int(os.getenv("BOTLY_MCP_MAX_RESULT_CHARS", "20000")))
@@ -176,6 +199,16 @@ ALERT_CHECK_INTERVAL = max(10, int(os.getenv("BOTLY_ALERT_CHECK_INTERVAL", "60")
 # Worker
 WORKER_POLL_INTERVAL = 0.5
 WORKER_LEASE_SECONDS = 180
+WORKER_SHUTDOWN_TIMEOUT = max(1, int(os.getenv("BOTLY_WORKER_SHUTDOWN_TIMEOUT", "8")))
+DB_POOL_SIZE = max(1, int(os.getenv("BOTLY_DB_POOL_SIZE", "10")))
+DB_MAX_OVERFLOW = max(0, int(os.getenv("BOTLY_DB_MAX_OVERFLOW", "20")))
 
 # Redis：队列 + 事件广播；不可用时自动降级为 DB 轮询
 REDIS_URL = os.getenv("BOTLY_REDIS_URL", "redis://127.0.0.1:6379/0")
+if APP_ENV in {"production", "prod"}:
+    for label, url in (("DATABASE_URL", DATABASE_URL), ("BOTLY_REDIS_URL", REDIS_URL)):
+        parsed = urlsplit(url)
+        if parsed.scheme.startswith(("postgres", "redis", "rediss")):
+            password = unquote(parsed.password or "")
+            if len(password) < 16:
+                raise RuntimeError(f"生产环境 {label} 的密码至少需要 16 个字符")

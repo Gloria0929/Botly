@@ -19,7 +19,7 @@ from app.core.db import IS_SQLITE, SessionLocal, session_scope
 from app.core.models import Chat, CubeConnection, CubeSession, FileRec, now
 from app.core.security import decrypt_secret
 from app.sandbox import files
-from app.sandbox.artifacts import is_artifact_file, is_artifact_path, is_skill_directory
+from app.sandbox.artifacts import is_artifact_file, is_artifact_path, is_output_file, is_skill_directory
 from app.core.events import emit
 from app.tools.registry import UNTRUSTED_PREFIX
 
@@ -50,7 +50,20 @@ def same_config(first: CubeConnection, second: CubeConnection) -> bool:
         and decrypt_secret(first.api_key_encrypted) == decrypt_secret(second.api_key_encrypted))
 
 
+def is_missing_process(exc: Exception | str | None) -> bool:
+    message = str(exc).lower()
+    missing = "not_found" in message or "not found" in message
+    return (missing and ("process" in message or "pid" in message)) or (
+        getattr(exc, "status_code", None) == 404
+        and message.startswith(("connect failed:", "sendinput failed:", "update failed:"))
+    )
+
+
 def safe_error(exc: Exception, connection: CubeConnection) -> str:
+    if isinstance(exc, SandboxNotFoundError):
+        return "沙箱已删除或过期，请重新连接以创建新沙箱。"
+    if is_missing_process(exc) or str(exc) == "终端连接已关闭":
+        return "终端会话已结束或沙箱已失效，请重新连接。"
     message = str(exc)
     if connection.api_key_encrypted:
         key = decrypt_secret(connection.api_key_encrypted)
@@ -217,12 +230,15 @@ class CubeBackend:
             try:
                 prepare_client(sandbox)
                 ensure_directory(sandbox, WORKSPACE)
+                # 终端重连也经过这里；从空清单恢复本地副本，不删除模板文件。
+                # 全部上传成功后才替换会话记录，恢复失败仍保留旧记录和本地文件。
+                restored_manifest = self._push(sandbox, user_id, chat_id, {})
                 with session_scope() as db:
                     row = db.scalar(select(CubeSession).where(CubeSession.user_id == user_id, CubeSession.chat_id == chat_id))
                     if row is None:
                         row = CubeSession(user_id=user_id, chat_id=chat_id)
                         db.add(row)
-                    row.sandbox_id, row.connection_hash, row.files_manifest, row.pty_pid = sandbox.sandbox_id, digest, {}, None
+                    row.sandbox_id, row.connection_hash, row.files_manifest, row.pty_pid = sandbox.sandbox_id, digest, restored_manifest, None
                     row.skills_manifest = {}
                 existing = row
             except BaseException:
@@ -328,10 +344,12 @@ class CubeBackend:
         return current
 
     def _pull(self, sandbox, user_id, chat_id, old_manifest, bot_id=None, run_id=None):
-        from app.sandbox.workspace import workspace_for_run
+        from app.sandbox.workspace import is_task_path, output_directory, workspace_for_run
         workspace = workspace_for_run(user_id, chat_id, run_id)
+        output_dir = output_directory(workspace)
+        scopes = (workspace, output_dir)
         manifest = {rel: digest for rel, digest in old_manifest.items()
-                    if rel.startswith("tasks/") and not rel.startswith(workspace + "/")} if workspace else {}
+                    if is_task_path(rel) and not any(rel.startswith(scope + "/") for scope in scopes)} if workspace else {}
         directories = [WORKSPACE]
         count = 0
         while directories:
@@ -348,8 +366,8 @@ class CubeBackend:
                     raise ValueError("Cube 返回了非法文件名")
                 remote = PurePosixPath(directory) / name
                 rel = str(remote.relative_to(WORKSPACE))
-                if workspace and (rel == "tasks" or rel.startswith("tasks/")):
-                    if not (rel == workspace or rel.startswith(workspace + "/") or workspace.startswith(rel + "/")):
+                if workspace and is_task_path(rel):
+                    if not any(rel == scope or rel.startswith(scope + "/") or scope.startswith(rel + "/") for scope in scopes):
                         continue  # 不覆盖其他并行任务正在写入的本地文件。
                 if not is_artifact_path(rel):
                     continue  # 技能、依赖、缓存留在远端，不扫描或同步到产物区。
@@ -367,26 +385,24 @@ class CubeBackend:
                     raise ValueError(f"Cube 返回了未知文件类型：{kind}")
                 # 不下载远端符号链接，避免沙箱外文件被同步到本地。
         for rel in old_manifest.keys() - manifest.keys():
-            if is_artifact_path(rel) and (not workspace or rel.startswith(workspace + "/")):
+            if is_artifact_path(rel) and (not workspace or any(rel.startswith(scope + "/") for scope in scopes)):
                 files.delete_file(user_id, chat_id, rel)
         with session_scope() as db:
             row = db.scalar(select(CubeSession).where(CubeSession.user_id == user_id, CubeSession.chat_id == chat_id))
             row.files_manifest = manifest
             for rec in db.scalars(select(FileRec).where(FileRec.user_id == user_id, FileRec.chat_id == chat_id)):
                 if (is_artifact_path(rec.path) and rec.path in old_manifest and rec.path not in manifest
-                        and (not workspace or rec.path.startswith(workspace + "/"))):
+                        and (not workspace or any(rec.path.startswith(scope + "/") for scope in scopes))):
                     db.delete(rec)
-            if bot_id:
-                for rel, digest in manifest.items():
-                    if workspace and not rel.startswith(workspace + "/"):
-                        continue
-                    if old_manifest.get(rel) == digest:
-                        continue
-                    rec = db.scalar(select(FileRec).where(FileRec.user_id == user_id, FileRec.chat_id == chat_id, FileRec.path == rel))
-                    if rec is None:
-                        rec = FileRec(user_id=user_id, chat_id=chat_id, path=rel)
-                        db.add(rec)
-                    rec.size = files.safe_path(user_id, chat_id, rel).stat().st_size
+            for rel, digest in manifest.items():
+                if not is_output_file(user_id, chat_id, rel) or (workspace and not rel.startswith(output_dir + "/")):
+                    continue
+                rec = db.scalar(select(FileRec).where(FileRec.user_id == user_id, FileRec.chat_id == chat_id, FileRec.path == rel))
+                if rec is None:
+                    rec = FileRec(user_id=user_id, chat_id=chat_id, path=rel)
+                    db.add(rec)
+                rec.size = files.safe_path(user_id, chat_id, rel).stat().st_size
+                if bot_id and old_manifest.get(rel) != digest:
                     rec.created_by_bot_id, rec.run_id = bot_id, run_id
             emit(db, user_id, chat_id, "files.updated", {"chat_id": chat_id})
         return manifest
@@ -399,7 +415,7 @@ class CubeBackend:
         try:
             ensure_directory(sandbox, workdir)
             pushed = self._push(sandbox, user_id, chat_id, session.files_manifest or {})
-            # 先记录模板/已有文件的基线，只有 Agent 本次实际改动才成为交付产物。
+            # 先同步已有文件并登记 output 内容，基线用于识别本次 Agent 改动。
             baseline = self._pull(sandbox, user_id, chat_id, pushed, run_id=run_id)
             # 容器内 timeout 也约束命令，即使 HTTP 客户端取消也不会无限运行。
             wrapped = f"timeout -s KILL {timeout} bash -lc {shlex.quote(command)}"

@@ -5,6 +5,8 @@
 
 2026-11-04 更新：新并行任务默认使用独立目录，文件保存采用原子替换与用户配额锁；任务面板新增状态概览和单项重试，保留原产物和补充要求。嵌套任务正确交回上级后继续执行。
 
+自由群聊现已作为可选模式提供：消息直接交给成员并行回应，不再单独调用“是否回复”的判断模型，也不预先挑固定三人或弹出思考占位。普通消息延续当前对话对象，其他成员有实质补充才开口；人数配置仅作为实际发言的上限。支持连续发送、`@everyone`、回复消息定向、静音与成员间交接，新建及已有群聊默认仍为任务模式。到「群聊设置」切换模式，到「智能体」填写性格与积极度。实施说明见 [自由群聊改造方案](docs/Botly%20自由群聊改造方案(对标%20Grok%20Bot).md)。
+
 2026-11-03 更新：审批提醒只走邮件，聊天内仍可批准/拒绝，L1/L2/L3 卡片均可点击「在本群聊始终允许」。
 
 模型服务返回 429、408、5xx 或发生网络故障时，在尚未输出正文前最多自动重试 5 次，默认按 2、4、8、16、32 秒递增退避并加入少量随机延迟，支持服务端的 `Retry-After` 等待时间。开始输出后不自动重试，避免重复内容；服务仍不可用时显示中文原因与请求 ID，原始错误及各次重试保留在日志中。
@@ -53,9 +55,8 @@ cd web    && ./dev.sh           # Web      http://127.0.0.1:3200
 
 > Worker 必须启动。只起 API 时前端能打开、能发消息，但执行会停在「排队中」。
 >
-> `web/.next` 是 dev 与 build 共用的目录：**dev server 运行时不要执行 `next build`**，
-> 否则 build 产物会覆盖 dev 正在引用的 chunk，页面报 `Cannot find module './xxx.js'`。
-> 遇到时停掉 dev、重新 `./dev.sh` 即可（脚本会先清 `.next`）。
+> 开发缓存使用 `web/.next-dev`，生产构建使用 `web/.next`，两者已隔离；
+> `./dev.sh` 不再删除生产产物。更新代码或重启服务后，已经打开的页面若仍引用旧分块，刷新页面即可加载新资源。
 
 ### 首次使用
 
@@ -171,7 +172,7 @@ Worker 用 `lease_until` 做租约：进程崩溃后，租约过期的 `running`
 | 用量与费用 LIM-05 / MOD-05 | 按 Bot / 模型 / 群聊 / 日期聚合 token 与调用次数；模型单价按每百万 token 配置，费用为估算值；未填单价的 token 单独标出 |
 | 执行中插话 RUN-13 | 补充要求在下一轮进入总指挥和子 Agent 上下文，沿用原任务、线程和已有进度；最后一轮输出期间的新插话会继续原任务处理，不提前结束或重复派发 |
 | 审批白名单 APV-06 | 审批卡片可点击「在本群聊始终允许」，支持 L1/L2/L3，按当前群聊 + 当前工具保存；群聊设置里可撤销，并可切换 L2 写入是否需要审批 |
-| 文件 FIL-01~03 | 右侧「任务 / 产物 / 终端」面板，Cube 终端为持续 PTY，显示真实 shell 路径、直接输入及实时输出，Agent 命令记录另可查看；产物仅列 Agent 交付文件，技能与依赖留在沙箱；点击产物在侧栏预览、可下载，用户附件仍供 Agent 读取 |
+| 文件 FIL-01~03 | 右侧「任务 / 产物 / 终端」面板，Cube 终端为持续 PTY，支持直接输入及实时输出，Agent 执行过程在任务详情中查看；产物仅列 Agent 交付文件，技能与依赖留在沙箱；点击产物在侧栏预览、可下载，用户附件仍供 Agent 读取 |
 | 接口与事件 | 第 11 节全部接口、第 9.3 节事件类型、`Last-Event-ID` 补发 |
 
 ### 已实现的 P1（2026-10）
@@ -473,14 +474,15 @@ web/
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
-| `BOTLY_SECRET_KEY` | 会话签名密钥，同时派生加密主密钥 | 开发用占位值 |
+| `BOTLY_ENV` | `development` / `production`；生产启动只校验迁移版本 | `development` |
+| `BOTLY_SECRET_KEY` | 会话签名密钥；生产环境不得使用开发占位值 | 开发用占位值 |
 | `BOTLY_REDIS_URL` | Redis 连接串 | `redis://127.0.0.1:6379/0` |
 | `BOTLY_REDIS_PREFIX` | 不同部署与测试库的队列/事件前缀 | `botly` |
 | `BOTLY_ADMIN_EMAILS` | 可查看部署日志和系统告警的管理员邮箱，逗号分隔；普通用户只看自身日志/指标 | 未设置 |
 | `BOTLY_WORKER_CONCURRENCY` / `BOTLY_MAX_CONCURRENT_RUNS` | 单 Worker 槽位 / 全局运行执行上限 | `20` / `20` |
 | `BOTLY_DATA_DIR` | 数据目录（SQLite 与沙箱） | `server/data` |
 | `DATABASE_URL` | Postgres 连接串；不设置时用 `server/data/botly.db` | 未设置 |
-| `BOTLY_ENCRYPTION_KEY` | 独立的 Fernet 主密钥（可选） | 由 SECRET_KEY 派生 |
+| `BOTLY_ENCRYPTION_KEY` | 独立 Fernet 主密钥；生产环境必填，可用 `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` 生成 | 开发环境由 `BOTLY_SECRET_KEY` 派生 |
 | `BOTLY_COOKIE_SECURE` | 设为 `1` 时强制会话 Cookie 带 Secure（HTTPS 部署） | 关闭 |
 | `BOTLY_METRICS_TOKEN` | `/api/metrics` 的抓取令牌（`Authorization: Bearer <token>`）；未设置时仅回环地址可访问 | 未设置 |
 | `BOTLY_SUMMARY_THRESHOLD_TOKENS` | 主线程历史超过该 token 估算值时触发长对话摘要 | 8000 |
@@ -495,7 +497,12 @@ web/
 | `BOTLY_SMTP_USER` / `BOTLY_SMTP_PASSWORD` | SMTP 登录凭据（内网中继可留空） | 未设置 |
 | `BOTLY_MAIL_FROM` | 发件人地址 | 取 `SMTP_USER` |
 | `BOTLY_MAIL_DEV` | `1` = 没配 SMTP 时把邮件写日志、接口回可点链接；生产应设 `0` | `1` |
-| `BOTLY_BASE_URL` | 审批邮件中的站点对外地址，生产必配；认证邮件未配时按请求头推导 | 未设置 |
+| `BOTLY_BASE_URL` | 邮件链接中的站点对外地址，生产必配 | 未设置 |
+| `POSTGRES_PASSWORD` / `REDIS_PASSWORD` | Compose 数据库与 Redis 密码，必须在 `.env` 中设置 | 必填 |
+
+Compose 默认只提供 HTTP 开发入口。直接由 Nginx 终止 TLS 时，将证书放入 `certs/fullchain.pem` 和 `certs/privkey.pem`，在 `.env` 中将 `BOTLY_BASE_URL` 设为 HTTPS 公网地址，然后使用 `docker compose -f docker-compose.yml -f docker-compose.https.yml up --build`。
+| `BOTLY_MCP_STDIO_ENABLED` | 显式启用 MCP 本机进程传输；仅管理员可配置 | `0` |
+| `BOTLY_ALLOW_PRIVATE_BASE_URL` | 允许模型厂商接入私网地址（例如本地 Ollama）；会关闭该入口的 SSRF 私网拦截 | `0` |
 | `BOTLY_RESET_TOKEN_TTL_MINUTES` | 重置密码链接有效期 | 60 |
 | `BOTLY_VERIFY_TOKEN_TTL_HOURS` | 邮箱验证链接有效期 | 24 |
 | `BOTLY_LINUX_SANDBOX_ENABLED` | 是否启用常驻 Linux 环境（建群时预热容器） | `1` |
@@ -516,18 +523,19 @@ web/
 
 ## 数据迁移（Alembic）
 
-从 2026-11 起，复杂 schema 变更走 Alembic。`server/alembic/versions/0001_baseline.py` 是
-当前 schema 的标记点（不执行 DDL）；老库首次启动会自动 `stamp head` 建立版本表，
-之后在 `server/` 目录下：
+Schema 变更由 Alembic 管理。Compose 启动时先运行一次性 `migrate` 服务；API 和 Worker
+只检查数据库是否已在当前版本，不会在生产启动时改表。手动部署或本地生产模式可执行：
 
 ```bash
+cd server
+./venv/bin/python -m app.migrate
 ./venv/bin/alembic revision --autogenerate -m "加 xx 列"   # 生成迁移
 ./venv/bin/alembic upgrade head                            # 应用
 ./venv/bin/alembic downgrade -1                            # 回退一步
 ```
 
-轻量的「加列」仍由启动时的 `_light_migrate()` 兜底（幂等），两者不冲突。
-本次新增 `0002_approval_email`，API / Worker 启动会升级到 head；Postgres 迁移通过锁串行执行。
+`0001_baseline` 为旧库的标记点；后续 revision 包含兼容补列、数据回填和索引改造。
+本地开发模式会自动运行迁移，Compose 生产模式由 `migrate` 服务独立执行；Postgres 迁移通过 advisory lock 串行执行。
 
 运行时长与步数已不作为停止条件，只保留统计。
 

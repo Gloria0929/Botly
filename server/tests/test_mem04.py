@@ -5,7 +5,8 @@ import asyncio
 
 from app.core.db import SessionLocal
 from app.core.models import Run
-from app.agent.orchestrator import RunExecutor, _parse_memory_candidates
+from app.agent.orchestrator import RunExecutor
+from app.agent.summary_memory import _parse_memory_candidates
 from tests.conftest import register, setup_workspace
 
 

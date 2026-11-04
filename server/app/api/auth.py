@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
@@ -15,6 +15,8 @@ from app.services import mail
 from app.services import oauth
 from app.core.config import (
     COOKIE_SECURE,
+    APP_ENV,
+    DEVELOPMENT_ENVS,
     OAUTH_ALLOW_SIGNUP,
     OAUTH_REDIRECT_BASE,
     OAUTH_STATE_COOKIE,
@@ -27,7 +29,7 @@ from app.core.config import (
 )
 from app.services.accounts import RETENTION_DAYS, disable_user
 from app.core.db import get_db
-from app.core.deps import current_user
+from app.core.deps import client_ip as _ip, current_user
 from app.core.models import (
     Bot,
     Chat,
@@ -60,11 +62,9 @@ log = get_logger("security")
 # 同一邮箱的同类邮件：60 秒冷却，1 小时最多 5 封
 _MAIL_COOLDOWN = timedelta(seconds=60)
 _MAIL_HOURLY_CAP = 5
+_DUMMY_PASSWORD_HASH = hash_password(f"unused-{random_token(32)}")
+_REGISTER_ATTEMPT_EMAIL = "__register__"
 
-
-def _ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
 
 class RegisterIn(BaseModel):
     email: EmailStr
@@ -107,9 +107,20 @@ def _set_cookie(response: Response, user_id: str, request: Request, epoch: int =
 # ACC-08：邮件令牌
 # --------------------------------------------------------------------------- #
 def _base_url(request: Request) -> str:
-    """邮件里的链接前缀。优先用配置的公网地址，否则按请求头推导。"""
+    """邮件只能使用部署地址；开发/测试时允许从请求推导。"""
     if PUBLIC_BASE_URL:
+        try:
+            parsed = urlsplit(PUBLIC_BASE_URL)
+            valid = (parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username
+                     and not parsed.password and not parsed.query and not parsed.fragment)
+            parsed.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise HTTPException(503, "BOTLY_BASE_URL 必须是有效的 HTTP/HTTPS 站点地址")
         return PUBLIC_BASE_URL
+    if APP_ENV not in DEVELOPMENT_ENVS:
+        raise HTTPException(503, "非开发环境必须配置 BOTLY_BASE_URL")
     proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{proto}://{host}".rstrip("/")
@@ -160,7 +171,16 @@ def _throttle(db: Session, email: str, kind: str, message: str = "请求过于�
 
 def _dev_link(link: str) -> str | None:
     """没配 SMTP、且是开发模式时，把链接直接回给前端，方便本地走完整流程。"""
-    return link if (mail.MAIL_DEV and not mail.configured()) else None
+    return link if (APP_ENV in DEVELOPMENT_ENVS and mail.MAIL_DEV and not mail.configured()) else None
+
+
+def _throttle_mail_ip(db: Session, request: Request, kind: str) -> None:
+    count = db.scalar(select(func.count(EmailToken.id)).where(
+        EmailToken.ip == _ip(request), EmailToken.kind == kind,
+        EmailToken.created_at >= now() - timedelta(hours=1),
+    )) or 0
+    if count >= 20:
+        raise HTTPException(429, "请求过于频繁，请稍后再试", headers={"Retry-After": "3600"})
 
 
 def _send(to: str, subject: str, text: str, html: str) -> bool:
@@ -208,17 +228,30 @@ def _default_workspace(db: Session, user: User) -> Chat:
 
 @router.post("/register", status_code=201)
 def register(payload: RegisterIn, response: Response, request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
+    ip = _ip(request)
+    cutoff = now() - timedelta(hours=1)
+    db.add(LoginAttempt(email=_REGISTER_ATTEMPT_EMAIL, ip=ip))
+    db.flush()
+    attempts = db.scalar(select(func.count(LoginAttempt.id)).where(
+        LoginAttempt.email == _REGISTER_ATTEMPT_EMAIL,
+        LoginAttempt.ip == ip,
+        LoginAttempt.created_at >= cutoff,
+    )) or 0
+    db.commit()
+    if attempts > 10:
+        raise HTTPException(429, "注册请求过于频繁，请稍后重试", headers={"Retry-After": "3600"})
+
     email = payload.email.lower().strip()
     if db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(400, "该邮箱已注册")
+        raise HTTPException(400, "无法注册，请确认邮箱和邀请码")
 
     code = db.scalar(select(InviteCode).where(InviteCode.code == payload.invite_code.strip()))
     if not code:
-        raise HTTPException(400, "邀请码无效")
+        raise HTTPException(400, "无法注册，请确认邮箱和邀请码")
     if code.expires_at and code.expires_at < now():
-        raise HTTPException(400, "邀请码已过期")
+        raise HTTPException(400, "无法注册，请确认邮箱和邀请码")
     if code.used_count >= code.max_uses:
-        raise HTTPException(400, "邀请码已用完")
+        raise HTTPException(400, "无法注册，请确认邮箱和邀请码")
 
     user = User(
         email=email,
@@ -232,7 +265,7 @@ def register(payload: RegisterIn, response: Response, request: Request, backgrou
     except IntegrityError:
         # 并发注册同一邮箱时，唯一索引兜底；返回 400 而不是 500。
         db.rollback()
-        raise HTTPException(400, "该邮箱已注册")
+        raise HTTPException(400, "无法注册，请确认邮箱和邀请码")
     # 原子占用一次邀请码，避免并发注册超过 max_uses（ACC-04）。
     used = db.execute(
         update(InviteCode)
@@ -241,7 +274,7 @@ def register(payload: RegisterIn, response: Response, request: Request, backgrou
     )
     if used.rowcount != 1:
         db.rollback()
-        raise HTTPException(400, "邀请码已用完")
+        raise HTTPException(400, "无法注册，请确认邮箱和邀请码")
 
     chat = _default_workspace(db, user)
     # 首个群聊也把 Ubuntu 环境预热起来（后台执行，不挡注册）
@@ -267,17 +300,21 @@ def register(payload: RegisterIn, response: Response, request: Request, backgrou
 @router.post("/login")
 def login(payload: LoginIn, response: Response, request: Request, db: Session = Depends(get_db)):
     email = payload.email.lower().strip()
-    ip = request.client.host if request.client else "unknown"
+    ip = _ip(request)
     cutoff = now() - timedelta(minutes=15)
-    for condition in (LoginAttempt.email == email, LoginAttempt.ip == ip):
-        failures = db.scalars(select(LoginAttempt).where(condition, LoginAttempt.created_at >= cutoff)
+    for condition, by_ip in ((LoginAttempt.email == email, False), (LoginAttempt.ip == ip, True)):
+        query = select(LoginAttempt).where(condition, LoginAttempt.created_at >= cutoff)
+        if by_ip:
+            query = query.where(LoginAttempt.email != _REGISTER_ATTEMPT_EMAIL)
+        failures = db.scalars(query
                               .order_by(LoginAttempt.created_at.desc()).limit(5)).all()
         if len(failures) >= 5:
             retry = max(1, int((failures[0].created_at + timedelta(minutes=15) - now()).total_seconds()) + 1)
             log.warning("登录被限流 email=%s ip=%s 重试=%ds", email, ip, retry)
             raise HTTPException(429, "连续登录失败过多，请在 15 分钟后重试", headers={"Retry-After": str(retry)})
     user = db.scalar(select(User).where(User.email == email))
-    if not user or not verify_password(payload.password, user.password_hash):
+    valid_password = verify_password(payload.password, user.password_hash if user else _DUMMY_PASSWORD_HASH)
+    if not user or not valid_password:
         db.add(LoginAttempt(email=email, ip=ip))
         db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < cutoff))
         # 错误响应会回滚依赖里的事务，计数需要先单独提交。
@@ -301,7 +338,8 @@ def login(payload: LoginIn, response: Response, request: Request, db: Session = 
 
 
 @router.post("/logout")
-def logout(response: Response):
+def logout(response: Response, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    user.session_epoch = (user.session_epoch or 0) + 1
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}
 
@@ -613,13 +651,15 @@ def forgot_password(payload: ForgotIn, request: Request, db: Session = Depends(g
     只有真的存在且发信成功时，才在开发模式下附带 dev_link 方便本地调试。
     """
     email = payload.email.lower().strip()
+    base = _base_url(request)
+    _throttle_mail_ip(db, request, "reset_password")
     _throttle(db, email, "reset_password")
     user = db.scalar(select(User).where(User.email == email, User.status == "active"))
 
     link: str | None = None
     if user:
         raw = _issue_token(db, user, "reset_password", timedelta(minutes=RESET_TOKEN_TTL_MINUTES), request)
-        link = f"{_base_url(request)}/reset-password?token={quote(raw)}"
+        link = f"{base}/reset-password?token={quote(raw)}"
         subject, text, html = mail.password_reset_mail(link, RESET_TOKEN_TTL_MINUTES)
         _send(email, subject, text, html)
     else:
@@ -681,6 +721,7 @@ def send_verification(
 ):
     if user.email_verified_at:
         return {"ok": True, "already": True, "email": user.email}
+    _throttle_mail_ip(db, request, "verify_email")
     _throttle(db, user.email, "verify_email", "验证邮件刚刚已经发送，请检查收件箱（含垃圾箱）")
     raw = _issue_token(db, user, "verify_email", timedelta(hours=VERIFY_TOKEN_TTL_HOURS), request)
     link = f"{_base_url(request)}/verify-email?token={quote(raw)}"

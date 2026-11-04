@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { resolveAvatarIcon } from "./avatarIcons";
+import { resolveVendorIcon } from "@/lib/vendor-icons";
 
 /** 统一的头像渲染：支持图片地址、图标 key（SVG）、以及带底色的文字标识（厂商标识）。
  *  老数据里的 emoji 头像也会映射到同一个 SVG 图标，不再直接显示 emoji；
@@ -21,7 +22,7 @@ export default function Avatar({
   className?: string;
   alt?: string;
 }) {
-  const v = (value || "").trim();
+  const v = resolveVendorIcon((value || "").trim());
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
@@ -29,10 +30,10 @@ export default function Avatar({
   }, [v]);
 
   const isImage =
-    v.startsWith("/api/uploads/") || v.startsWith("http") || v.startsWith("data:");
+    v.startsWith("/api/uploads/") || v.startsWith("/vendor-icons/") || v.startsWith("http") || v.startsWith("data:");
   // LobeHub Icons 的静态 SVG：彩色版放在白色底片上，单色版跟随主题反色
   const isLobe =
-    v.includes("@lobehub/icons-static-svg") || v.includes("icons.lobehub.com");
+    v.startsWith("/vendor-icons/") || v.includes("@lobehub/icons-static-svg") || v.includes("icons.lobehub.com");
   const isMono = isLobe && v.endsWith(".svg") && !v.includes("-color.svg");
   const radius = rounded === "full" ? "rounded-full" : "rounded-lg";
 
@@ -96,7 +97,7 @@ export default function Avatar({
 
   // 图片加载失败（例如 CDN 不可达）时退回文字标识，避免出现破图
   const raw =
-    failed && (v.startsWith("http") || v.startsWith("/api/uploads/") || v.startsWith("data:"))
+    failed && (v.startsWith("http") || v.startsWith("/api/uploads/") || v.startsWith("/vendor-icons/") || v.startsWith("data:"))
       ? (alt || "?").trim().slice(0, 1)
       : v;
   const text = raw || "?";

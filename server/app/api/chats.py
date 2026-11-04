@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from urllib.parse import quote
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
@@ -20,6 +21,7 @@ from app.core.config import DELEGATION_DEPTH, SANDBOX_FILE_MAX_MB
 from app.core.deps import current_user, owned_or_404
 from app.core.events import emit
 from app.agent.execution_config import capture_bots
+from app.agent.free_chat import mentioned_members
 from app.agent.graph import open_checkpointer
 from app.core.models import (
     Approval,
@@ -56,10 +58,15 @@ class ChatIn(BaseModel):
     name: str
     member_ids: list[str] = []
     supervisor_bot_id: str | None = None
+    mode: Literal["task", "free"] = "task"
+    max_speakers: int = Field(default=3, ge=1, le=6)
+    max_rounds: int = Field(default=2, ge=1, le=2)
+    muted: bool = False
 
 
 class ChatTemplateIn(BaseModel):
     template_id: str
+    mode: Literal["task", "free"] = "task"
 
 
 class ChatPatch(BaseModel):
@@ -70,11 +77,18 @@ class ChatPatch(BaseModel):
     limits_override: dict | None = None
     always_allow_tools: list[str] | None = None
     require_approval_for_write: bool | None = None
+    mode: Literal["task", "free"] | None = None
+    max_speakers: int | None = Field(default=None, ge=1, le=6)
+    max_rounds: int | None = Field(default=None, ge=1, le=2)
+    muted: bool | None = None
 
 
 class MessageIn(BaseModel):
     content: str
     mention_bot_id: str | None = None
+    mention_bot_ids: list[str] = Field(default_factory=list, max_length=6)
+    everyone: bool = False
+    reply_to: str | None = None
     # 执行中补充（RUN-13）：为 True 时不新建执行，只把消息交给正在跑的执行
     interject: bool = False
     # CHT-07：分支线程里的消息，为空表示主线程
@@ -217,6 +231,7 @@ def list_chats(user: User = Depends(current_user), db: Session = Depends(get_db)
                 "id": c.id,
                 "name": c.name,
                 "run_mode": c.run_mode,
+                "mode": c.mode,
                 "last_active_at": c.last_active_at.isoformat() if c.last_active_at else None,
                 "run_status": active_by_chat.get(c.id),
                 "preview": (previews.get(c.id) or "")[:60],
@@ -256,7 +271,10 @@ def create_chat(
         return supervisor_block_reason(bot, providers.get(bot.provider_id or ""))
 
     sup_id = payload.supervisor_bot_id
-    if sup_id and sup_id in by_id:
+    if payload.mode == "free":
+        if sup_id and (sup_id not in by_id or by_id[sup_id].enabled is False):
+            raise HTTPException(400, "负责人必须是可用的成员")
+    elif sup_id and sup_id in by_id:
         # MOD-02：模型明确不支持工具调用 / 流式输出时，不允许当总指挥
         reason = _blocked(sup_id)
         if reason:
@@ -265,10 +283,14 @@ def create_chat(
         # 自动挑选：优先总指挥模板，跳过明确不能用的模型；都不合格时退回第一个成员
         candidates = [b.id for b in bots if b.is_supervisor_template] + member_ids
         sup_id = next((bid for bid in candidates if not _blocked(bid)), member_ids[0])
-    if sup_id not in member_ids:
+    if sup_id and sup_id not in member_ids:
         member_ids.insert(0, sup_id)
+    if payload.mode == "free" and not 2 <= len(member_ids) <= 6:
+        raise HTTPException(400, "自由群聊需要 2–6 位成员")
 
-    chat = Chat(user_id=user.id, name=payload.name.strip() or "新群聊", supervisor_bot_id=sup_id)
+    chat = Chat(user_id=user.id, name=payload.name.strip() or "新群聊", supervisor_bot_id=sup_id,
+                mode=payload.mode, max_speakers=payload.max_speakers,
+                max_rounds=payload.max_rounds, muted=payload.muted)
     db.add(chat)
     db.flush()
     for bid in member_ids:
@@ -300,6 +322,7 @@ def create_chat_from_template(
     members, created_ids, setup_required = assemble_members(db, user.id, template)
     chat = create_chat(ChatIn(
         name=template["name"], member_ids=[b.id for b in members], supervisor_bot_id=members[0].id,
+        mode=payload.mode,
     ), background, user, db)
     return {**chat, "created_bot_ids": created_ids, "model_setup_required": setup_required}
 
@@ -310,6 +333,8 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
     members = _members(db, chat.id)
     sup = db.get(Bot, chat.supervisor_bot_id) if chat.supervisor_bot_id else None
     active = _active_run(db, chat.id)
+    active_roots = list(db.scalars(select(Run).where(Run.chat_id == chat.id, Run.parent_run_id.is_(None),
+                                                 Run.status.in_(ACTIVE)).order_by(Run.created_at.desc()))) if chat.mode == "free" else []
     tasks = []
     status_map: dict[str, str] = {}
     # 没有进行中的执行时，回退到最近一次有任务的执行，保证任务面板不会在完成后清空
@@ -326,8 +351,9 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
         )
     if panel_run:
         # RUN-09：并行子执行里再派出的孙任务挂在子执行下，任务面板要一并列出
-        panel_run_ids = [panel_run.id] + list(
-            db.scalars(select(Run.id).where(Run.parent_run_id == panel_run.id))
+        panel_root_ids = [r.id for r in active_roots] if active_roots else [panel_run.id]
+        panel_run_ids = panel_root_ids + list(
+            db.scalars(select(Run.id).where(Run.parent_run_id.in_(panel_root_ids)))
         )
         rows = db.scalars(
             select(Task).where(Task.run_id.in_(panel_run_ids)).order_by(Task.created_at)
@@ -340,6 +366,10 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
                 status_map[t.assigned_bot_id] = "waiting"
     if active:
         supervisor = ((active.config_snapshot or {}).get("supervisor") or {}).get("id") or chat.supervisor_bot_id
+        if active.kind == "free":
+            free = (active.config_snapshot or {}).get("free", {})
+            selected = free.get("selected") or {}
+            supervisor = selected.get("bot_id") if selected.get("turn", 0) > free.get("processed_turn", 0) else None
         if active.status == "running" and "working" not in status_map.values():
             status_map[active.target_bot_id or supervisor] = "working"
         elif active.status == "waiting":
@@ -351,10 +381,22 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
         select(Thread).where(Thread.chat_id == chat.id, Thread.type == "main")
     )
     data["main_thread_id"] = main_thread.id if main_thread else None
+    typing_runs: dict[str, list[str]] = {}
+    if active_roots:
+        peer_runs = db.scalars(select(Run).where(Run.parent_run_id.in_([r.id for r in active_roots]),
+                                               Run.kind == "free", Run.status.in_(ACTIVE))).all()
+        for peer in peer_runs:
+            free = peer.config_snapshot.get("free") or {}
+            if free.get("direct_response") and not free.get("has_started") and not free.get("selected", {}).get("required"):
+                continue
+            status_map[peer.target_bot_id] = "waiting" if peer.status == "waiting" else "working"
+            if peer.status != "waiting":
+                typing_runs.setdefault(peer.target_bot_id, []).append(peer.parent_run_id)
     data["members"] = [
-        {**bot_out(m), "status": status_map.get(m.id, "idle")} for m in members
+        {**bot_out(m), "status": status_map.get(m.id, "idle"), "typing_run_ids": list(set(typing_runs.get(m.id, [])))} for m in members
     ]
     data["active_run"] = run_out(active, *_run_children_totals(db, active)) if active else None
+    data["active_runs"] = [run_out(r, *_run_children_totals(db, r)) for r in active_roots]
     latest_run = active or db.scalar(
         select(Run)
         .where(Run.chat_id == chat.id, Run.parent_run_id.is_(None))
@@ -399,6 +441,15 @@ def update_chat(
 ):
     chat = owned_or_404(db, Chat, chat_id, user.id)
     data = payload.model_dump(exclude_unset=True)
+    if any(data.get(key) is None for key in ("mode", "max_speakers", "max_rounds", "muted") if key in data):
+        raise HTTPException(400, "群聊模式与发言设置不能为空")
+    next_mode = data.get("mode", chat.mode)
+    if "mode" in data and next_mode != chat.mode and _active_run(db, chat.id):
+        raise HTTPException(409, "请等当前执行完成或停止后再切换群聊模式")
+    proposed_members = data.get("member_ids")
+    if next_mode == "free" and not 2 <= len(set(proposed_members if proposed_members is not None
+                                                else [m.id for m in _members(db, chat.id)])) <= 6:
+        raise HTTPException(400, "自由群聊需要 2–6 位成员")
     if "limits_override" in data:
         override = data["limits_override"]
         if not isinstance(override, dict):
@@ -417,9 +468,13 @@ def update_chat(
 
     old_supervisor = chat.supervisor_bot_id
     new_supervisor = data.get("supervisor_bot_id", old_supervisor)
+    if next_mode == "task" and not new_supervisor:
+        raise HTTPException(400, "任务模式必须指定总指挥")
     if "supervisor_bot_id" in data:
-        if not new_supervisor:
-            raise HTTPException(400, "群聊必须有总指挥，请指定一个成员 Bot")
+        if not new_supervisor and next_mode == "free":
+            data.pop("supervisor_bot_id")
+            chat.supervisor_bot_id = None
+    if "supervisor_bot_id" in data or (data.get("mode") == "task" and chat.mode == "free"):
         sup_bot = owned_or_404(db, Bot, new_supervisor, user.id)
         if sup_bot.deleted_at:
             raise HTTPException(400, "该 Bot 已被删除，不能担任总指挥")
@@ -427,7 +482,7 @@ def update_chat(
             raise HTTPException(400, f"Bot「{sup_bot.name}」已停用，不能担任总指挥")
         # MOD-02：同上，模型明确不支持工具调用 / 流式输出时不接受为新总指挥
         provider = db.get(Provider, sup_bot.provider_id) if sup_bot.provider_id else None
-        reason = supervisor_block_reason(sup_bot, provider)
+        reason = supervisor_block_reason(sup_bot, provider) if next_mode == "task" else None
         if reason:
             raise HTTPException(400, reason)
 
@@ -527,6 +582,8 @@ def add_members(
 
     current = {m.id for m in _members(db, chat.id)}
     added = [b for bid, b in found.items() if bid not in current]
+    if chat.mode == "free" and len(current) + len(added) > 6:
+        raise HTTPException(400, "自由群聊最多 6 位成员")
     if added:
         for b in added:
             db.add(ChatMember(chat_id=chat.id, bot_id=b.id, user_id=user.id))
@@ -565,6 +622,8 @@ def remove_member(
     if chat.supervisor_bot_id == bot.id:
         raise HTTPException(409, "该 Bot 是群聊总指挥，请先把总指挥换成其他成员")
     members = _members(db, chat.id)
+    if chat.mode == "free" and len(members) <= 2:
+        raise HTTPException(409, "自由群聊至少保留 2 位成员")
     if len(members) <= 1:
         raise HTTPException(409, "群聊至少保留一个成员")
 
@@ -721,6 +780,7 @@ def create_branch(
         )
         .order_by(Message.seq)
     ).all()
+    thread.seq_counter = len(src)
     for i, m in enumerate(src, 1):
         db.add(
             Message(
@@ -841,6 +901,23 @@ def list_messages(
     has_more = len(rows) > limit
     rows = rows[:limit]
     rows.reverse()
+    # 草稿内容每 1.5 秒落库，快照补齐游标之前的增量，避免重连跳过尚未落库的文字。
+    streaming = {m.id: m for m in rows if m.status == "streaming"}
+    live_content = {mid: m.content or "" for mid, m in streaming.items()}
+    if streaming:
+        persisted_id = min(int((m.meta or {}).get("stream_event_id", 0)) for m in streaming.values())
+        deltas = db.scalars(select(Event).where(
+            Event.user_id == user.id, Event.chat_id == chat.id,
+            Event.id > persisted_id, Event.id <= event_cursor, Event.type == "message.delta",
+            Event.payload["message_id"].as_string().in_(streaming),
+        ).order_by(Event.id)).all()
+        for ev in deltas:
+            payload = ev.payload or {}
+            mid = payload["message_id"]
+            delta, offset = payload.get("delta"), payload.get("offset")
+            content = live_content[mid]
+            if isinstance(delta, str) and isinstance(offset, int) and 0 <= offset <= len(content) < offset + len(delta):
+                live_content[mid] = content + delta[len(content) - offset:]
     # 已删除或已移出的 Bot 不在成员列表里，历史消息补上发送者信息
     sender_ids = {m.sender_bot_id for m in rows if m.sender_bot_id}
     sender_bots: dict[str, Bot] = {}
@@ -869,6 +946,8 @@ def list_messages(
     question_map = {q.id: q for q in db.scalars(select(Question).where(Question.id.in_(question_ids)))} if question_ids else {}
     for m in rows:
         data = message_out(m, sender_bots.get(m.sender_bot_id or ""))
+        if m.id in live_content:
+            data["content"] = live_content[m.id]
         if m.sender_type == "bot" and not (m.meta or {}).get("task_id") and (m.run_id, m.sender_bot_id) in agent_usage:
             data["meta"] = {**data["meta"], "agent_tokens": agent_usage[(m.run_id, m.sender_bot_id)]}
         if m.run_id in run_map:
@@ -1146,6 +1225,58 @@ def _resolve_mention(db: Session, chat_id: str, content: str, explicit: str | No
     return None
 
 
+def _post_free_message(db: Session, chat: Chat, main: Thread, payload: MessageIn, content: str):
+    members = [b for b in _members(db, chat.id) if b.deleted_at is None]
+    ids = list(dict.fromkeys([*([payload.mention_bot_id] if payload.mention_bot_id else []),
+                             *payload.mention_bot_ids, *mentioned_members(content, members)]))
+    everyone = payload.everyone or bool(re.search(r"@everyone(?=[\s，。！？、；：,.!?;:]|$)", content))
+    reply = None
+    if payload.reply_to:
+        reply = owned_or_404(db, Message, payload.reply_to, chat.user_id)
+        if reply.thread_id != main.id or reply.sender_type != "bot" or not reply.sender_bot_id:
+            raise HTTPException(400, "只能回复本群主线程中的成员消息")
+        if not ids and not everyone:
+            ids = [reply.sender_bot_id]
+    by_id = {b.id: b for b in members}
+    if any(bid not in by_id for bid in ids):
+        raise HTTPException(404, "该群聊中不存在指定的 Bot")
+    for bid in ids:
+        if by_id[bid].enabled is False or not by_id[bid].provider_id:
+            raise HTTPException(409, f"Bot「{by_id[bid].name}」已停用或尚未配置模型")
+    if not everyone and len(ids) > chat.max_speakers:
+        raise HTTPException(400, "@ 的成员数超过本群发言人数上限，请在群聊设置中调整或使用 @everyone")
+    available = [b for b in members if b.enabled is not False and b.provider_id]
+    if not available and (everyone or ids or not chat.muted):
+        raise HTTPException(409, "请至少为一位启用的成员配置模型")
+    msg = add_message(db, thread=main, run_id=None, sender_type="user", type_="text", content=content,
+                      meta={"reply_to": reply.id if reply else None, "mention_bot_ids": ids, "everyone": everyone})
+    chat.last_active_at = now()
+    if chat.muted and not ids and not everyone:
+        db.commit()
+        return {"message": message_out(msg), "run": None}
+    run = Run(user_id=chat.user_id, chat_id=chat.id, kind="free", trigger_message_id=msg.id,
+              status="queued", mode=chat.run_mode, config_snapshot={
+                  "chat_mode": "free", "run_mode": chat.run_mode,
+                  "supervisor": {"id": chat.supervisor_bot_id} if chat.supervisor_bot_id else None,
+                  "members": [{"id": b.id, "name": b.name} for b in available],
+                  "bot_configs": capture_bots(db, available), "limits": chat.limits_override or {},
+                  "free": {"targets": [b.id for b in available] if everyone else ids,
+                           "parallel": True,
+                           "everyone": everyone, "directed": bool(ids) or everyone,
+                           "max_speakers": len(available) if everyone else chat.max_speakers,
+                           "max_rounds": 1 if everyone else chat.max_rounds,
+                           "spoken": [], "queue": [], "turn": 0},
+              })
+    db.add(run)
+    db.flush()
+    run.config_snapshot = {**run.config_snapshot, "task_workspace": f"tasks/{run.id}"}
+    msg.run_id = run.id
+    emit_run_status(db, run)
+    db.commit()
+    enqueue(run.id)
+    return {"message": message_out(msg), "run": run_out(run)}
+
+
 @router.post("/{chat_id}/messages", status_code=201)
 def post_message(
         chat_id: str,
@@ -1218,7 +1349,7 @@ def post_message(
         enqueue(run.id)
         return {"message": message_out(msg), "run": run_out(run)}
 
-    if active:
+    if active and chat.mode != "free":
         if not payload.interject:
             raise HTTPException(409, "当前群聊已有执行正在进行，请先停止或等待完成")
         # RUN-13：不新建执行，消息作为「执行中补充」进入当前执行的线程。
@@ -1246,6 +1377,8 @@ def post_message(
         db.add(main)
         db.flush()
 
+    if chat.mode == "free":
+        return _post_free_message(db, chat, main, payload, content)
     target = _resolve_mention(db, chat.id, content, payload.mention_bot_id)
     if payload.mention_bot_id and not target:
         raise HTTPException(404, "该群聊中不存在指定的 Bot")

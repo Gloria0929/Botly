@@ -35,6 +35,9 @@ def probe(monkeypatch):
 
     monkeypatch.setattr("app.api.providers.list_models", _fake_list_models)
     monkeypatch.setattr("app.api.providers.probe_capabilities", fake_probe)
+    # 模型请求已被替身覆盖，地址校验也使用固定公网 DNS，测试不依赖网络。
+    monkeypatch.setattr("app.tools.registry.socket.getaddrinfo",
+                        lambda *args, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))])
     return plan
 
 

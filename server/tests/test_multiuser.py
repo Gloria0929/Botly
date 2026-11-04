@@ -78,8 +78,8 @@ def test_multiple_workers_respect_global_and_personal_capacity(client, invite, m
             run.status = "stopped"
         db.commit()
     with ThreadPoolExecutor(max_workers=8) as pool:
-        claimed = list(pool.map(worker._claim, ids))
-    assert sum(claimed) == 4
+        claimed = list(pool.map(lambda rid: worker._claim(rid, "test-worker"), ids))
+    assert sum(bool(token) for token in claimed) == 4
     with SessionLocal() as db:
         active = list(db.scalars(select(Run).where(Run.id.in_(ids), Run.status == "running")))
         assert all(sum(r.user_id == u["id"] for r in active) <= 2 for u in users)

@@ -310,9 +310,9 @@ export const api = {
   // 群聊
   chats: () => req<import("./types").ChatSummary[]>("/chats"),
   chatTemplates: () => req<import("./types").ChatTemplate[]>("/chats/templates"),
-  createChatFromTemplate: (template_id: string) =>
+  createChatFromTemplate: (template_id: string, mode: "task" | "free" = "task") =>
     req<import("./types").Chat & { created_bot_ids: string[]; model_setup_required: boolean }>(
-      "/chats/from-template", { method: "POST", body: JSON.stringify({ template_id }) }
+      "/chats/from-template", { method: "POST", body: JSON.stringify({ template_id, mode }) }
     ),
   chat: (id: string) => req<import("./types").Chat>(`/chats/${id}`),
   task: (id: string) => req<import("./types").Task>(`/tasks/${id}`),
@@ -364,10 +364,10 @@ export const api = {
       query: string;
     }>(`/chats/${chatId}/messages/search?${s.toString()}`);
   },
-  send: (chatId: string, content: string, mention_bot_id?: string, thread_id?: string) =>
-    req<{ message: import("./types").Message; run: import("./types").Run }>(
+  send: (chatId: string, content: string, mention_bot_id?: string, thread_id?: string, reply_to?: string) =>
+    req<{ message: import("./types").Message; run: import("./types").Run | null }>(
       `/chats/${chatId}/messages`,
-      { method: "POST", body: JSON.stringify({ content, mention_bot_id, thread_id }) }
+      { method: "POST", body: JSON.stringify({ content, mention_bot_id, thread_id, reply_to }) }
     ),
   /** CHT-07：从主线程的某条消息拉出分支 */
   branches: (chatId: string) =>

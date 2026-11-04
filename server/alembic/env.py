@@ -22,7 +22,7 @@ from app.core import models  # noqa: E402,F401  确保所有模型注册到 meta
 from app.core.db import DATABASE_URL, Base, engine as app_engine  # noqa: E402
 
 config = context.config
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

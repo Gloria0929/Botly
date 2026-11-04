@@ -63,12 +63,13 @@ fi
 # 每个子进程放进独立进程组（set -m），退出时整组杀掉。
 # 只 kill 直接子进程是不够的：npm 会再拉 sh → node → next-server，
 # 父进程一死，前面那个 next dev 会变成孤儿继续占着 3200（表现为「项目停了网页还能开」）。
+botly_shutdown_seconds="$(cd server && ./venv/bin/python -c 'from app.core.config import WORKER_SHUTDOWN_TIMEOUT; print(max(10, WORKER_SHUTDOWN_TIMEOUT + 2))')"
 set -m
 
 echo "==> 启动 API :8100"
 # 用 exec 让子 shell 被 python 替换，$! 才是真正的进程号；
 # 否则 trap 杀掉的是子 shell，uvicorn 会留下来继续占端口。
-( cd server && exec ./venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8100 ) &
+( cd server && exec ./venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8100 --timeout-graceful-shutdown 8 ) &
 API=$!
 echo "==> 启动 Worker"
 ( cd server && exec ./venv/bin/python -m app.worker ) &
@@ -90,7 +91,18 @@ cleanup() {
     [ -n "$pid" ] || continue
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   done
-  sleep 0.5
+  local botly_shutdown_deadline=$((SECONDS + botly_shutdown_seconds))
+  local botly_any_alive
+  while [ "$SECONDS" -lt "$botly_shutdown_deadline" ]; do
+    botly_any_alive=0
+    for pid in "${API:-}" "${WORKER:-}" "${WEB:-}"; do
+      if [ -n "$pid" ] && { kill -0 -- "-$pid" 2>/dev/null || kill -0 "$pid" 2>/dev/null; }; then
+        botly_any_alive=1
+      fi
+    done
+    [ "$botly_any_alive" = 0 ] && break
+    sleep 0.1
+  done
   # 还赖着不走的（例如 npm 把信号吞了）直接整组 SIGKILL
   for pid in "${API:-}" "${WORKER:-}" "${WEB:-}"; do
     [ -n "$pid" ] || continue

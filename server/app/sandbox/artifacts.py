@@ -37,4 +37,11 @@ def is_artifact_file(user_id: str, chat_id: str, path: str) -> bool:
 
 
 def visible_files(rows):
-    return [row for row in rows if row.created_by_bot_id and is_artifact_file(row.user_id, row.chat_id, row.path)]
+    return [row for row in rows if is_output_file(row.user_id, row.chat_id, row.path)]
+
+
+def is_output_file(user_id: str, chat_id: str, path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if len(parts) < 2 or parts[0] != "output":
+        return False
+    return is_artifact_file(user_id, chat_id, path)

@@ -1,7 +1,11 @@
 "use client";
 
-import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+} from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { isSafeMarkdownImage } from "@/lib/markdown-images";
 
 /**
  * 群聊里的 Markdown 渲染：支持 GFM 表格、任务列表、删除线、代码块和链接。
@@ -24,7 +28,10 @@ export default function Markdown({
     if (source.includes(tag)) {
       // 把派任务消息里的第一个 @成员 变成可点击样式的提及
       const label = tag.replace(/([\\[\]])/g, "\\$1");
-      source = source.replace(tag, `[${label}](mention:${encodeURIComponent(mention)})`);
+      source = source.replace(
+        tag,
+        `[${label}](mention:${encodeURIComponent(mention)})`,
+      );
     }
   }
 
@@ -37,6 +44,16 @@ export default function Markdown({
         <a href={href} target="_blank" rel="noreferrer noopener" {...props}>
           {children}
         </a>
+      );
+    },
+    img({ src, alt }) {
+      if (isSafeMarkdownImage(src)) {
+        return <img src={src} alt={alt ?? ""} loading="lazy" />;
+      }
+      return (
+        <span className="text-muted">
+          [外部图片已拦截{alt ? `：${alt}` : ""}]
+        </span>
       );
     },
     table({ children }) {
@@ -55,7 +72,9 @@ export default function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={components}
-        urlTransform={(url) => (url.startsWith("mention:") ? url : defaultUrlTransform(url))}
+        urlTransform={(url) =>
+          url.startsWith("mention:") ? url : defaultUrlTransform(url)
+        }
       >
         {source}
       </ReactMarkdown>

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.models import Bot, Provider, Run
 
 BOT_FIELDS = ("id", "user_id", "name", "avatar", "role", "system_prompt", "provider_id",
-              "model", "temperature", "tools", "skills", "is_supervisor_template")
+              "model", "temperature", "tools", "skills", "is_supervisor_template", "persona", "proactivity")
 PROVIDER_FIELDS = ("id", "user_id", "name", "kind", "base_url", "api_key_encrypted", "models")
 
 

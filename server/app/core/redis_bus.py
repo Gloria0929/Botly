@@ -92,7 +92,7 @@ def queue_depth() -> int:
 
 async def dequeue(timeout: int = 2) -> str | None:
     """阻塞取一个待执行 run_id。Redis 不可用时返回 None，由调用方走 DB 轮询。"""
-    if not available():
+    if not await asyncio.to_thread(available):
         await asyncio.sleep(0.5)
         return None
     try:
@@ -113,7 +113,7 @@ class Waker:
         self.pubsub = None
 
     async def __aenter__(self):
-        if available():
+        if await asyncio.to_thread(available):
             try:
                 self.pubsub = async_client().pubsub()
                 await self.pubsub.subscribe(f"{WAKE_PREFIX}{self.user_id}")
@@ -128,11 +128,13 @@ class Waker:
             except Exception:  # noqa: BLE001
                 pass
 
-    async def wait(self, timeout: float = 1.0) -> None:
+    async def wait(self, timeout: float = 10.0) -> bool:
         if not self.pubsub:
-            await asyncio.sleep(min(timeout, 0.4))
-            return
+            await asyncio.sleep(timeout)
+            return False
         try:
-            await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
+            message = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
+            return message is not None
         except Exception:  # noqa: BLE001
-            await asyncio.sleep(min(timeout, 0.4))
+            await asyncio.sleep(timeout)
+            return False

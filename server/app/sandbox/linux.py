@@ -116,6 +116,8 @@ async def _run_container(name: str, workdir: str, image: str) -> tuple[int, str]
     _, err, code = await _docker(
         "run", "-d", "--name", name,
         "--init",  # tini 当 1 号进程，回收 docker exec 留下的僵尸
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
         "--memory", LINUX_SANDBOX_MEMORY,
         "--cpus", LINUX_SANDBOX_CPUS,
         "--pids-limit", "512",

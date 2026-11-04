@@ -62,7 +62,7 @@ def test_terminal_paths_invalidate_pending_approval(client, invite, finish):
     elif finish == "limited":
         ex._finish_limited("步数超限")
     else:
-        ex._finish_completed("执行结束")
+        ex._finish_completed_sync("执行结束")
     with SessionLocal() as db:
         assert db.get(Approval, aid).status == "invalidated"
         assert db.get(Message, mid).meta["status"] == "invalidated"

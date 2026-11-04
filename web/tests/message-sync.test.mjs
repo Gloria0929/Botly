@@ -10,7 +10,7 @@ const source = ts.transpileModule(
 ).outputText;
 const context = vm.createContext({ exports: {} });
 vm.runInContext(source, context);
-const { createMessageSync, acceptMessageEvent, applyAgentUsage, mergeMessageUpdate, mergeMessageSnapshot, isVisibleChatMessage } = context.exports;
+const { createMessageSync, acceptMessageEvent, applyAgentUsage, mergeMessageDelta, mergeMessageUpdate, mergeMessageSnapshot, isVisibleChatMessage } = context.exports;
 const message = (patch = {}) => ({
   id: "reply", thread_id: "main", seq: 2, sender_type: "bot", type: "text",
   content: "第一段", status: "streaming", meta: {}, ...patch,
@@ -89,4 +89,21 @@ test("用量更新后较旧的完成事件和消息快照不会把累计 tokens 
   const live = message({meta: {agent_tokens: 410}});
   assert.equal(mergeMessageUpdate(live, {status: "done", meta: {agent_tokens: 150}}).meta.agent_tokens, 410);
   assert.equal(mergeMessageSnapshot([live], [message({meta: {agent_tokens: 0}})], 10, createMessageSync())[0].meta.agent_tokens, 410);
+});
+
+test("增量与快照重叠时只拼接新增文字，重复片段和完成态保持原内容", () => {
+  const live = message({ content: "第一段第二段" });
+  assert.equal(mergeMessageDelta(live, { offset: 3, delta: "第二段第三段" }).content, "第一段第二段第三段");
+  assert.equal(mergeMessageDelta(live, { offset: 3, delta: "第二段" }), live);
+  assert.equal(mergeMessageDelta(live, { offset: 100, delta: "缺片段" }), null);
+  assert.equal(mergeMessageDelta(live, { content: "第一段" }).content, live.content);
+  const done = message({ status: "done" });
+  assert.equal(mergeMessageDelta(done, { offset: 3, delta: "重复" }), done);
+});
+
+test("Unicode 偏移与服务端一致，emoji 不会导致漏字或重复", () => {
+  const live = message({ content: "好🙂啦" });
+  assert.equal(mergeMessageDelta(live, { offset: 2, delta: "啦🚀完成" }).content, "好🙂啦🚀完成");
+  assert.equal(mergeMessageDelta(live, { offset: -1, delta: "错误" }), null);
+  assert.equal(mergeMessageDelta(live, { delta: "无偏移" }), null);
 });

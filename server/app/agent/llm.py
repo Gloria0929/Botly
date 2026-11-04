@@ -17,14 +17,39 @@ import math
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 
-from app.core.config import LLM_MAX_RETRIES, LLM_RETRY_BACKOFF, LLM_TIMEOUT_SECONDS
+from app.core.config import ALLOW_PRIVATE_BASE_URL, LLM_MAX_RETRIES, LLM_RETRY_BACKOFF, LLM_TIMEOUT_SECONDS
 from app.core.logging_setup import get_logger
+from app.tools.registry import ToolError, _check_url, _pin_url
 
 _CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 log = get_logger("llm")
+
+
+async def _guard_base_url(base_url: str) -> str | None:
+    try:
+        parsed = urlparse(base_url)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+                or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError("invalid model URL")
+        parsed.port
+        if ALLOW_PRIVATE_BASE_URL:
+            return None
+        return await asyncio.to_thread(_check_url, base_url)
+    except (ToolError, ValueError):
+        raise LLMError("模型服务地址不允许访问内网或无效的 HTTP/HTTPS 服务", retryable=False) from None
+
+
+async def _request_target(url: str, headers: dict) -> tuple[str, dict, dict]:
+    address = await _guard_base_url(url)
+    if not address:
+        return url, headers, {}
+    parsed = urlparse(url)
+    extensions = {"sni_hostname": parsed.hostname.encode("idna").decode("ascii")} if parsed.scheme == "https" else {}
+    return _pin_url(url, address), {**headers, "Host": parsed.netloc}, extensions
 
 
 def estimate_tokens(text: str) -> int:
@@ -68,6 +93,8 @@ async def _stream_openai(
     tools: list[dict] | None,
     temperature: float,
     timeout: float = LLM_TIMEOUT_SECONDS,
+    max_output_tokens: int | None = None,
+    disable_thinking: bool = False,
 ) -> AsyncIterator[dict]:
     url = base_url.rstrip("/") + "/chat/completions"
     payload: dict = {
@@ -80,6 +107,14 @@ async def _stream_openai(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if max_output_tokens is not None:
+        reasoning_model = bool(re.match(r"^(?:o[1-9](?:-|$)|gpt-(?:[5-9]|[1-9]\d)(?:[.-]|$))", model))
+        # 普通兼容服务使用 max_tokens；OpenAI 思考模型使用 max_completion_tokens。
+        payload["max_completion_tokens" if reasoning_model else "max_tokens"] = max_output_tokens
+        if reasoning_model:
+            payload.pop("temperature", None)
+    if disable_thinking and model.startswith(("deepseek-flash", "deepseek-pro", "deepseek-v4", "deepseek-chat")):
+        payload["thinking"] = {"type": "disabled"}
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -92,8 +127,9 @@ async def _stream_openai(
     finish_reason = ""
     seen_done = False
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+    url, headers, extensions = await _request_target(url, headers)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+        async with client.stream("POST", url, json=payload, headers=headers, extensions=extensions) as resp:
             if resp.status_code >= 400:
                 body = (await resp.aread()).decode("utf-8", "replace")
                 if api_key:
@@ -121,7 +157,7 @@ async def _stream_openai(
                 log.warning("模型接口错误 model=%s status=%d request_id=%s detail=%s",
                             model, resp.status_code, request_id or "-", body)
                 raise LLMError(
-                    f"模型接口返回 {resp.status_code}: {body}",
+                    f"模型接口返回 HTTP {resp.status_code}，请检查服务配置或稍后重试",
                     retry_after=delay,
                     # 4xx（除 429/408）通常是 Key、模型名或参数错误，重试没有意义
                     retryable=resp.status_code == 429
@@ -303,7 +339,8 @@ async def _stream_mock(
     ctx: dict,
 ) -> AsyncIterator[dict]:
     await asyncio.sleep(0.25)
-    name, args = _mock_decide(messages, tools or [], ctx)
+    role = ctx.get("role", "worker")
+    name, args = (None, None) if role == "peer" else _mock_decide(messages, tools or [], ctx)
     if name:
         call = {
             "id": f"call_mock_{int(time.time() * 1000)}_{name}",
@@ -323,7 +360,9 @@ async def _stream_mock(
         return
 
     role = ctx.get("role", "worker")
-    if role == "supervisor":
+    if role == "peer":
+        text = "[PASS]" if ctx.get("observer") else f"我是{ctx.get('bot_name', '成员')}，我在。大家把这次想讨论的事情说说，我从自己的职责出发补充。"
+    elif role == "supervisor":
         text = (
             "已完成本轮拆解与汇总。\n\n"
             "研究员产出了资料要点（research.md），架构师据此完成了成稿（report.md）。"
@@ -368,9 +407,14 @@ async def stream_chat(
     tools: list[dict] | None = None,
     temperature: float = 0.4,
     ctx: dict | None = None,
+    max_output_tokens: int | None = None,
+    max_retries: int | None = None,
 ) -> AsyncIterator[dict]:
+    if kind != "mock":
+        await _guard_base_url(base_url)
     last_err: Exception | None = None
-    for attempt in range(LLM_MAX_RETRIES + 1):
+    retries = LLM_MAX_RETRIES if max_retries is None else max(0, max_retries)
+    for attempt in range(retries + 1):
         started = False
         try:
             if kind == "mock":
@@ -383,6 +427,8 @@ async def stream_chat(
                     messages=messages,
                     tools=tools,
                     temperature=temperature,
+                    **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
+                    **({"disable_thinking": True} if (ctx or {}).get("observer") else {}),
                 )
             async for chunk in gen:
                 started = True
@@ -391,7 +437,7 @@ async def stream_chat(
         except (LLMError, httpx.HTTPError, asyncio.TimeoutError) as exc:
             last_err = exc
             # 已经开始输出就不再重试，避免重复内容；不可重试的错误直接失败
-            if started or attempt >= LLM_MAX_RETRIES:
+            if started or attempt >= retries:
                 break
             if isinstance(exc, LLMError) and not exc.retryable:
                 break
@@ -400,7 +446,7 @@ async def stream_chat(
                 backoff = LLM_RETRY_BACKOFF[min(attempt, len(LLM_RETRY_BACKOFF) - 1)]
                 delay = backoff + random.uniform(0, min(1, backoff * .1))
             log.warning("模型请求自动重试 model=%s retry=%d/%d delay=%.1fs status=%s",
-                        model, attempt + 1, LLM_MAX_RETRIES, delay, getattr(exc, "status_code", None) or "网络异常")
+                        model, attempt + 1, retries, delay, getattr(exc, "status_code", None) or "网络异常")
             await asyncio.sleep(delay)
     detail = str(last_err).strip() if last_err is not None else ""
     status_code = getattr(last_err, "status_code", None)
@@ -467,13 +513,13 @@ async def _probe_streaming(*, base_url: str, api_key: str, model: str) -> tuple[
         "temperature": 0,
     }
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        url, headers, extensions = await _request_target(url, _probe_headers(api_key))
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
             async with client.stream(
-                "POST", url, json=payload, headers=_probe_headers(api_key)
+                "POST", url, json=payload, headers=headers, extensions=extensions
             ) as resp:
                 if resp.status_code >= 400:
-                    body = (await resp.aread()).decode("utf-8", "replace")
-                    return None, f"HTTP {resp.status_code}: {_redact(body[:200], api_key)}"
+                    return None, f"HTTP {resp.status_code}，请检查服务配置"
                 async for raw in resp.aiter_lines():
                     line = raw.strip()
                     if not line.startswith("data:"):
@@ -489,7 +535,7 @@ async def _probe_streaming(*, base_url: str, api_key: str, model: str) -> tuple[
                         return True, "流式输出正常"
                 return False, "服务端没有返回流式分片"
     except Exception as exc:  # noqa: BLE001
-        return None, f"请求失败：{exc}"
+        return None, f"请求失败：{type(exc).__name__}"
 
 
 async def _probe_plain(*, base_url: str, api_key: str, model: str) -> tuple[bool, str]:
@@ -502,13 +548,14 @@ async def _probe_plain(*, base_url: str, api_key: str, model: str) -> tuple[bool
         "temperature": 0,
     }
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(url, json=payload, headers=_probe_headers(api_key))
+        url, headers, extensions = await _request_target(url, _probe_headers(api_key))
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
+            r = await client.post(url, json=payload, headers=headers, extensions=extensions)
         if r.status_code >= 400:
-            return False, f"HTTP {r.status_code}: {_redact(r.text[:200], api_key)}"
+            return False, f"HTTP {r.status_code}，请检查服务配置"
         return True, "连接正常"
     except Exception as exc:  # noqa: BLE001
-        return False, f"连接失败：{exc}"
+        return False, f"连接失败：{type(exc).__name__}"
 
 
 async def _probe_tools(*, base_url: str, api_key: str, model: str) -> tuple[bool | None, str]:
@@ -532,17 +579,18 @@ async def _probe_tools(*, base_url: str, api_key: str, model: str) -> tuple[bool
             "stream": False,
         }
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(url, json=payload, headers=_probe_headers(api_key))
+            target, headers, extensions = await _request_target(url, _probe_headers(api_key))
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
+                r = await client.post(target, json=payload, headers=headers, extensions=extensions)
             if r.status_code >= 400:
-                last = f"HTTP {r.status_code}: {_redact(r.text[:200], api_key)}"
+                last = f"HTTP {r.status_code}，请检查服务配置"
                 continue
             msg = (r.json().get("choices") or [{}])[0].get("message") or {}
             if msg.get("tool_calls"):
                 return True, "支持工具调用"
             return False, "模型没有发起工具调用"
         except Exception as exc:  # noqa: BLE001
-            last = f"请求失败：{exc}"
+            last = f"请求失败：{type(exc).__name__}"
     return None, last
 
 
@@ -552,6 +600,7 @@ async def probe_capabilities(*, base_url: str, api_key: str | None, model: str) 
     返回 {"ok", "message", "streaming", "tool_calling"}；ok 只表示能连上并
     拿到正常响应，两项能力各自可能是 None（无法判断）。
     """
+    await _guard_base_url(base_url)
     streaming, smsg = await _probe_streaming(
         base_url=base_url, api_key=api_key or "", model=model
     )
@@ -586,15 +635,17 @@ async def list_models(*, base_url: str, api_key: str | None) -> tuple[bool, list
     返回 (ok, models, message)。多数 OpenAI 兼容服务都实现了该接口；
     少数网关没有，此时调用方退回预置模型列表即可，不算错误。
     """
+    await _guard_base_url(base_url)
     url = base_url.rstrip("/") + "/models"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, headers=headers)
+        url, headers, extensions = await _request_target(url, headers)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
+            r = await client.get(url, headers=headers, extensions=extensions)
         if r.status_code >= 400:
-            return False, [], f"HTTP {r.status_code}：{_redact(r.text[:160], api_key)}"
+            return False, [], f"HTTP {r.status_code}，请检查服务配置"
         data = r.json()
         items = data.get("data") if isinstance(data, dict) else data
         if not isinstance(items, list):
@@ -615,4 +666,4 @@ async def list_models(*, base_url: str, api_key: str | None) -> tuple[bool, list
         )]
         return True, sorted(chat_like or uniq), f"已获取 {len(chat_like or uniq)} 个模型"
     except Exception as exc:  # noqa: BLE001
-        return False, [], f"探测失败：{exc}"
+        return False, [], f"探测失败：{type(exc).__name__}"

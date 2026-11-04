@@ -152,6 +152,7 @@ export function NewChatDialog({
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [sup, setSup] = useState<string>("");
+  const [chatMode, setChatMode] = useState<"task" | "free">("task");
   const [loading, setLoading] = useState(false);
   const submitting = useRef(false);
 
@@ -179,7 +180,7 @@ export function NewChatDialog({
     setLoading(true);
     setCreatingTemplate(template.id);
     try {
-      const chat = await api.createChatFromTemplate(template.id);
+      const chat = await api.createChatFromTemplate(template.id, chatMode);
       toast(chat.model_setup_required ? "团队已创建，请到智能体页面配置模型后开始协作" : `已创建「${chat.name}」`, "ok");
       onCreated(chat.id);
     } catch (e: any) {
@@ -195,13 +196,15 @@ export function NewChatDialog({
     if (submitting.current) return;
     if (!name.trim()) return toast("请填写群聊名称", "error");
     if (!picked.length) return toast("至少选择一个成员", "error");
+    if (chatMode === "free" && (picked.length < 2 || picked.length > 6)) return toast("自由群聊需要 2–6 位成员", "error");
     submitting.current = true;
     setLoading(true);
     try {
       const c = await api.createChat({
         name: name.trim(),
         member_ids: picked,
-        supervisor_bot_id: sup,
+        supervisor_bot_id: sup || null,
+        mode: chatMode,
       });
       onCreated(c.id);
     } catch (e: any) {
@@ -215,6 +218,16 @@ export function NewChatDialog({
   return (
     <Modal open onClose={() => { if (!loading) onClose(); }} title="新建团队会话" subtitle="选一个模板，一键组建团队；也可以自己选择成员。" width="max-w-2xl"
       footer={<><button className="btn-ghost" onClick={onClose} disabled={loading}>取消</button>{mode === "custom" && <button className="btn-primary" onClick={submit} disabled={loading || !picked.length}>{loading && <Loader2 size={13} className="animate-spin" />}创建会话</button>}</>}>
+      <div className="mb-4"><span className="label">群聊模式</span>
+        <Select ariaLabel="群聊模式" value={chatMode} disabled={loading} onChange={(value) => {
+          const next = value as "task" | "free"; setChatMode(next);
+          if (next === "free") { setPicked((p) => p.slice(0, 6)); setSup(""); }
+          else if (!sup) setSup(picked[0] || "");
+        }} options={[
+          { value: "task", label: "任务模式 · 总指挥调度" },
+          { value: "free", label: "自由群聊 · 成员自行回应" },
+        ]} />
+      </div>
       <div className="mb-5 flex gap-1 rounded-lg bg-panel2 p-1" role="tablist" aria-label="创建方式">
         {([['templates', '使用模板'], ['custom', '自定义团队']] as const).map(([value, label]) => (
           <button key={value} role="tab" aria-selected={mode === value} disabled={loading} onClick={() => setMode(value)}
@@ -271,10 +284,11 @@ export function NewChatDialog({
                   <input
                     type="checkbox"
                     checked={picked.includes(b.id)}
+                    disabled={chatMode === "free" && picked.length >= 6 && !picked.includes(b.id)}
                     onChange={(e) => {
                       const next = e.target.checked ? [...picked, b.id] : picked.filter((i) => i !== b.id);
                       setPicked(next);
-                      if (!next.includes(sup)) setSup(next[0] || "");
+                      if (!next.includes(sup)) setSup(chatMode === "free" ? "" : next[0] || "");
                     }}
                     className="accent-[var(--accent)]"
                   />
@@ -287,21 +301,21 @@ export function NewChatDialog({
           </div>
 
           <div>
-            <label className="label">总指挥</label>
+            <label className="label">{chatMode === "free" ? "负责人（可选）" : "总指挥"}</label>
             <Select
               value={sup}
               onChange={setSup}
-              options={bots
+              options={[...(chatMode === "free" ? [{ value: "", label: "不设负责人" }] : []), ...bots
                 .filter((b) => picked.includes(b.id))
                 .map((b) => ({
                   value: b.id,
                   label: `${b.name}（${b.role}）`,
                   avatar: b.avatar,
-                }))}
-              placeholder="选择总指挥"
+                }))]}
+              placeholder={chatMode === "free" ? "不设负责人" : "选择总指挥"}
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
-              总指挥负责拆解任务与派任务，额外拥有 delegate 与计划工具。
+              {chatMode === "free" ? "负责人在无人回应时兜底，需要多人分工时出计划。成员可以自己互相交接。" : "总指挥负责拆解任务与派任务，额外拥有 delegate 与计划工具。"}
             </p>
           </div>
         </div>

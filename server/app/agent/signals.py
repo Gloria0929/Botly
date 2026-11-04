@@ -14,3 +14,18 @@ class PauseSignal(Exception):
     def __init__(self, payload: dict):
         self.payload = payload
         super().__init__(payload.get("kind", "pause"))
+
+
+class StopSignal(Exception):
+    pass
+
+class LeaseLost(Exception):
+    pass
+
+class AwaitChildren(Exception):
+    """总指挥的并行子任务还没全部返回：图停在 tool 节点，执行转入 waiting_children。"""
+
+class LimitExceeded(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)

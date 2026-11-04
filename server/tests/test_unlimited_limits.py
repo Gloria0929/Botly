@@ -89,10 +89,10 @@ def test_graph_has_no_old_node_jump_limit():
         def write_tool_result(self, thread_id, call, content):
             self.pending = False
 
-        def has_pending_interjections(self, thread_id):
+        async def has_pending_interjections(self, thread_id):
             return False
 
-        def finish_run(self, content):
+        async def finish_run(self, content):
             self.completed = True
 
     ex = Executor()

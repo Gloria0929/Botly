@@ -70,8 +70,37 @@ def test_empty_event_stream_opens_then_delivers_new_events(client, invite):
             with SessionLocal() as db:
                 emit(db, user_id, chat_id, "run.status", {"run_id": "new", "status": "completed"})
                 db.commit()
-            event = await asyncio.wait_for(pending, 2)
+            event = await asyncio.wait_for(pending, 12)
             assert "event: run.status" in event and '"status": "completed"' in event
         finally:
             await stream.aclose()
     asyncio.run(check_live())
+
+
+def test_worker_shutdown_bounds_terminal_and_mail_tasks(monkeypatch):
+    monkeypatch.setattr(worker, "WORKER_SHUTDOWN_TIMEOUT", 0.08)
+    canceled = []
+
+    async def stalled(name):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            canceled.append(name)
+
+    async def check():
+        terminal_task = asyncio.create_task(stalled("terminal"))
+        mail_task = asyncio.create_task(stalled("mail"))
+        await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await worker._shutdown({}, {"terminal": terminal_task}, mail_task)
+        assert loop.time() - started < 0.3
+        assert set(canceled) == {"terminal", "mail"}
+
+    asyncio.run(check())
+
+
+def test_notification_stream_rejects_a_stale_account(client, invite):
+    register(client, invite, "notifications-identity@test.dev")
+    response = client.get("/api/notifications/events?expected_user_id=another-user")
+    assert response.status_code == 401

@@ -1,28 +1,8 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import {
-  ArrowLeft,
-  Bell,
-  BellOff,
-  Columns2,
-  Download,
-  GitBranch,
-  Compass,
-  Loader2,
-  Menu as MenuIcon,
-  Pencil,
-  Plus,
-  Search,
-  SlidersHorizontal,
-  Square,
-  Trash2,
-  MessageSquare,
-  Users,
-  Workflow,
-  Zap,
-} from "lucide-react";
+import { ArrowLeft, Bell, BellOff, Columns2, Download, GitBranch, Loader2, Menu as MenuIcon, Pencil, Plus, Search, SlidersHorizontal, Square, Trash2, Users, Workflow, Zap } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import ChatList, { NewChatDialog } from "@/components/chat/ChatList";
 import ChatSettings from "@/components/chat/ChatSettings";
@@ -36,10 +16,15 @@ import ActionMenu from "@/components/ui/Menu";
 import Modal from "@/components/ui/Modal";
 import { useConfirm } from "@/components/ui/Confirm";
 import { api, toastError } from "@/lib/api";
-import { acceptMessageEvent, applyAgentUsage, createMessageSync, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
+import { createMessageSync, mergeMessageSnapshot } from "@/lib/message-sync";
+import { usePanelResize } from "@/hooks/use-panel-resize";
 import type { Chat, ChatFile, ChatSummary, Message, PlanStep, Run, Task, Branch } from "@/lib/types";
 import { num } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
+import { useChatEventStream } from "@/hooks/use-chat-event-stream";
+import { useChatNotifications } from "@/hooks/use-chat-notifications";
+import { NoChatState, EmptyState, statusLabel, runStatusText } from "@/components/chat/ChatStates";
+
 
 const ACTIVE = new Set(["queued", "running", "waiting", "waiting_children"]);
 
@@ -63,6 +48,8 @@ function ChatContent() {
     branchRef.current = branch;
   }, [branch]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  useEffect(() => setReplyTo(null), [chatId, branch?.id]);
   const messageSync = useRef(createMessageSync());
   const [eventStart, setEventStart] = useState<{ chatId: string; threadId: string; after: number } | null>(null);
   const [me, setMe] = useState<any>(null);
@@ -85,92 +72,8 @@ function ChatContent() {
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [focusMessage, setFocusMessage] = useState<string | null>(null);
   const [connection, setConnection] = useState<"connecting" | "connected" | "disconnected">("connecting");
-  const [panelWidth, setPanelWidth] = useState(320);
-  const panelWidthRef = useRef(320);
-  const panelResizing = useRef(false);
-  const panelResizeStart = useRef({ x: 0, w: 320 });
+  const { panelWidth, startPanelResize, movePanelResize, endPanelResize, resetPanelWidth, onPanelKeyDown } = usePanelResize();
   const confirm = useConfirm();
-
-  useEffect(() => {
-    panelWidthRef.current = panelWidth;
-  }, [panelWidth]);
-
-  const maxPanelWidth = useCallback(() => {
-    if (typeof window === "undefined") return 720;
-    // Reserve the full navigation, conversation list, and a readable message column.
-    return Math.max(280, Math.min(760, window.innerWidth - 232 - 264 - 420));
-  }, []);
-
-  const clampPanelWidth = useCallback(
-    (w: number) => Math.min(maxPanelWidth(), Math.max(260, Math.round(w))),
-    [maxPanelWidth]
-  );
-
-  useEffect(() => {
-    const saved = Number(localStorage.getItem("botly-panel-width"));
-    if (Number.isFinite(saved) && saved >= 260) {
-      const w = clampPanelWidth(saved);
-      panelWidthRef.current = w;
-      setPanelWidth(w);
-    }
-    const onResize = () => setPanelWidth((w) => {
-      const next = clampPanelWidth(w);
-      panelWidthRef.current = next;
-      return next;
-    });
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [clampPanelWidth]);
-
-  const startPanelResize = (e: ReactPointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    panelResizing.current = true;
-    panelResizeStart.current = { x: e.clientX, w: panelWidth };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "col-resize";
-  };
-
-  const movePanelResize = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!panelResizing.current) return;
-    const next = panelResizeStart.current.w + (panelResizeStart.current.x - e.clientX);
-    const w = clampPanelWidth(next);
-    panelWidthRef.current = w;
-    setPanelWidth(w);
-  };
-
-  const endPanelResize = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!panelResizing.current) return;
-    panelResizing.current = false;
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      /* pointer 已经释放 */
-    }
-    localStorage.setItem("botly-panel-width", String(panelWidthRef.current));
-  };
-
-  const resetPanelWidth = () => {
-    const w = clampPanelWidth(320);
-    panelWidthRef.current = w;
-    setPanelWidth(w);
-    localStorage.setItem("botly-panel-width", String(w));
-  };
-
-  const onPanelKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    let next = panelWidth;
-    if (e.key === "ArrowLeft") next += 16;
-    else if (e.key === "ArrowRight") next -= 16;
-    else if (e.key === "Home") next = 320;
-    else return;
-    e.preventDefault();
-    const w = clampPanelWidth(next);
-    panelWidthRef.current = w;
-    setPanelWidth(w);
-    localStorage.setItem("botly-panel-width", String(w));
-  };
 
   const chatRef = useRef<Chat | null>(null);
   chatRef.current = chat;
@@ -292,11 +195,14 @@ function ChatContent() {
       .catch(() => {});
   }, []);
 
+  const chatRequestVersion = useRef(0);
+  const invalidateChatSnapshot = useCallback(() => { chatRequestVersion.current += 1; }, []);
   const refreshChat = useCallback((id: string) => {
+    const version = ++chatRequestVersion.current;
     api
       .chat(id)
       .then((c) => {
-        if (chatIdRef.current !== id) return;
+        if (chatIdRef.current !== id || version !== chatRequestVersion.current) return;
         setChat(c);
       })
       .catch(() => {});
@@ -313,6 +219,7 @@ function ChatContent() {
   useEffect(() => {
     if (!chatId) return;
     let canceled = false;
+    chatRequestVersion.current += 1;
     localStorage.setItem("botly-chat", chatId);
     setChat(null);
     setMessages([]);
@@ -357,234 +264,11 @@ function ChatContent() {
   }, [chatId, openTarget]);
 
   /* ---------------- SSE ---------------- */
-  useEffect(() => {
-    if (!chatId || eventStart?.chatId !== chatId) return;
-    let es: EventSource | null = null;
-    let closed = false;
-    let pending = false;
-    let msgPending = false;
-    let cursor = eventStart.after;
-
-    const scheduleRefresh = () => {
-      if (pending) return;
-      pending = true;
-      setTimeout(() => {
-        pending = false;
-        if (!closed && chatIdRef.current === chatId) refreshChat(chatId);
-      }, 350);
-    };
-
-    // 卡片状态（计划/审批/提问）是在原消息上改 meta，必须重新拉一次消息才能反映
-    const scheduleMessages = () => {
-      if (msgPending) return;
-      msgPending = true;
-      setTimeout(() => {
-        msgPending = false;
-        if (!closed && chatIdRef.current === chatId) reloadMessages(chatId);
-      }, 400);
-    };
-
-    const connect = () => {
-      setConnection("connecting");
-      es = new EventSource(`/api/chats/${chatId}/events?after=${cursor}`);
-      es.onopen = () => {
-        if (closed) return;
-        setConnection("connected");
-        // 首次连接和断线恢复时校准快照，避免握手期间的页面停留在旧状态。
-        scheduleRefresh();
-        scheduleMessages();
-      };
-      ["message.created", "message.delta", "message.completed", "message.deleted", "run.status",
-        "task.status", "approval.resolved", "files.updated", "usage.updated", "chat.always_allow", "chat.members"
-      ].forEach((type) => es!.addEventListener(type, (ev) => {
-        const id = Number((ev as MessageEvent).lastEventId);
-        if (Number.isFinite(id)) cursor = Math.max(cursor, id);
-      }));
-
-      es.addEventListener("message.created", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        const mainId = branchRef.current?.id || eventStart.threadId;
-        if (!mainId) {
-          // 群聊详情还没加载完，先不动本地列表，等刷新补齐
-          scheduleRefresh();
-          return;
-        }
-        if (p.thread_id !== mainId) {
-          scheduleRefresh();
-          return;
-        }
-        if (!acceptMessageEvent(messageSync.current, p.id, Number((ev as MessageEvent).lastEventId))) return;
-        setMessages((prev) => {
-          const i = prev.findIndex((m) => m.id === p.id);
-          if (i >= 0) {
-            const next = [...prev];
-            next[i] = mergeMessageUpdate(next[i], p);
-            return next;
-          }
-          // 本机乐观插入的临时用户消息：SSE 先到时直接原位替换，
-          // 避免“两条一模一样的消息”闪现一下再合并。
-          const tempIndex = prev.findIndex(
-            (m) =>
-              m.id.startsWith("tmp-") &&
-              m.sender_type === "user" &&
-              m.content.trim() === (p.content || "").trim()
-          );
-          if (tempIndex >= 0) {
-            const next = [...prev];
-            next[tempIndex] = p as Message;
-            return next.sort((a, b) => a.seq - b.seq);
-          }
-          return [...prev, p as Message].sort((a, b) => a.seq - b.seq);
-        });
-        if (p.type !== "text" && p.type !== "tool_call") scheduleRefresh();
-      });
-
-      es.addEventListener("message.delta", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        if (!acceptMessageEvent(messageSync.current, p.message_id, Number((ev as MessageEvent).lastEventId))) return;
-        setMessages((prev) =>
-          prev.map((m) => (m.id === p.message_id && m.status === "streaming"
-            ? mergeMessageUpdate(m, { content: p.content }) : m))
-        );
-      });
-
-      es.addEventListener("message.completed", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        if (!acceptMessageEvent(messageSync.current, p.message_id, Number((ev as MessageEvent).lastEventId))) return;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === p.message_id
-              ? mergeMessageUpdate(m, {
-                  content: p.content,
-                  status: p.status,
-                  type: p.type || m.type,
-                  meta: p.meta ? { ...m.meta, ...p.meta } : m.meta,
-                })
-              : m
-          )
-        );
-      });
-
-      es.addEventListener("message.deleted", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        if (!acceptMessageEvent(messageSync.current, p.id, Number((ev as MessageEvent).lastEventId), true)) return;
-        setMessages((prev) => prev.filter((m) => m.id !== p.id));
-      });
-
-      es.addEventListener("run.status", (ev) => {
-        const p = JSON.parse((ev as MessageEvent).data);
-        if (closed || chatIdRef.current !== chatId) return;
-        setMessages((prev) => prev.map((m) => m.run_id === p.run_id
-          ? { ...m, meta: { ...m.meta, run_status: p.status } } : m));
-        scheduleRefresh();
-        scheduleMessages();
-      });
-      es.addEventListener("task.status", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        setMessages((prev) => prev.map((m) => m.meta?.task_id === p.task_id
-          ? { ...m, meta: { ...m.meta, task_status: p.status } } : m));
-        setActiveTask((t) => t && t.id === p.task_id ? { ...t, ...p, id: t.id } : t);
-        // 群聊里挂着的任务详情直接读 chat.tasks，这里原地更新，token/状态不用等重拉
-        setChat((prev) => prev ? {
-          ...prev,
-          tasks: prev.tasks.map((t) => t.id === p.task_id ? {
-            ...t,
-            status: p.status,
-            tokens_used: p.tokens_used,
-            attempt: p.attempt,
-            started_at: p.started_at,
-            ended_at: p.ended_at,
-            result: p.result,
-          } : t),
-        } : prev);
-      });
-      es.addEventListener("approval.resolved", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        setMessages((prev) => prev.map((m) => m.meta?.approval_id === p.approval_id
-          ? { ...m, meta: { ...m.meta, status: p.status, closed_reason: p.closed_reason } } : m));
-        scheduleRefresh();
-        scheduleMessages();
-      });
-      es.addEventListener("usage.updated", (ev) => {
-        if (closed || chatIdRef.current !== chatId) return;
-        const p = JSON.parse((ev as MessageEvent).data);
-        setMessages((prev) => applyAgentUsage(prev, p));
-      });
-      ["task.status", "files.updated", "usage.updated", "chat.always_allow"].forEach((t) =>
-        es!.addEventListener(t, scheduleRefresh)
-      );
-      // 成员变化后历史消息里的「已删除」标记也要跟着更新，所以连消息一起重拉
-      es.addEventListener("chat.members", () => {
-        scheduleRefresh();
-        scheduleMessages();
-      });
-
-      es.onerror = () => {
-        if (closed) return;
-        setConnection("disconnected");
-        es?.close();
-        setTimeout(() => !closed && connect(), 1500);
-      };
-    };
-
-    const resync = () => {
-      scheduleRefresh();
-      scheduleMessages();
-    };
-    const onVisible = () => {
-      if (document.visibilityState === "visible") resync();
-    };
-    window.addEventListener("online", resync);
-    document.addEventListener("visibilitychange", onVisible);
-    connect();
-    return () => {
-      closed = true;
-      es?.close();
-      window.removeEventListener("online", resync);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [chatId, eventStart, refreshChat, reloadMessages]);
+  useChatEventStream({ chatId, eventStart, chatIdRef, refreshChat, reloadMessages, setConnection, branchRef, messageSync, setMessages, setActiveTask, setChat,
+    hasActiveRuns: !!chat?.active_run || !!chat?.active_runs?.length, invalidateChatSnapshot });
 
   /* ---------------- 用户级通知 ---------------- */
-  useEffect(() => {
-    const es = new EventSource("/api/notifications/events");
-    es.addEventListener("notification.created", (ev) => {
-      const p = JSON.parse((ev as MessageEvent).data);
-      if (p.type === "run_completed") {
-        api.chats().then(setChats).catch(() => {});
-      }
-      // 审批提醒只走邮件；审批卡片由群聊事件刷新。
-      if (p.type === "approval" || p.type === "approval_expired") return;
-      // 当前正在查看的群聊不弹浏览器通知（NTF-05）
-      const viewing = chatRef.current?.id === p.chat_id && document.visibilityState === "visible";
-      if (viewing) return;
-      if (meRef.current?.settings?.notifications_enabled !== false && typeof Notification !== "undefined" && Notification.permission === "granted") {
-        try {
-          const n = new Notification(p.title || "Botly", {
-            body: p.body || "",
-            tag: p.id,
-          });
-          n.onclick = () => {
-            window.focus();
-            if (p.chat_id) {
-              const target = p.target_type && p.target_id ? { chatId: p.chat_id, kind: p.target_type, id: p.target_id } : null;
-              if (chatIdRef.current === p.chat_id && target) openTarget(target);
-              else { pendingTarget.current = target; setChatId(p.chat_id); }
-            }
-          };
-        } catch {
-          /* ignore */
-        }
-      }
-    });
-    return () => es.close();
-  }, [openTarget]);
+  useChatNotifications({ chatId, eventStart, me, setChats, chatRef, meRef, chatIdRef, openTarget, pendingTarget, setChatId });
 
   /* ---------------- 操作 ---------------- */
   const run: Run | null = chat?.active_run || chat?.last_run || null;
@@ -625,7 +309,7 @@ function ChatContent() {
     };
     setMessages((p) => [...p, temp]);
     try {
-      const r = await api.send(chatId, content, undefined, threadId);
+      const r = await api.send(chatId, content, undefined, threadId, replyTo?.id);
       if (chatIdRef.current !== chatId) return;
       // SSE 可能已经先推送了这条消息，替换临时消息时要去重，否则会出现重复 key
       setMessages((prev) => {
@@ -633,6 +317,7 @@ function ChatContent() {
         return [...rest, r.message].sort((a, b) => a.seq - b.seq);
       });
       refreshChat(chatId);
+      setReplyTo(null);
       api.chats().then(setChats).catch(() => {});
     } catch (e: any) {
       setMessages((p) => p.filter((m) => m.id !== temp.id));
@@ -1145,6 +830,7 @@ function ChatContent() {
           <MessageStream
             chatId={chatId || ""}
             typingRunId={running && !messagesLoading && !focusMessage ? run?.id : undefined}
+            typingRunIds={chat?.mode === "free" && !messagesLoading && !focusMessage ? chat.active_runs?.map((r) => r.id) : undefined}
             messages={messages}
             members={chat?.members || []}
             tasks={activeTasks}
@@ -1155,6 +841,7 @@ function ChatContent() {
             focusMessageId={focusMessage}
             me={me}
             onBranch={branch ? undefined : branchFrom}
+            onReply={chat?.mode === "free" && !branch ? setReplyTo : undefined}
             handlers={{
               onPlanApprove,
               onPlanCancel,
@@ -1220,6 +907,9 @@ function ChatContent() {
             onStop={doStop}
             seed={seed}
             delegationDepth={chat?.limits?.delegation_depth ?? 2}
+            chatMode={branch ? "task" : chat?.mode || "task"}
+            replyTo={replyTo ? { name: chat?.members.find((b) => b.id === replyTo.sender_bot_id)?.name || replyTo.sender_bot_name || "成员", content: replyTo.content } : null}
+            onCancelReply={() => setReplyTo(null)}
             onUpload={chatId ? async (file) => {
               const uploaded = await api.uploadChatFile(chatId, file);
               refreshChat(chatId);
@@ -1398,71 +1088,5 @@ function ChatContent() {
         </div>
       )}
     </AppShell>
-  );
-}
-
-function NoChatState({ onCreate }: { onCreate: () => void }) {
-  return (
-    <div className="chat-welcome flex h-full flex-col items-center justify-center overflow-y-auto px-6 py-10 text-center">
-      <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-panel2 text-ink"><Workflow size={30} strokeWidth={1.3} /></div>
-      <h1 className="text-[28px] font-medium tracking-tight sm:text-[32px]">和你的 AI 团队，一起工作。</h1>
-      <p className="mt-4 max-w-[400px] text-[14px] leading-7 text-muted">从一个目标开始。让不同角色的智能体<br className="hidden sm:block" />一起研究、协作，并把结果交付给你。</p>
-      <button className="btn-primary mt-7 rounded-full px-5" onClick={onCreate}><Plus size={15} />新建团队会话</button>
-      <div className="mt-12 flex flex-wrap justify-center gap-5 text-[11px] text-faint">
-        {[{ icon: Users, label: "多角色协作" }, { icon: Workflow, label: "过程可见" }, { icon: SlidersHorizontal, label: "关键操作可控" }].map(({ icon: Icon, label }) => <span key={label} className="flex items-center gap-1.5"><Icon size={13} />{label}</span>)}
-      </div>
-    </div>
-  );
-}
-
-function statusLabel(s?: string) {
-  return s === "working" ? "执行中" : s === "waiting" ? "等待处理" : "空闲";
-}
-
-function runStatusText(run: Run | null, tasks: Task[], messages: Message[]) {
-  if (!run || run.target_bot_id || !["running", "waiting_children"].includes(run.status)) return "";
-  const activeTasks = tasks.some((task) => task.run_id === run.id
-    && ["queued", "running", "waiting_approval", "waiting_reply"].includes(task.status));
-  const answered = new Set(messages.filter((m) => m.run_id === run.id && m.type === "tool_result")
-    .map((m) => m.meta?.tool_call_id));
-  const dispatching = messages.some((m) => m.run_id === run.id && m.type === "tool_call"
-    && m.status === "done" && !m.meta?.subtask_tool
-    && m.meta?.tool_calls?.some((call: { id: string; function?: { name?: string } }) =>
-      call.function?.name === "delegate" && !answered.has(call.id)));
-  if (!activeTasks && !dispatching) return "";
-  return run.status === "waiting_children" ? "等待并行子任务返回…" : "总指挥正在调度…";
-}
-
-function EmptyState({ onPick }: { onPick: (t: string) => void }) {
-  const samples = [
-    "调研 3 家国内向量数据库厂商，写一份 1500 字对比报告。",
-    "把这份需求文档拆成开发任务，评估每个任务的复杂度。",
-    "查一下最近一周 AI Agent 领域的三个重要发布，整理成简报。",
-  ];
-  return (
-    <div className="chat-welcome flex h-full flex-col items-center justify-center overflow-y-auto px-6 py-8">
-      <div className="w-full max-w-[560px]">
-        <div className="mb-6 text-center">
-          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-panel">
-            <Compass size={20} />
-          </div>
-          <h2 className="text-[26px] font-semibold tracking-tight">今天，和团队一起完成什么？</h2>
-          <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted">
-            总指挥会判断复杂度、拆解任务、派给合适的成员。涉及高风险动作时会停下来等你审批。
-          </p>
-        </div>
-        <div className="space-y-2">
-          {samples.map((s) => (
-            <button
-              key={s}
-              onClick={() => onPick(s)}
-              className="group flex w-full items-center gap-4 rounded-xl bg-panel2/70 px-5 py-4 text-left text-[13px] leading-relaxed text-muted transition-colors hover:bg-panel3 hover:text-ink"
-            >
-              <span className="flex-1">{s}</span><Plus size={15} className="shrink-0 text-faint group-hover:text-accent" />
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
   );
 }

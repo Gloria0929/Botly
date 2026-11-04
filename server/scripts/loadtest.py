@@ -18,7 +18,9 @@ import httpx
 from sqlalchemy import select
 
 from app.core.db import init_db, session_scope
-from app.core.models import InviteCode, Message, Run, Thread
+from app.core.models import Message, Run, Thread, User
+from app.core.security import hash_password
+from app.api.auth import _default_workspace
 
 HEADERS = {"X-Botly-Client": "web"}
 PASSWORD = "loadtest-password-123"
@@ -27,19 +29,26 @@ PASSWORD = "loadtest-password-123"
 async def verify(args) -> dict:
     init_db()
     prefix = "loadtest-" + uuid4().hex[:10]
-    invite = prefix.upper()
+    # 压测预置账号，不让同一台负载机的批量注册触发真实的按 IP 限流。
+    # 注册/找回密码限流由 test_high_risk_security 单独验证。
+    accounts = []
+    password_hash = hash_password(PASSWORD)
     with session_scope() as db:
-        db.add(InviteCode(code=invite, max_uses=args.users, used_count=0))
+        for i in range(args.users):
+            user = User(email=f"{prefix}-{i}@example.dev", password_hash=password_hash, name=f"压测用户 {i}")
+            db.add(user)
+            db.flush()
+            chat = _default_workspace(db, user)
+            accounts.append({"id": user.id, "chat_id": chat.id, "email": user.email})
     clients = [httpx.AsyncClient(base_url=args.base, headers=HEADERS, timeout=60) for _ in range(args.users)]
     workspaces = []
     report = {"prefix": prefix, "users": args.users, "concurrency": args.concurrency, "performance": {}}
     sem = asyncio.Semaphore(args.concurrency)
     try:
         for i, client in enumerate(clients):
-            r = await client.post("/api/auth/register", json={"email": f"{prefix}-{i}@example.dev",
-                "password": PASSWORD, "invite_code": invite, "name": f"压测用户 {i}"})
+            account = accounts[i]
+            r = await client.post("/api/auth/login", json={"email": account["email"], "password": PASSWORD})
             r.raise_for_status()
-            account = r.json()
             r = await client.post("/api/providers", json={"vendor_id": "mock", "kind": "mock"})
             r.raise_for_status()
             provider = r.json()["provider"]["id"]

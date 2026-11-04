@@ -9,6 +9,9 @@ from pathlib import Path
 
 from app.core.config import SANDBOX_DIR, SANDBOX_FILE_MAX_MB, SANDBOX_QUOTA_MB
 
+_QUOTA_FILE = ".botly-quota-bytes"
+_QUOTA_LOCK = ".botly-quota.lock"
+
 
 class SandboxError(Exception):
     pass
@@ -43,15 +46,57 @@ def safe_path(user_id: str, chat_id: str, rel: str) -> Path:
 
 
 def quota_used(user_id: str, chat_id: str | None = None) -> int:
-    root = chat_root(user_id, chat_id) if chat_id else (SANDBOX_DIR / user_id).resolve()
+    if chat_id:
+        return _scan_usage(chat_root(user_id, chat_id))
+    user_root = _user_root(user_id)
+    with (user_root / _QUOTA_LOCK).open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _cached_usage(user_root)
+
+
+def _user_root(user_id: str) -> Path:
+    root = (SANDBOX_DIR / user_id).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _scan_usage(root: Path) -> int:
+    # shortcut: the cache is exact while every external writer calls refresh_quota; add a watcher if new writers bypass that hook.
     total = 0
     for dirpath, _dirs, files in os.walk(root):
         for f in files:
+            if f in (_QUOTA_FILE, _QUOTA_FILE + ".tmp", _QUOTA_LOCK) or f.startswith(".botly-write-"):
+                continue
             try:
                 total += os.path.getsize(os.path.join(dirpath, f))
             except OSError:
                 pass
     return total
+
+
+def _write_usage(user_root: Path, value: int) -> None:
+    temp_path = user_root / f"{_QUOTA_FILE}.tmp"
+    temp_path.write_text(str(max(0, value)), encoding="ascii")
+    os.replace(temp_path, user_root / _QUOTA_FILE)
+
+
+def _cached_usage(user_root: Path) -> int:
+    try:
+        return max(0, int((user_root / _QUOTA_FILE).read_text(encoding="ascii")))
+    except (OSError, ValueError):
+        usage = _scan_usage(user_root)
+        _write_usage(user_root, usage)
+        return usage
+
+
+def refresh_quota(user_id: str) -> int:
+    """Reconcile the persisted usage counter after tools that write files directly."""
+    user_root = _user_root(user_id)
+    with (user_root / _QUOTA_LOCK).open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        usage = _scan_usage(user_root)
+        _write_usage(user_root, usage)
+        return usage
 
 
 def write_file(user_id: str, chat_id: str, rel: str, content: str) -> int:
@@ -64,9 +109,10 @@ def write_bytes(user_id: str, chat_id: str, rel: str, content: bytes) -> int:
     if size > SANDBOX_FILE_MAX_MB * 1024 * 1024:
         raise SandboxError(f"单文件超过 {SANDBOX_FILE_MAX_MB} MB 限制")
     # 用户级跨进程锁让并行写入的容量检查也保持准确。
-    with (chat_root(user_id, chat_id).parent / ".botly-quota.lock").open("a+b") as lock:
+    user_root = _user_root(user_id)
+    with (user_root / _QUOTA_LOCK).open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        used = quota_used(user_id)
+        used = _cached_usage(user_root)
         previous_size = path.stat().st_size if path.is_file() else 0
         if used - previous_size + size > SANDBOX_QUOTA_MB * 1024 * 1024:
             raise SandboxError(f"沙箱容量超过 {SANDBOX_QUOTA_MB} MB 限制")
@@ -80,6 +126,7 @@ def write_bytes(user_id: str, chat_id: str, rel: str, content: bytes) -> int:
                     os.fchmod(temp.fileno(), path.stat().st_mode & 0o777)
                 temp.write(content)
             os.replace(temp_name, path)
+            _write_usage(user_root, used - previous_size + size)
         finally:
             if temp_name:
                 Path(temp_name).unlink(missing_ok=True)
@@ -123,11 +170,21 @@ def delete_chat_dir(user_id: str, chat_id: str) -> None:
     root = (base / chat_id).resolve()
     if base not in root.parents:
         raise SandboxError("非法的群聊目录")
-    shutil.rmtree(root, ignore_errors=True)
+    user_root = _user_root(user_id)
+    with (user_root / _QUOTA_LOCK).open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        shutil.rmtree(root, ignore_errors=True)
+        _write_usage(user_root, _scan_usage(user_root))
 
 
 def delete_file(user_id: str, chat_id: str, rel: str) -> None:
     path = safe_path(user_id, chat_id, rel)
-    if not path.exists():
-        return  # 相同删除调用在检查点恢复时重放，目标已不存在即视为完成。
-    path.unlink()
+    user_root = _user_root(user_id)
+    with (user_root / _QUOTA_LOCK).open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not path.exists():
+            return  # 相同删除调用在检查点恢复时重放，目标已不存在即视为完成。
+        used = _cached_usage(user_root)
+        removed = path.stat().st_size
+        path.unlink()
+        _write_usage(user_root, used - removed)

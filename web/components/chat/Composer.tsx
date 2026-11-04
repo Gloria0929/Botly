@@ -16,6 +16,9 @@ export default function Composer({
   seed,
   onUpload,
   delegationDepth,
+  chatMode = "task",
+  replyTo,
+  onCancelReply,
 }: {
   members: Bot[];
   running: boolean;
@@ -26,6 +29,9 @@ export default function Composer({
   seed?: { text: string; k: number } | null;
   onUpload?: (file: File) => Promise<ChatFile>;
   delegationDepth?: number;
+  chatMode?: "task" | "free";
+  replyTo?: { name: string; content: string } | null;
+  onCancelReply?: () => void;
 }) {
   const [text, setText] = useState("");
   const [mention, setMention] = useState(false);
@@ -35,6 +41,7 @@ export default function Composer({
   const fileInput = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<ChatFile[]>([]);
   const [uploading, setUploading] = useState(false);
+  useEffect(() => { if (replyTo) ta.current?.focus(); }, [replyTo?.name, replyTo?.content]);
 
   useEffect(() => {
     if (seed?.text) {
@@ -50,7 +57,10 @@ export default function Composer({
     }
   }, [text]);
 
-  const filtered = members.filter((m) => m.name.toLowerCase().includes(mentionQuery.toLowerCase()));
+  const everyone: Bot = { id: "everyone", name: "everyone", role: "全体成员", avatar: "bot",
+    system_prompt: "", provider_id: null, model: null, temperature: 0.4, tools: [], deleted: false, display_name: "everyone" };
+  const filtered = [...members, ...(chatMode === "free" ? [everyone] : [])]
+    .filter((m) => m.name.toLowerCase().includes(mentionQuery.toLowerCase()));
   // 停用的 Bot 只展示、不可选：键盘上下和回车也只在可用成员里走
   const selectable = filtered.filter((m) => m.enabled !== false);
   const activeMention = selectable[Math.min(mentionIndex, selectable.length - 1)];
@@ -69,7 +79,7 @@ export default function Composer({
     const v = [text.trim(), references].filter(Boolean).join("\n\n");
     if (!v || disabledReason || uploading) return;
     setAttachments([]);
-    if (running) {
+    if (running && chatMode !== "free") {
       // RUN-13：执行中发送的是插话，不新建执行
       onInterject(v);
       setText("");
@@ -82,6 +92,11 @@ export default function Composer({
   return (
     <div className="chat-composer px-4 pb-5 pt-3 sm:px-6">
       <div className="w-full">
+        {replyTo && <div className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-accent bg-panel2 px-3 py-2 text-[11.5px]">
+          <div className="min-w-0 flex-1"><span className="text-accent">回复 {replyTo.name}</span>
+            <p className="truncate text-muted">{replyTo.content}</p></div>
+          <button type="button" title="取消回复" aria-label="取消回复" onClick={onCancelReply}><X size={13} /></button>
+        </div>}
         {disabledReason && (
           <div className="mb-2 rounded-lg border border-warn/30 bg-warn/[0.08] px-3 py-1.5 text-[11.5px] text-warn">
             {disabledReason}
@@ -190,8 +205,8 @@ export default function Composer({
               }}
               placeholder={
                 running
-                  ? "执行中：可输入补充，总指挥会在下一步前读到…"
-                  : "描述你的任务，或 @ 一位成员…"
+                  ? chatMode === "free" ? "继续聊天，成员会并行回应…" : "执行中：可输入补充，总指挥会在下一步前读到…"
+                  : chatMode === "free" ? "说点什么，或 @成员、@everyone…" : "描述你的任务，或 @ 一位成员…"
               }
               className="max-h-40 min-h-[48px] w-full resize-none bg-transparent text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-faint"
             />
@@ -218,16 +233,17 @@ export default function Composer({
             </button>
             <span className="ml-1 mr-auto hidden text-[10px] text-faint sm:block">Enter 发送 · Shift + Enter 换行</span>
             <span className="mr-auto sm:hidden" />
-            {running ? (
+            {running && (
               // CHT-03：执行进行中时发送按钮变为「停止」；插话改由 Enter 发送
               <button
                 onClick={onStop}
                 className="mb-0.5 flex h-7 items-center gap-1.5 rounded-lg bg-danger px-2.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
-                title="停止执行，已完成的步骤与产物会保留"
+                title={chatMode === "free" ? "停止当前消息的回应" : "停止执行，已完成的步骤与产物会保留"}
               >
                 <Square size={11} fill="currentColor" /> 停止
               </button>
-            ) : (
+            )}
+            {(!running || chatMode === "free") && (
               <button
                 onClick={send}
                 disabled={(!text.trim() && !attachments.length) || !!disabledReason || uploading}
@@ -245,14 +261,14 @@ export default function Composer({
           {running ? (
             <>
               <span className="flex items-center gap-1">
-                <Zap size={10} /> 执行中 Enter 发送 = 补充要求，下一轮读取并继续原任务
+                <Zap size={10} /> {chatMode === "free" ? "可继续发送消息，成员并行判断、并行回应" : "执行中 Enter 发送 = 补充要求，下一轮读取并继续原任务"}
               </span>
               <span>点「停止」结束执行，已完成步骤与产物保留</span>
             </>
           ) : (
             <>
               <span className="flex items-center gap-1">
-                <Zap size={10} /> 默认发给总指挥
+                <Zap size={10} /> {chatMode === "free" ? "成员自己决定是否回应 · @ 定向唤醒" : "默认发给总指挥"}
               </span>
               <span>
                 {delegationDepth === 1

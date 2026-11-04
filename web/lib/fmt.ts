@@ -21,6 +21,10 @@ export function bytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+export function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
 export function num(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }

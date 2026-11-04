@@ -105,6 +105,7 @@ def test_file_delete_removes_file_record(client, invite):
         class Ctx:
             workspace = ""
             file_path = ToolCtx.file_path
+            assert_lease = lambda self: None
 
         ctx = Ctx()
         ctx.db, ctx.user_id, ctx.chat_id = db, user_id, chat_id

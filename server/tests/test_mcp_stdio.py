@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import pytest
 from pathlib import Path
 
 from app.core.config import DATA_DIR
@@ -40,6 +41,19 @@ def _fake_script() -> str:
     path = Path(DATA_DIR) / "fake_mcp_stdio.py"
     path.write_text(FAKE_STDIO, encoding="utf-8")
     return str(path)
+
+
+@pytest.fixture(autouse=True)
+def _enable_trusted_stdio(monkeypatch):
+    from app.api import mcp as api_mcp
+    from app.tools import mcp
+
+    admins = {"mcp-stdio@test.dev", "mcp-import@test.dev"}
+    monkeypatch.setattr(api_mcp, "MCP_STDIO_ENABLED", True)
+    monkeypatch.setattr(api_mcp, "ADMIN_EMAILS", admins)
+    monkeypatch.setattr(mcp, "MCP_STDIO_ENABLED", True)
+    monkeypatch.setattr(mcp, "ADMIN_EMAILS", admins)
+    monkeypatch.setattr(mcp, "MCP_STDIO_ALLOWED_COMMANDS", [[sys.executable, _fake_script()]])
 
 
 def test_stdio_list_and_call():

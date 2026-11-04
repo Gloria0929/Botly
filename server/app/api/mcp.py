@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.tools import mcp
+from app.core.config import ADMIN_EMAILS, MCP_STDIO_ENABLED
 from app.core.db import get_db
 from app.core.deps import current_user, owned_or_404
 from app.core.models import Bot, McpServer, Skill, User, now
@@ -122,10 +123,16 @@ def _check(level: str) -> None:
         raise HTTPException(400, "权限级别只能是 L1 / L2 / L3")
 
 
-def _validate_transport(transport: str, url: str, command: str | None) -> None:
+def _validate_transport(transport: str, url: str, command: str | None, args: list | None = None) -> None:
+    if transport not in ("http", "stdio"):
+        raise HTTPException(400, "传输类型只能是 http 或 stdio")
     if transport == "stdio":
-        if not command or not command.strip():
-            raise HTTPException(400, "stdio 传输需要填写启动命令")
+        if not MCP_STDIO_ENABLED:
+            raise HTTPException(403, "MCP stdio 传输已禁用")
+        try:
+            mcp.validate_stdio(command, args)
+        except mcp.McpError as exc:
+            raise HTTPException(400, str(exc))
     else:
         if not url or not url.strip():
             raise HTTPException(400, "HTTP 传输需要填写 MCP 地址")
@@ -133,6 +140,11 @@ def _validate_transport(transport: str, url: str, command: str | None) -> None:
             mcp._guard_url(url)
         except mcp.McpError as exc:
             raise HTTPException(400, str(exc))
+
+
+def _authorize_stdio(transport: str, user: User) -> None:
+    if transport == "stdio" and user.email.lower() not in ADMIN_EMAILS:
+        raise HTTPException(403, "仅管理员可配置 MCP stdio 服务")
 
 
 async def _create_from_spec(db: Session, user: User, name: str, spec: dict) -> McpServer:
@@ -161,8 +173,9 @@ async def _create_from_spec(db: Session, user: User, name: str, spec: dict) -> M
 
     level = str(spec.get("level") or "L3").upper()
     _check(level)
+    _authorize_stdio(transport, user)
     enabled = bool(spec.get("enabled", True))
-    _validate_transport(transport, url, command)
+    _validate_transport(transport, url, command, args)
 
     server = McpServer(
         user_id=user.id,
@@ -235,7 +248,8 @@ async def create_server(
     payload: McpIn, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     _check(payload.level)
-    _validate_transport(payload.transport, payload.url, payload.command)
+    _authorize_stdio(payload.transport, user)
+    _validate_transport(payload.transport, payload.url, payload.command, payload.args)
     name = payload.name.strip()
     if db.scalar(
         select(McpServer).where(McpServer.user_id == user.id, McpServer.name == name)
@@ -304,11 +318,13 @@ async def update_server(
     if payload.env is not None:
         server.env = payload.env
         reprobe = True
+    _authorize_stdio(server.transport or "http", user)
     # 传输相关的必填校验（用合并后的最新值）
     _validate_transport(
         server.transport or "http",
         payload.url if payload.url is not None else server.url,
         payload.command if payload.command is not None else server.command,
+        server.args,
     )
     if payload.token is not None:
         if payload.token:
@@ -330,6 +346,8 @@ async def test_server(
     server_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     server = owned_or_404(db, McpServer, server_id, user.id)
+    _authorize_stdio(server.transport or "http", user)
+    _validate_transport(server.transport or "http", server.url, server.command, server.args)
     await _refresh(server)
     db.flush()
     return {

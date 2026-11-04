@@ -27,12 +27,10 @@ _BODY_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
 def _client_ip(scope) -> str:
-    headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope.get("headers") or []}
-    fwd = headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    client = scope.get("client")
-    return client[0] if client else "unknown"
+    from starlette.requests import Request
+    from app.core.deps import client_ip
+
+    return client_ip(Request(scope))
 
 
 def _headers(scope) -> dict[str, str]:

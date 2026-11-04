@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Gauge, Loader2, ShieldCheck, Workflow, X } from "lucide-react";
 import Modal from "@/components/ui/Modal";
+import Select from "@/components/ui/Select";
 import { api, toastError, errText } from "@/lib/api";
 import type { Chat } from "@/lib/types";
 import { toast } from "@/lib/ui";
@@ -150,6 +151,38 @@ export default function ChatSettings({
       width="max-w-lg"
     >
       <div className="space-y-5">
+        <div>
+          <label className="label">群聊模式</label>
+          <div className="grid grid-cols-2 gap-2">
+            {([['task', '任务模式', '总指挥拆解、成员执行'], ['free', '自由群聊', '成员自己判断、互相接话']] as const).map(([value, label, desc]) => (
+              <button key={value} disabled={!!busy} onClick={() => patch({ mode: value }, "chatMode", "已更新群聊模式")}
+                className={`rounded-lg border px-3 py-2 text-left ${value === (chat.mode || 'task') ? 'border-accent/50 bg-accent/[0.08]' : 'border-line'}`}>
+                <span className="block text-[12.5px] font-medium">{label}</span>
+                <span className="mt-1 block text-[10.5px] text-faint">{desc}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        {chat.mode === "free" && <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div><span className="label">每条消息最多发言人数</span>
+              <Select ariaLabel="每条消息最多发言人数" value={String(chat.max_speakers ?? 3)} disabled={!!busy}
+                onChange={(value) => patch({ max_speakers: Number(value) }, "speakers", "已更新发言人数") }
+                options={[1, 2, 3, 4, 5, 6].map((n) => ({ value: String(n), label: `${n} 人` }))} />
+            </div>
+            <div><span className="label">接话轮数</span>
+              <Select ariaLabel="接话轮数" value={String(chat.max_rounds ?? 2)} disabled={!!busy}
+                onChange={(value) => patch({ max_rounds: Number(value) }, "rounds", "已更新接话轮数") }
+                options={[{ value: "1", label: "1 轮" }, { value: "2", label: "2 轮" }]} />
+            </div>
+          </div>
+          <label className="flex cursor-pointer items-center gap-2 text-[12px]">
+            <input type="checkbox" checked={chat.muted ?? false} disabled={!!busy}
+              onChange={(e) => patch({ muted: e.target.checked }, "muted", e.target.checked ? "已静音，@ 仍可唤醒成员" : "已恢复主动发言")}
+              className="accent-[var(--accent)]" />静音：成员不主动发言，@ 和定向回复仍生效
+          </label>
+          <p className="text-[10.5px] leading-relaxed text-faint">人数只是上限，不按名额预先挑一组成员，也不要求每条消息凑满。@everyone 通知全体成员，每人最多一次；轮次限制成员间的接话。</p>
+        </div>}
         {error && (
           <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
             {error}

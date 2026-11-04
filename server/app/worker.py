@@ -8,9 +8,12 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import uuid
+import time
 from datetime import timedelta
 
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.orm import aliased
 from app.core import redis_bus
 from app.services.alerts import check_alerts
 from app.services.approval_email import deliver_pending
@@ -21,6 +24,7 @@ from app.core.config import (
     MAX_CONCURRENT_RUNS_PER_USER,
     WORKER_CONCURRENCY,
     WORKER_LEASE_SECONDS,
+    WORKER_SHUTDOWN_TIMEOUT,
 )
 from app.core.db import IS_SQLITE, init_db, session_scope
 from app.services.maintenance import expire_overdue, prune_expired
@@ -31,10 +35,12 @@ from app.agent.orchestrator import RunExecutor, emit_run_status, execute_run
 log = get_logger("worker")
 
 RECONCILE_INTERVAL = 5.0
+FREE_CHAT_RECONCILE_INTERVAL = 0.25
 PRUNE_INTERVAL = 3600.0
 _stop = False
 _last_prune = 0.0
 _last_alert_check = 0.0
+_owned_runs: dict[str, tuple[str, int]] = {}
 
 
 def _handle_stop(*_args):
@@ -42,7 +48,57 @@ def _handle_stop(*_args):
     _stop = True
 
 
-def _wake_waiting_parents() -> list[str]:
+async def _shutdown(running, terminal_tasks, mail_task) -> None:
+    """执行、终端、邮件共用退出预算，取消后留出时间落盘并归还执行租约。"""
+    tasks = set(running.values()) | set(terminal_tasks.values())
+    if mail_task is not None:
+        tasks.add(mail_task)
+    if not tasks:
+        return
+    deadline = time.monotonic() + WORKER_SHUTDOWN_TIMEOUT
+    cleanup = min(1.0, WORKER_SHUTDOWN_TIMEOUT / 4)
+    _, pending = await asyncio.wait(tasks, timeout=max(0.0, WORKER_SHUTDOWN_TIMEOUT - cleanup))
+    owners = {rid: _owned_runs[rid] for rid, task in running.items()
+              if task in pending and rid in _owned_runs}
+    for task in pending:
+        task.cancel()
+    if pending:
+        _, remaining = await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
+        if remaining:
+            log.warning("退出清理超时，仍有 %d 个后台任务等待取消", len(remaining))
+    await asyncio.gather(*(task for task in tasks if task.done()), return_exceptions=True)
+    if owners:
+        await asyncio.to_thread(_requeue_owned_runs, owners)
+
+
+def _run_prune() -> None:
+    with session_scope() as db:
+        prune_expired(db)
+
+
+def _run_alert_check() -> None:
+    with session_scope() as db:
+        check_alerts(db)
+
+
+def _requeue_owned_runs(owners: dict[str, tuple[str, int]]) -> None:
+    if not owners:
+        return
+    with session_scope() as db:
+        for run_id, (worker_id, lease_token) in owners.items():
+            run = db.scalar(select(Run).where(
+                Run.id == run_id, Run.status == "running", Run.worker_id == worker_id,
+                Run.lease_token == lease_token,
+            ))
+            if not run:
+                continue
+            run.status = "queued"
+            run.lease_until = None
+            run.worker_id = None
+            emit_run_status(db, run)
+
+
+def _wake_waiting_parents(free_only: bool = False) -> list[str]:
     """RUN-12：并行子执行全部结束后，把 waiting_children 的父执行重新排队。
 
     子执行结束时也会主动唤醒父执行，但进程崩溃/停机可能错过那一次；这里是
@@ -50,9 +106,10 @@ def _wake_waiting_parents() -> list[str]:
     """
     woke: list[str] = []
     with session_scope() as db:
-        parents = db.scalars(
-            select(Run).where(Run.status == "waiting_children")
-        ).all()
+        query = select(Run).where(Run.status == "waiting_children")
+        if free_only:
+            query = query.where(Run.kind == "free", Run.parent_run_id.is_(None))
+        parents = db.scalars(query).all()
         for parent in parents:
             active = db.scalar(
                 select(func.count(Run.id)).where(
@@ -60,7 +117,7 @@ def _wake_waiting_parents() -> list[str]:
                     Run.status.in_(("queued", "running", "waiting")),
                 )
             )
-            if active:
+            if active and not (parent.kind == "free" and RunExecutor(parent.id)._free_ready(db, parent)):
                 continue
             parent.status = "queued"
             db.flush()
@@ -74,7 +131,7 @@ def _recover_and_collect() -> list[str]:
     picked: list[str] = []
     with session_scope() as db:
         expire_overdue(db)
-        db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < now() - timedelta(minutes=15)))
+        db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < now() - timedelta(hours=1)))
         stale = db.scalars(
             select(Run).where(
                 Run.status == "running",
@@ -85,7 +142,7 @@ def _recover_and_collect() -> list[str]:
         for r in stale:
             recovered = db.execute(update(Run).where(
                 Run.id == r.id, Run.status == "running", Run.lease_until < now(),
-            ).values(status="queued", lease_until=None))
+                ).values(status="queued", lease_until=None, worker_id=None))
             if recovered.rowcount:
                 log.info("回收僵尸执行 run=%s", r.id)
 
@@ -108,8 +165,20 @@ def _recover_and_collect() -> list[str]:
                 if healed.rowcount:
                     log.info("自愈卡住的审批执行 run=%s approval=%s", r.id, ap.id)
 
+        active_user_run = aliased(Run)
+        user_running = select(func.count(active_user_run.id)).where(
+            active_user_run.user_id == Run.user_id,
+            active_user_run.status == "running",
+            active_user_run.parent_run_id.is_(None),
+            active_user_run.kind.not_in(("chime", "free")),
+        ).correlate(Run).scalar_subquery()
         queued = db.scalars(
-            select(Run).where(Run.status == "queued").order_by(Run.created_at).limit(50)
+            select(Run).where(
+                Run.status == "queued",
+                (Run.kind.in_(("chime", "free"))) | (Run.parent_run_id.isnot(None)) | (
+                    user_running < MAX_CONCURRENT_RUNS_PER_USER
+                ),
+            ).order_by(Run.kind != "chime", Run.created_at).limit(50)
         ).all()
         for r in queued:
             if r.parent_run_id:
@@ -117,20 +186,11 @@ def _recover_and_collect() -> list[str]:
                 # 子任务同时跑，按顶层执行的上限卡住会让批次永远起不来。
                 picked.append(r.id)
                 continue
-            running = db.scalar(
-                select(func.count(Run.id)).where(
-                    Run.user_id == r.user_id,
-                    Run.status == "running",
-                    Run.parent_run_id.is_(None),
-                )
-            )
-            if (running or 0) >= MAX_CONCURRENT_RUNS_PER_USER:
-                continue
             picked.append(r.id)
     return picked
 
 
-def _claim(run_id: str) -> bool:
+def _claim(run_id: str, worker_id: str) -> int:
     """容量检查与原子认领共用数据库锁，多 Worker 不会重复认领或超出并发上限。"""
     with session_scope() as db:
         # 各 Worker 的容量检查和认领放在同一把数据库锁内，避免同时越过配额。
@@ -141,63 +201,103 @@ def _claim(run_id: str) -> bool:
         run = db.get(Run, run_id)
         if not run or run.status != "queued":
             return False
-        total = db.scalar(select(func.count(Run.id)).where(Run.status == "running")) or 0
+        total = db.scalar(select(func.count(Run.id)).where(
+            Run.status == "running",
+        )) or 0
         if total >= MAX_CONCURRENT_RUNS:
             return False
         # 子执行只受全局并发限制，不再占「每用户并发」的名额（RUN-12）
-        if not run.parent_run_id:
+        if not run.parent_run_id and run.kind not in ("free", "chime"):
             personal = db.scalar(
                 select(func.count(Run.id)).where(
                     Run.status == "running",
                     Run.user_id == run.user_id,
                     Run.parent_run_id.is_(None),
+                    Run.kind.not_in(("chime", "free")),
                 )
             ) or 0
             if personal >= MAX_CONCURRENT_RUNS_PER_USER:
                 return False
+        lease_token = (run.lease_token or 0) + 1
         res = db.execute(
             update(Run)
             .where(Run.id == run_id, Run.status == "queued")
             .values(
                 status="running",
                 lease_until=now() + timedelta(seconds=WORKER_LEASE_SECONDS),
+                worker_id=worker_id,
+                lease_token=lease_token,
             )
         )
-        return res.rowcount == 1
+        return lease_token if res.rowcount == 1 else 0
 
 
-async def _extend_lease(run_id: str) -> None:
+def _extend_lease(run_id: str, worker_id: str, lease_token: int) -> bool:
     with session_scope() as db:
-        run = db.get(Run, run_id)
-        if run and run.status == "running":
-            run.lease_until = now() + timedelta(seconds=WORKER_LEASE_SECONDS)
-            db.flush()
+        result = db.execute(update(Run).where(
+            Run.id == run_id, Run.status == "running", Run.worker_id == worker_id,
+            Run.lease_token == lease_token,
+            Run.lease_until > now(),
+        ).values(lease_until=now() + timedelta(seconds=WORKER_LEASE_SECONDS)))
+        return result.rowcount == 1
 
 
-async def _heartbeat(run_id: str) -> None:
+def _pending_free_runs() -> list[str]:
+    with session_scope() as db:
+        return list(db.scalars(select(Run.id).where(Run.status == "queued", Run.kind.in_(("free", "chime")))
+                               .order_by(Run.created_at).limit(50)))
+
+
+async def _heartbeat(run_id: str, worker_id: str, lease_token: int, lost: asyncio.Event) -> None:
+    failures = 0
     while True:
         await asyncio.sleep(max(10, WORKER_LEASE_SECONDS // 3))
         try:
-            await _extend_lease(run_id)
+            owned = await asyncio.to_thread(_extend_lease, run_id, worker_id, lease_token)
+            failures = 0
+            if not owned:
+                lost.set()
+                return
         except Exception:  # noqa: BLE001
-            pass
+            failures += 1
+            log.exception("执行租约续期失败 run=%s attempt=%d", run_id, failures)
+            if failures >= 2:
+                lost.set()
+                return
 
 
 async def process_one(run_id: str) -> None:
-    if not _claim(run_id):
+    worker_id = uuid.uuid4().hex
+    lease_token = await asyncio.to_thread(_claim, run_id, worker_id)
+    if not lease_token:
         log.debug("认领跳过 run=%s（已被其他 Worker 或状态不允许）", run_id)
         return
+    _owned_runs[run_id] = (worker_id, lease_token)
     run_id_var.set(run_id)
     log.info("开始执行 run=%s", run_id)
-    hb = asyncio.create_task(_heartbeat(run_id))
+    lost = asyncio.Event()
+    hb = asyncio.create_task(_heartbeat(run_id, worker_id, lease_token, lost))
+    execution = asyncio.create_task(execute_run(run_id, worker_id, lease_token))
     try:
-        await execute_run(run_id)
+        done, _ = await asyncio.wait((execution, hb), return_when=asyncio.FIRST_COMPLETED)
+        if hb in done and lost.is_set():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+            log.error("执行租约丢失，已中止本地执行 run=%s", run_id)
+            return
+        await execution
         log.info("执行结束 run=%s", run_id)
     except Exception as exc:
         log.exception("执行异常 run=%s: %s", run_id, type(exc).__name__)
-        RunExecutor(run_id)._finish_failed(f"执行初始化异常：{type(exc).__name__}")
+        await asyncio.to_thread(
+            RunExecutor(run_id, worker_id, lease_token)._finish_failed,
+            f"执行初始化异常：{type(exc).__name__}",
+        )
     finally:
         hb.cancel()
+        execution.cancel() if not execution.done() else None
+        await asyncio.gather(hb, execution, return_exceptions=True)
+        _owned_runs.pop(run_id, None)
         run_id_var.set("-")
 
 
@@ -213,12 +313,11 @@ async def main(once: bool = False) -> None:
         WORKER_CONCURRENCY,
     )
     last_reconcile = 0.0
-    import time
-
+    last_free_reconcile = 0.0
     if once:
-        _wake_waiting_parents()
+        await asyncio.to_thread(_wake_waiting_parents)
         run_id = await redis_bus.dequeue(timeout=2)
-        pending = [run_id] if run_id else _recover_and_collect()
+        pending = [run_id] if run_id else await asyncio.to_thread(_recover_and_collect)
         if pending:
             await process_one(pending[0])
         return
@@ -226,6 +325,14 @@ async def main(once: bool = False) -> None:
     running: dict[str, asyncio.Task] = {}
     terminal_tasks: dict[str, asyncio.Task] = {}
     mail_task: asyncio.Task | None = None
+
+    async def schedule_pending(pending_runs):
+        for rid in pending_runs:
+            if rid in running:
+                continue
+            if len(running) >= WORKER_CONCURRENCY:
+                continue
+            running[rid] = asyncio.create_task(process_one(rid))
     try:
         while not _stop:
             for cid, task in list(terminal_tasks.items()):
@@ -243,10 +350,15 @@ async def main(once: bool = False) -> None:
                     except Exception as exc:
                         log.exception("执行异常 run=%s: %s", rid, type(exc).__name__)
             # 清理任务与过期交互不再被一次长执行阻塞。
+            if time.monotonic() - last_free_reconcile >= FREE_CHAT_RECONCILE_INTERVAL:
+                last_free_reconcile = time.monotonic()
+                for rid in await asyncio.to_thread(_wake_waiting_parents, True):
+                    await asyncio.to_thread(redis_bus.enqueue, rid)
+                await schedule_pending(await asyncio.to_thread(_pending_free_runs))
             if time.time() - last_reconcile > RECONCILE_INTERVAL:
                 last_reconcile = time.time()
                 # 兼容旧版本遗留的 queued 手动命令；新命令由 API 直接执行。
-                for cid in terminal.pending():
+                for cid in await asyncio.to_thread(terminal.pending):
                     if cid not in terminal_tasks and len(terminal_tasks) < 2:
                         terminal_tasks[cid] = asyncio.create_task(terminal.execute(cid, claim=True))
                 if mail_task is None or mail_task.done():
@@ -259,38 +371,28 @@ async def main(once: bool = False) -> None:
                 # 事件与调用日志的过期清理按小时执行，避免每轮扫描整表。
                 if time.time() - _last_prune > PRUNE_INTERVAL:
                     _last_prune = time.time()
-                    with session_scope() as db:
-                        prune_expired(db)
+                    await asyncio.to_thread(_run_prune)
                 # 8.6 告警：队列积压 / 执行卡死 / 失败率，默认每分钟一次
                 if time.time() - _last_alert_check > ALERT_CHECK_INTERVAL:
                     _last_alert_check = time.time()
-                    with session_scope() as db:
-                        check_alerts(db)
+                    await asyncio.to_thread(_run_alert_check)
                 # 直接认领数据库里的 queued 执行，而不是往 Redis 再塞一份。
                 # 之前每 5 秒重复 LPUSH 会让队列无限膨胀，Redis 断开时
                 # 还依赖出队失败才走数据库路径；_claim 本身是原子的，直接跑更稳。
                 # RUN-12：先唤醒「子任务都跑完」的父执行，否则它会一直等下去。
-                _wake_waiting_parents()
-                for rid in _recover_and_collect():
-                    if rid in running:
-                        continue
-                    if len(running) >= WORKER_CONCURRENCY:
-                        break
-                    running[rid] = asyncio.create_task(process_one(rid))
+                await asyncio.to_thread(_wake_waiting_parents)
+                pending_runs = await asyncio.to_thread(_recover_and_collect)
+                await schedule_pending(pending_runs)
             if len(running) >= WORKER_CONCURRENCY:
                 await asyncio.wait(list(running.values()), timeout=0.5, return_when=asyncio.FIRST_COMPLETED)
                 continue
             run_id = await redis_bus.dequeue(timeout=1)
             if run_id and run_id not in running:
-                running[run_id] = asyncio.create_task(process_one(run_id))
+                if len(running) < WORKER_CONCURRENCY:
+                    running[run_id] = asyncio.create_task(process_one(run_id))
             await asyncio.sleep(0.1)
     finally:
-        if running:
-            await asyncio.gather(*running.values(), return_exceptions=True)
-        if mail_task is not None:
-            await asyncio.gather(mail_task, return_exceptions=True)
-        if terminal_tasks:
-            await asyncio.gather(*terminal_tasks.values(), return_exceptions=True)
+        await _shutdown(running, terminal_tasks, mail_task)
     log.info("Worker 退出")
 
 

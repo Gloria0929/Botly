@@ -9,6 +9,7 @@ from app.core.db import SessionLocal, session_scope
 from app.core.events import emit
 from app.core.models import Bot, TerminalCommand, User, now
 from app.sandbox import runtime
+from app.sandbox import files as sandbox_files
 from app.tools.registry import UNTRUSTED_PREFIX
 
 
@@ -40,7 +41,7 @@ def create(user_id, chat_id, command, kind="command", language="bash", bot_id=No
         return row.id
 
 
-async def execute(command_id, claim=False):
+def _prepare(command_id, claim):
     with session_scope() as db:
         row = db.get(TerminalCommand, command_id)
         if not row:
@@ -59,7 +60,13 @@ async def execute(command_id, claim=False):
                 changed(db, row)
                 return row.output
             changed(db, row)
-        values = (row.user_id, row.chat_id, row.command, row.language, row.bot_id, row.run_id, row.kind)
+        return (row.user_id, row.chat_id, row.command, row.language, row.bot_id, row.run_id, row.kind)
+
+
+async def execute(command_id, claim=False):
+    values = await asyncio.to_thread(_prepare, command_id, claim)
+    if not isinstance(values, tuple):
+        return values
     user_id, chat_id, command, language, bot_id, run_id, kind = values
     try:
         if kind == "code":
@@ -68,23 +75,26 @@ async def execute(command_id, claim=False):
             result = await runtime.run_command(user_id, chat_id, command, bot_id=bot_id, run_id=run_id)
     except BaseException as exc:
         result = "执行已中断" if isinstance(exc, asyncio.CancelledError) else f"沙箱执行失败：{type(exc).__name__}"
-        with session_scope() as db:
-            row = db.get(TerminalCommand, command_id)
-            if row:
-                row.status, row.output, row.ended_at = "failed", result, now()
-                changed(db, row)
+        if not isinstance(exc, asyncio.CancelledError):
+            await asyncio.to_thread(sandbox_files.refresh_quota, user_id)
+        await asyncio.to_thread(_finish, command_id, result, failed=True)
         if isinstance(exc, asyncio.CancelledError):
             raise
         return result
+    await asyncio.to_thread(sandbox_files.refresh_quota, user_id)
+    await asyncio.to_thread(_finish, command_id, result)
+    return result
+
+
+def _finish(command_id, result, failed=False):
     with session_scope() as db:
         row = db.get(TerminalCommand, command_id)
         if row:
             code = re.search(r"退出码\s+(-?\d+)", result)
-            row.status = "failed" if "失败：" in result or "未接入" in result or (code and code[1] != "0") else "completed"
+            row.status = "failed" if failed or "失败：" in result or "未接入" in result or (code and code[1] != "0") else "completed"
             row.output = result.removeprefix(UNTRUSTED_PREFIX)[:30000]
             row.ended_at, row.lease_until = now(), None
             changed(db, row)
-    return result
 
 
 def pending():

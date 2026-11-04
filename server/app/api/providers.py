@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.agent.capabilities import CAPABILITY_KEYS, apply_capability, hard_save_block_reason
 from app.core.db import get_db
 from app.core.deps import current_user, owned_or_404
-from app.agent.llm import list_models, probe_capabilities
+from app.agent.llm import LLMError, _guard_base_url, list_models, probe_capabilities
 from app.core.models import Bot, Provider, User, now
 from app.core.security import decrypt_secret, encrypt_secret
 from app.agent.serializers import provider_out
@@ -28,6 +28,13 @@ router = APIRouter(prefix="/providers", tags=["providers"])
 # 避免用户在设置页点一下就把账单点爆。
 PROBE_MAX_MODELS = 12
 PROBE_CONCURRENCY = 4
+
+
+async def _validate_base_url(url: str) -> None:
+    try:
+        await _guard_base_url(url)
+    except LLMError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 
@@ -157,6 +164,7 @@ async def create_provider(
     base_url = (payload.base_url or vendor.base_url).strip()
     if not base_url:
         raise HTTPException(400, "请填写 base_url")
+    await _validate_base_url(base_url)
     if vendor.id != "custom" and not payload.api_key:
         raise HTTPException(400, "请填写 API Key")
 
@@ -233,9 +241,10 @@ async def update_provider(
         p.name = payload.name
     if payload.logo is not None:
         p.logo = payload.logo or None
-    base_url_changed = payload.base_url is not None and payload.base_url != p.base_url
+    base_url_changed = payload.base_url is not None and payload.base_url.strip() != p.base_url
     if base_url_changed:
-        p.base_url = payload.base_url
+        await _validate_base_url(payload.base_url.strip())
+        p.base_url = payload.base_url.strip()
         p.status = "unchecked"
     key_changed = bool(payload.api_key)
     if payload.api_key:
@@ -261,6 +270,7 @@ async def update_provider(
     # MOD-02：改了 base_url 或 Key 等于重新登记接入，与创建一样做保存校验，
     # 避免绕过创建时的连通性 / 流式校验。
     if p.kind == "openai" and (base_url_changed or key_changed):
+        await _validate_base_url(p.base_url)
         model = (p.models or [{}])[0].get("name")
         if model:
             key = decrypt_secret(p.api_key_encrypted)
@@ -308,6 +318,7 @@ async def refresh_models(
     p = owned_or_404(db, Provider, provider_id, user.id)
     if p.kind == "mock":
         return {"provider": provider_out(p), "detected": True, "message": "演示模型无需刷新"}
+    await _validate_base_url(p.base_url)
     key = decrypt_secret(p.api_key_encrypted)
     detected, names, message = await list_models(base_url=p.base_url, api_key=key)
     if detected:
@@ -342,6 +353,7 @@ async def test_provider(
             "tool_calling": True,
             "provider": provider_out(p),
         }
+    await _validate_base_url(p.base_url)
     model = (p.models or [{}])[0].get("name")
     if not model:
         raise HTTPException(400, "接入信息不完整，请先刷新模型列表")
@@ -376,6 +388,7 @@ async def probe_models(
     p = owned_or_404(db, Provider, provider_id, user.id)
     if p.kind == "mock":
         return {"results": [], "provider": provider_out(p), "message": "演示模型无需检测"}
+    await _validate_base_url(p.base_url)
     known = [m.get("name") for m in (p.models or []) if m.get("name")]
     wanted = (payload.models if payload and payload.models else None) or known
     targets = [n for n in wanted if n in known][:PROBE_MAX_MODELS]

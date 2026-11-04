@@ -4,6 +4,8 @@ export type Bot = {
   avatar: string;
   role: string;
   system_prompt: string;
+  persona?: string;
+  proactivity?: number;
   provider_id: string | null;
   model: string | null;
   temperature: number;
@@ -13,6 +15,7 @@ export type Bot = {
   deleted: boolean;
   display_name: string;
   status?: "idle" | "working" | "waiting";
+  typing_run_ids?: string[];
 };
 
 export type BotTemplate = {
@@ -189,6 +192,9 @@ export type Task = {
 };
 
 export type Run = {
+  free_phase?: "judging" | "responding" | "idle" | null;
+  kind?: "task" | "free" | "chime";
+  round?: number;
   id: string;
   chat_id: string;
   status:
@@ -268,6 +274,10 @@ export type Branch = {
 };
 
 export type Chat = {
+  mode?: "task" | "free";
+  max_speakers?: number;
+  max_rounds?: number;
+  muted?: boolean;
   id: string;
   name: string;
   supervisor_bot_id: string | null;
@@ -280,6 +290,7 @@ export type Chat = {
   last_active_at: string;
   main_thread_id?: string | null;
   active_run: Run | null;
+  active_runs?: Run[];
   last_run?: Run | null;
   pending_approvals?: { id: string; tool: string; bot_name: string }[];
   tasks: Task[];

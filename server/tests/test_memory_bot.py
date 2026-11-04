@@ -10,7 +10,8 @@ import asyncio
 
 from app.core.db import SessionLocal
 from app.core.models import Bot, Chat, Memory, MemoryCandidate, Run
-from app.agent.orchestrator import RunExecutor, ToolCtx, _memory_scope_for
+from app.agent.orchestrator import RunExecutor, ToolCtx
+from app.agent.summary_memory import _memory_scope_for
 from app.tools.registry import MEMORY_TOOL, _memory_save, tools_for_bot
 from tests.conftest import register, setup_workspace
 

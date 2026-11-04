@@ -46,9 +46,12 @@ async def upload_image(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    raw = await file.read()
-    if len(raw) > MAX_BYTES:
-        raise HTTPException(400, "图片不能超过 2 MB")
+    buffer = bytearray()
+    while chunk := await file.read(64 * 1024):
+        if len(buffer) + len(chunk) > MAX_BYTES:
+            raise HTTPException(400, "图片不能超过 2 MB")
+        buffer.extend(chunk)
+    raw = bytes(buffer)
     if not raw:
         raise HTTPException(400, "文件为空")
 

@@ -31,6 +31,7 @@ def main():
         BOTLY_REDIS_URL="redis://127.0.0.1:6399/0", BOTLY_REDIS_PREFIX=database,
         BOTLY_SANDBOX_PROVIDER="none", BOTLY_SMTP_HOST="", BOTLY_MAIL_DEV="1",
         BOTLY_SECRET_KEY="isolated-multiuser-test-only", BOTLY_WORKER_CONCURRENCY="20",
+        BOTLY_ENV="development",
         BOTLY_MAX_CONCURRENT_RUNS="20", BOTLY_LOG_LEVEL="WARNING", BOTLY_LOG_BODY="0")
     logs = open("/private/tmp/botly-multiuser-services.log", "w")
     processes = []

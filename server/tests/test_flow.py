@@ -146,7 +146,7 @@ def test_invalid_and_exhausted_invite(client, invite):
         "/api/auth/register",
         json={"email": "x1@test.dev", "password": "password-123", "invite_code": "NOPE-0000"},
     )
-    assert r.status_code == 400 and "无效" in r.json()["detail"]
+    assert r.status_code == 400 and r.json()["detail"] == "无法注册，请确认邮箱和邀请码"
 
     from app.core.db import SessionLocal
     from app.core.models import InviteCode
@@ -159,7 +159,7 @@ def test_invalid_and_exhausted_invite(client, invite):
         "/api/auth/register",
         json={"email": "x2@test.dev", "password": "password-123", "invite_code": "USED-UP-0001"},
     )
-    assert r.status_code == 400 and "用完" in r.json()["detail"]
+    assert r.status_code == 400 and r.json()["detail"] == "无法注册，请确认邮箱和邀请码"
 
 
 def test_approval_pause_and_resume(client, invite):
@@ -1158,6 +1158,7 @@ def test_model_timeout_has_a_visible_reason(monkeypatch):
 
     monkeypatch.setattr(llm, "_stream_openai", timed_out)
     monkeypatch.setattr(llm, "LLM_MAX_RETRIES", 0)
+    monkeypatch.setattr(llm, "_check_url", lambda url: "93.184.216.34")
 
     async def invoke():
         async for _ in llm.stream_chat(kind="openai", base_url="http://test/v1", api_key="", model="test", messages=[]):

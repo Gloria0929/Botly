@@ -23,6 +23,8 @@ class BotIn(BaseModel):
     avatar: str = "bot"
     role: str = "通用助手"
     system_prompt: str = ""
+    persona: str = Field(default="", max_length=4000)
+    proactivity: float = Field(default=0.5, ge=0, le=1)
     provider_id: str | None = None
     model: str | None = None
     temperature: float = 0.4
@@ -35,6 +37,8 @@ class BotPatch(BaseModel):
     avatar: str | None = None
     role: str | None = None
     system_prompt: str | None = None
+    persona: str = Field(default="", max_length=4000)
+    proactivity: float = Field(default=0.5, ge=0, le=1)
     provider_id: str | None = None
     model: str | None = None
     temperature: float | None = None
@@ -202,6 +206,10 @@ def delete_bot(bot_id: str, user: User = Depends(current_user), db: Session = De
     member_chats = list(
         db.scalars(select(ChatMember.chat_id).where(ChatMember.bot_id == bot.id)).all()
     )
+    for chat in db.scalars(select(Chat).where(Chat.id.in_(member_chats), Chat.mode == "free")):
+        count = len(list(db.scalars(select(ChatMember.bot_id).where(ChatMember.chat_id == chat.id))))
+        if count <= 2:
+            raise HTTPException(409, f"自由群聊「{chat.name}」至少保留 2 位成员，请先加入替代成员")
     bot.deleted_at = now()
     for m in db.scalars(select(ChatMember).where(ChatMember.bot_id == bot.id)).all():
         db.delete(m)

@@ -20,8 +20,9 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.core.config import MCP_ALLOW_LOCAL, MCP_MAX_RESULT_CHARS, MCP_MAX_TOOLS, MCP_TIMEOUT
-from app.core.models import McpServer
+from app.core.config import ADMIN_EMAILS, MCP_ALLOW_LOCAL, MCP_MAX_RESULT_CHARS, MCP_MAX_TOOLS, MCP_TIMEOUT, MCP_STDIO_ENABLED, MCP_STDIO_ALLOWED_COMMANDS
+from app.core.db import SessionLocal
+from app.core.models import McpServer, User
 from app.tools.registry import Tool, ToolError, UNTRUSTED_PREFIX, _check_url
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -106,7 +107,7 @@ def _parse_body(text: str, content_type: str) -> dict:
 async def _post(
         url: str, payload: dict, token: str | None, session_id: str | None = None
 ) -> tuple[dict, str | None]:
-    _guard_url(url)
+    await asyncio.to_thread(_guard_url, url)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -249,10 +250,30 @@ def _init_payload(msg_id: int) -> dict:
     }
 
 
+def validate_stdio(command: str | None, args: list | None) -> None:
+    if not MCP_STDIO_ENABLED:
+        raise McpError("MCP stdio 传输已禁用")
+    argv = [command, *(args or [])]
+    if not command or not os.path.isabs(command):
+        raise McpError("MCP stdio 命令必须使用绝对路径")
+    if any(not isinstance(arg, str) or re.search(r"[\x00\r\n;&|`$<>]", arg) for arg in argv):
+        raise McpError("MCP stdio 命令参数不能包含 shell 元字符")
+    if argv not in MCP_STDIO_ALLOWED_COMMANDS:
+        raise McpError("MCP stdio 命令及参数不在部署白名单中")
+
+
+def _guard_stdio_server(server: McpServer) -> None:
+    validate_stdio(server.command, server.args)
+    with SessionLocal() as db:
+        owner = db.get(User, server.user_id)
+        if not owner or owner.status != "active" or owner.email.lower() not in ADMIN_EMAILS:
+            raise McpError("仅管理员可运行 MCP stdio 服务")
+
+
 async def _spawn_stdio(command: str, args: list, env: dict):
-    full_env = dict(os.environ)
-    for k, v in (env or {}).items():
-        full_env[str(k)] = str(v)
+    validate_stdio(command, args)
+    full_env = {"PATH": os.defpath, "HOME": os.path.expanduser("~")}
+    full_env.update({str(k): str(v) for k, v in (env or {}).items()})
     cmd = [command, *(args or [])]
     try:
         return await asyncio.create_subprocess_exec(
@@ -335,8 +356,7 @@ async def _stdio_call(command: str, args: list, env: dict, remote_name: str, cal
 async def list_remote_tools(server: McpServer, token: str | None) -> list[dict]:
     """tools/list：返回 [{remote_name, description, parameters}]。"""
     if (server.transport or "http") == "stdio":
-        if not server.command:
-            raise McpError("stdio 传输需要填写启动命令")
+        await asyncio.to_thread(_guard_stdio_server, server)
         return await _stdio_list_tools(server.command, server.args or [], server.env or {})
     return await _http_list_tools(server.url, token)
 
@@ -345,8 +365,7 @@ async def call_remote_tool(
     server: McpServer, token: str | None, remote_name: str, args: dict
 ) -> str:
     if (server.transport or "http") == "stdio":
-        if not server.command:
-            raise McpError("stdio 传输需要填写启动命令")
+        await asyncio.to_thread(_guard_stdio_server, server)
         return await _stdio_call(server.command, server.args or [], server.env or {}, remote_name, args)
     return await _http_call(server.url, token, remote_name, args)
 
@@ -375,7 +394,15 @@ def tools_for_user(db: Session, user_id: str) -> list[Tool]:
         select(McpServer).where(McpServer.user_id == user_id, McpServer.enabled.is_(True))
     ).all()
     out: list[Tool] = []
+    owner = db.get(User, user_id)
     for server in servers:
+        if (server.transport or "http") == "stdio":
+            if not owner or owner.email.lower() not in ADMIN_EMAILS:
+                continue
+            try:
+                validate_stdio(server.command, server.args)
+            except McpError:
+                continue
         names: set[str] = set()
         for row in server.tools or []:
             if not isinstance(row, dict) or not row.get("remote_name"):

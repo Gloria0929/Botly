@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, Trash2, X } from "lucide-react";
 import { api, errText, toastError } from "@/lib/api";
-import { acceptMessageEvent, createMessageSync, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
+import { acceptMessageEvent, createMessageSync, mergeMessageDelta, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
+import { acquireChatEvents, type ChatEventSource } from "@/lib/chat-events";
 import Avatar from "@/components/ui/Avatar";
 import { useConfirm } from "@/components/ui/Confirm";
 import type { Bot, ChatFile, Message, Run, Task } from "@/lib/types";
 import { canRetryTask, taskCounts, teamStatus } from "@/lib/task-state";
-import { bytes, clock, num, timeAgo } from "@/lib/fmt";
+import { bytes, clock, fileName, num, timeAgo } from "@/lib/fmt";
 import { toast } from "@/lib/ui";
 
 import { ToolBlock } from "./cards";
@@ -84,7 +85,7 @@ export default function SidePanel({
     try {
       if (!await confirm({
         title: "删除产物？",
-        description: `将删除 ${file.path} 的文件和产物记录，此操作无法撤销。`,
+        description: `将删除 ${fileName(file.path)} 的文件和产物记录，此操作无法撤销。`,
         confirmText: "删除",
         danger: true,
       })) return;
@@ -274,7 +275,7 @@ export default function SidePanel({
             <div className="px-3 py-8 text-center text-[12px] leading-relaxed text-faint">
               暂无产物
               <br />
-              Agent 的交付文件会出现在这里
+              沙箱中的文件会出现在这里
             </div>
           )}
           {files.map((f) => (
@@ -284,7 +285,7 @@ export default function SidePanel({
             >
               <FileText size={14} className="shrink-0 text-accent" />
               <button onClick={() => setPreview(f)} className="min-w-0 flex-1 text-left">
-                <div className="truncate font-mono text-[12px]">{f.path}</div>
+                <div className="truncate font-mono text-[12px]" title={fileName(f.path)}>{fileName(f.path)}</div>
                 <div className="text-[10.5px] text-faint">
                   {bytes(f.size)} · {timeAgo(f.updated_at)}
                 </div>
@@ -301,7 +302,7 @@ export default function SidePanel({
                 disabled={!!deletingId}
                 className="p-1 text-faint hover:text-danger disabled:cursor-wait disabled:opacity-50"
                 title="删除产物"
-                aria-label={`删除产物 ${f.path}`}
+                aria-label={`删除产物 ${fileName(f.path)}`}
               >
                 {deletingId === f.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
               </button>
@@ -387,7 +388,8 @@ function TaskThread({ chatId, task, onBack, onRetry, busy = false }: {
 
   useEffect(() => {
     let alive = true;
-    let es: EventSource | null = null;
+    let es: ChatEventSource | null = null;
+    let releaseEvents: (() => void) | null = null;
     const sync = createMessageSync();
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     let refreshing = false;
@@ -422,7 +424,9 @@ function TaskThread({ chatId, task, onBack, onRetry, busy = false }: {
         sync.cursor = history.event_cursor;
         setHasMore(history.has_more);
         setDetail(current);
-        es = new EventSource(`/api/chats/${chatId}/events?after=${history.event_cursor}`);
+        const lease = acquireChatEvents(chatId, history.event_cursor);
+        releaseEvents = lease.release;
+        es = lease.source;
         es.onopen = () => { if (alive) { setError(""); refresh(); } };
         es.onerror = () => alive && setError("实时连接中断，正在重连…");
         es.addEventListener("message.created", (ev) => {
@@ -438,12 +442,19 @@ function TaskThread({ chatId, task, onBack, onRetry, busy = false }: {
         ["message.delta", "message.completed"].forEach((type) => es!.addEventListener(type, (ev) => {
           if (!alive) return;
           const p = JSON.parse((ev as MessageEvent).data);
+          if (p.thread_id !== task.thread_id) return;
           if (!acceptMessageEvent(sync, p.message_id, Number((ev as MessageEvent).lastEventId))) return;
-          setMsgs((prev) => prev.map((m) => m.id === p.message_id
-            && (type === "message.completed" || m.status === "streaming")
-            ? mergeMessageUpdate(m, { content: p.content, status: p.status || m.status,
-                type: p.type || m.type, meta: p.meta })
-            : m));
+          setMsgs((prev) => {
+            if (!prev.some((m) => m.id === p.message_id)) refresh();
+            return prev.map((m) => {
+              if (m.id !== p.message_id) return m;
+              const updated = type === "message.delta" ? mergeMessageDelta(m, p)
+                : mergeMessageUpdate(m, { content: p.content, status: p.status || m.status,
+                    type: p.type || m.type, meta: p.meta });
+              if (!updated) refresh();
+              return updated || m;
+            });
+          });
         }));
         es.addEventListener("message.deleted", (ev) => {
           if (!alive) return;
@@ -462,7 +473,7 @@ function TaskThread({ chatId, task, onBack, onRetry, busy = false }: {
       })
       .catch((e) => alive && setError(errText(e, "任务详情加载失败")))
       .finally(() => alive && setLoading(false));
-    return () => { alive = false; es?.close(); if (refreshTimer) clearTimeout(refreshTimer); };
+    return () => { alive = false; releaseEvents?.(); if (refreshTimer) clearTimeout(refreshTimer); };
   }, [chatId, task.id, task.thread_id, retry]);
 
   const loadMore = async () => {
@@ -540,6 +551,7 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
   const [content, setContent] = useState<string>("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
+  const name = fileName(file.path);
   const isImage = /\.(png|jpe?g|gif|webp|avif)$/i.test(file.path);
   const isPdf = /\.pdf$/i.test(file.path);
 
@@ -564,7 +576,7 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
     <section aria-label="产物预览" className="flex min-h-0 flex-1 flex-col overflow-hidden bg-panel">
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2.5">
           <button onClick={onClose} title="返回产物列表" aria-label="返回产物列表" className="shrink-0 p-1 text-faint hover:text-ink"><ChevronLeft size={15} /></button>
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={file.path}>{file.path}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={name}>{name}</span>
           <span className="text-[10.5px] text-faint">{bytes(file.size)}</span>
           {isHtml && (
             <div className="ml-auto flex items-center gap-0.5 rounded-lg bg-panel2 p-0.5">
@@ -595,13 +607,13 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
           >
             <Download size={14} />
           </a>
-          <button onClick={onDelete} disabled={deleteDisabled} title="删除产物" aria-label={`删除产物 ${file.path}`}
+          <button onClick={onDelete} disabled={deleteDisabled} title="删除产物" aria-label={`删除产物 ${name}`}
             className="shrink-0 p-1 text-faint hover:text-danger disabled:cursor-wait disabled:opacity-50">
             {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
           </button>
         </div>
-        {isImage ? <div className="min-h-0 flex-1 overflow-auto p-3"><img src={`/api/files/${file.id}/preview`} alt={file.path} className="h-auto max-w-full rounded" /></div> : isPdf ? (
-          <iframe title={file.path} src={`/api/files/${file.id}/preview`} className="min-h-0 w-full flex-1 border-0" />
+        {isImage ? <div className="min-h-0 flex-1 overflow-auto p-3"><img src={`/api/files/${file.id}/preview`} alt={name} className="h-auto max-w-full rounded" /></div> : isPdf ? (
+          <iframe title={name} src={`/api/files/${file.id}/preview`} className="min-h-0 w-full flex-1 border-0" />
         ) : isHtml && htmlView === "preview" ? (
           // srcDoc 直接渲染，沙箱只放行脚本：不能碰宿主页面的 Cookie/存储，也不能读 /api
           <div className="flex min-h-0 flex-1 flex-col bg-white">
@@ -612,7 +624,7 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
             ) : (
               <iframe
                 key={reloadKey}
-                title={file.path}
+                title={name}
                 srcDoc={content}
                 sandbox="allow-scripts"
                 referrerPolicy="no-referrer"

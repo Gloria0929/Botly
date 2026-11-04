@@ -18,4 +18,4 @@ fi
   exit 1
 }
 
-exec ./venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8100}" "$@"
+exec ./venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8100}" --timeout-graceful-shutdown 8 "$@"

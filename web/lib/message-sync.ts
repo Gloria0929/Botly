@@ -52,6 +52,23 @@ export function mergeMessageUpdate(current: Message, incoming: Partial<Message>)
   return next;
 }
 
+/** offset 按 Unicode 字符计数，与服务端一致；null 表示缺片段，需要重新读取快照。 */
+export function mergeMessageDelta(current: Message, payload: {
+  delta?: string; offset?: number; content?: string;
+}): Message | null {
+  if (current.status !== "streaming") return current;
+  if (typeof payload.delta !== "string") {
+    return typeof payload.content === "string" ? mergeMessageUpdate(current, { content: payload.content }) : current;
+  }
+  const characters = Array.from(current.content);
+  const offset = payload.offset;
+  if (!Number.isInteger(offset) || offset! < 0 || offset! > characters.length) return null;
+  const delta = Array.from(payload.delta);
+  const overlap = characters.length - offset!;
+  if (overlap >= delta.length) return current;
+  return { ...current, content: current.content + delta.slice(overlap).join("") };
+}
+
 /** 快照补历史与卡片状态；快照游标之后收到的消息和删除事件以 SSE 为准。 */
 export function mergeMessageSnapshot(
   current: Message[], incoming: Message[], cursor: number, sync: MessageSync, keepOlder = true,

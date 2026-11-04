@@ -14,7 +14,7 @@ from app.core.db import get_db
 from app.core.deps import current_user, owned_or_404
 from app.core.events import emit
 from app.core.models import CubeConnection, CubeSession, FileRec, User
-from app.sandbox.artifacts import is_artifact_file
+from app.sandbox.artifacts import is_output_file
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -72,8 +72,8 @@ async def delete_artifact(file_id: str, user: User = Depends(current_user), db: 
         db.expire_all()
         rec = owned_or_404(db, FileRec, file_id, user_id)
         path = rec.path
-        if not rec.created_by_bot_id or not is_artifact_file(user_id, chat_id, path):
-            raise HTTPException(400, "仅支持删除 Agent 产物")
+        if not is_output_file(user_id, chat_id, path):
+            raise HTTPException(400, "仅支持删除 output 目录中的产物")
         try:
             local = sandbox.safe_path(user_id, chat_id, path)
             if local.exists() and not local.is_file():

@@ -5,7 +5,7 @@ import asyncio
 
 from sqlalchemy import func, select
 
-from app.agent import orchestrator
+from app.agent import summary_memory
 from app.core.db import SessionLocal
 from app.core.models import Bot, Chat, Message, Run, Thread
 from app.agent.orchestrator import RunExecutor
@@ -37,13 +37,14 @@ def _seed_history(client, invite, email: str) -> tuple[str, str]:
                     status="done",
                 )
             )
+        thread.seq_counter = base + 50
         db.commit()
     return chat_id, run_id
 
 
 def test_mem05_summarize_and_inject(client, invite, monkeypatch):
     chat_id, run_id = _seed_history(client, invite, "mem05@test.dev")
-    monkeypatch.setattr(orchestrator, "SUMMARY_THRESHOLD_TOKENS", 50)
+    monkeypatch.setattr(summary_memory, "SUMMARY_THRESHOLD_TOKENS", 50)
 
     with SessionLocal() as db:
         run = db.get(Run, run_id)
@@ -53,9 +54,10 @@ def test_mem05_summarize_and_inject(client, invite, monkeypatch):
 
         asyncio.run(
             RunExecutor(run_id)._maybe_summarize(
-                db, run, thread, kind="mock", base_url="", api_key=None, model="botly-mock"
+                thread.id, run.id, run.user_id, kind="mock", base_url="", api_key=None, model="botly-mock"
             )
         )
+        db.refresh(thread)
         assert thread.summary, "应该生成摘要"
         assert thread.summary_upto_seq > 0
 
@@ -73,14 +75,14 @@ def test_mem05_summarize_and_inject(client, invite, monkeypatch):
 def test_mem05_below_threshold_does_not_summarize(client, invite, monkeypatch):
     chat_id, run_id = _seed_history(client, invite, "mem05-under@test.dev")
     # 阈值设得很大，未摘要部分不超阈值，不应生成摘要
-    monkeypatch.setattr(orchestrator, "SUMMARY_THRESHOLD_TOKENS", 1_000_000)
+    monkeypatch.setattr(summary_memory, "SUMMARY_THRESHOLD_TOKENS", 1_000_000)
 
     with SessionLocal() as db:
         run = db.get(Run, run_id)
         thread = db.scalar(select(Thread).where(Thread.chat_id == chat_id, Thread.type == "main"))
         asyncio.run(
             RunExecutor(run_id)._maybe_summarize(
-                db, run, thread, kind="mock", base_url="", api_key=None, model="botly-mock"
+                thread.id, run.id, run.user_id, kind="mock", base_url="", api_key=None, model="botly-mock"
             )
         )
         assert thread.summary is None

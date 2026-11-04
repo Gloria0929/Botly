@@ -7,6 +7,18 @@ def relative_workspace(run) -> str:
     return (run.config_snapshot or {}).get("task_workspace") or ""
 
 
+def output_directory(workspace: str) -> str:
+    """所有 Agent 产物位于 output 下，并行任务沿用各自的目录隔离。"""
+    relative = workspace.strip("/")
+    if relative == "output" or relative.startswith("output/"):
+        return relative
+    return f"output/{relative}" if relative else "output"
+
+
+def is_task_path(path: str) -> bool:
+    return path == "tasks" or path.startswith("tasks/") or path == "output/tasks" or path.startswith("output/tasks/")
+
+
 def workspace_for_run(user_id: str, chat_id: str, run_id: str | None) -> str:
     if not run_id:
         return ""

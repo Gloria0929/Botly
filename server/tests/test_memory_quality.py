@@ -98,7 +98,8 @@ def test_memory_save_dedup(client, invite):
         bot = db.scalars(select(Bot).where(Bot.user_id == user.id)).first()
         assert bot is not None
         ctx = SimpleNamespace(
-            bot=bot, db=db, run=SimpleNamespace(id="run-msave-1"), user_id=user.id
+            bot=bot, db=db, run=SimpleNamespace(id="run-msave-1"), user_id=user.id,
+            assert_lease=lambda: None,
         )
         r1 = asyncio.run(_memory_save(ctx, "用户偏好简洁的中文表达"))
         assert "已保存" in r1, r1
