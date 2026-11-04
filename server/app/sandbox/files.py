@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import fcntl
 import shutil
+import tempfile
 from pathlib import Path
 
 from app.core.config import SANDBOX_DIR, SANDBOX_FILE_MAX_MB, SANDBOX_QUOTA_MB
@@ -61,12 +63,26 @@ def write_bytes(user_id: str, chat_id: str, rel: str, content: bytes) -> int:
     size = len(content)
     if size > SANDBOX_FILE_MAX_MB * 1024 * 1024:
         raise SandboxError(f"单文件超过 {SANDBOX_FILE_MAX_MB} MB 限制")
-    used = quota_used(user_id)
-    previous_size = path.stat().st_size if path.is_file() else 0
-    if used - previous_size + size > SANDBOX_QUOTA_MB * 1024 * 1024:
-        raise SandboxError(f"沙箱容量超过 {SANDBOX_QUOTA_MB} MB 限制")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
+    # 用户级跨进程锁让并行写入的容量检查也保持准确。
+    with (chat_root(user_id, chat_id).parent / ".botly-quota.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        used = quota_used(user_id)
+        previous_size = path.stat().st_size if path.is_file() else 0
+        if used - previous_size + size > SANDBOX_QUOTA_MB * 1024 * 1024:
+            raise SandboxError(f"沙箱容量超过 {SANDBOX_QUOTA_MB} MB 限制")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 同目录原子替换，读取者不会看到写到一半的内容。
+        temp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".botly-write-", delete=False) as temp:
+                temp_name = temp.name
+                if path.is_file():
+                    os.fchmod(temp.fileno(), path.stat().st_mode & 0o777)
+                temp.write(content)
+            os.replace(temp_name, path)
+        finally:
+            if temp_name:
+                Path(temp_name).unlink(missing_ok=True)
     return size
 
 
@@ -84,12 +100,18 @@ def list_files(user_id: str, chat_id: str) -> list[dict]:
     out = []
     for dirpath, _dirs, files in os.walk(root):
         for f in files:
+            if f.startswith(".botly-write-"):
+                continue
             p = Path(dirpath) / f
+            try:
+                stat = p.stat()
+            except FileNotFoundError:
+                continue
             out.append(
                 {
                     "path": str(p.relative_to(root)),
-                    "size": p.stat().st_size,
-                    "updated_at": p.stat().st_mtime,
+                    "size": stat.st_size,
+                    "updated_at": stat.st_mtime,
                 }
             )
     return sorted(out, key=lambda x: x["path"])

@@ -203,7 +203,7 @@ def _format(out: bytes | str, err: bytes | str, code: int, limit: int) -> str:
     return UNTRUSTED_PREFIX + header + (combined or "（无输出）")
 
 
-async def run_command(user_id: str, chat_id: str, command: str) -> str:
+async def run_command(user_id: str, chat_id: str, command: str, *, workspace: str = "") -> str:
     if not LINUX_SANDBOX_ENABLED:
         return "Linux 运行环境未启用（管理员未开启 BOTLY_LINUX_SANDBOX_ENABLED）。"
     command = (command or "").strip()
@@ -211,10 +211,16 @@ async def run_command(user_id: str, chat_id: str, command: str) -> str:
         return "命令为空。"
     try:
         name = await ensure_container(user_id, chat_id)
+        workdir = "/workspace"
+        if workspace:
+            from app.sandbox import files
+            local = files.safe_path(user_id, chat_id, workspace)
+            local.mkdir(parents=True, exist_ok=True)
+            workdir += "/" + local.relative_to(files.chat_root(user_id, chat_id)).as_posix()
         # 容器内自负其责地限时：即使这边把 docker 客户端杀掉，容器里的
         # `timeout` 仍会在 N 秒后 KILL 掉命令，不会留下跑飞的进程。
         out, err, code = await _docker(
-            "exec", "-e", "TERM=xterm-256color", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8", "-w", "/workspace", name,
+            "exec", "-e", "TERM=xterm-256color", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8", "-w", workdir, name,
             "timeout", "-s", "KILL", str(LINUX_SANDBOX_TIMEOUT), "bash", "-lc", command,
             timeout=LINUX_SANDBOX_TIMEOUT + 15,
         )
@@ -258,7 +264,7 @@ async def _install(name: str, package: str) -> str:
     return ""
 
 
-async def run_code(user_id: str, chat_id: str, code: str, language: str = "python") -> str:
+async def run_code(user_id: str, chat_id: str, code: str, language: str = "python", *, workspace: str = "") -> str:
     """在群聊的 Ubuntu 容器里跑一段代码，代码从 stdin 喂给解释器。"""
     if not CODE_SANDBOX_ENABLED:
         return "代码执行未启用（管理员未开启 BOTLY_CODE_SANDBOX_ENABLED）。"
@@ -273,6 +279,12 @@ async def run_code(user_id: str, chat_id: str, code: str, language: str = "pytho
 
     try:
         name = await ensure_container(user_id, chat_id)
+        workdir = "/workspace"
+        if workspace:
+            from app.sandbox import files
+            local = files.safe_path(user_id, chat_id, workspace)
+            local.mkdir(parents=True, exist_ok=True)
+            workdir += "/" + local.relative_to(files.chat_root(user_id, chat_id)).as_posix()
         if not await _has_binary(name, binary):
             if not package:
                 return f"环境里没有 {binary}。"
@@ -280,7 +292,7 @@ async def run_code(user_id: str, chat_id: str, code: str, language: str = "pytho
             if failure:
                 return failure
         out, err, code_ret = await _docker(
-            "exec", "-i", "-e", "TERM=xterm-256color", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8", "-w", "/workspace", name,
+            "exec", "-i", "-e", "TERM=xterm-256color", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8", "-w", workdir, name,
             "timeout", "-s", "KILL", str(CODE_SANDBOX_TIMEOUT), binary, *argv,
             stdin=code.encode("utf-8"),
             timeout=CODE_SANDBOX_TIMEOUT + 15,

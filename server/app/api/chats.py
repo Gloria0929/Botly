@@ -8,7 +8,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Response, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -41,7 +41,7 @@ from app.core.models import (
     UserSettings,
     now,
 )
-from app.agent.orchestrator import add_message
+from app.agent.orchestrator import RunExecutor, add_message, emit_run_status, emit_task_status
 from app.core.redis_bus import enqueue
 from app.agent.serializers import bot_out, chat_out, iso, message_out, run_out, task_out
 from app.services.chat_templates import CHAT_TEMPLATES, TEMPLATE_BY_ID, assemble_members, template_out
@@ -84,6 +84,10 @@ class MessageIn(BaseModel):
 class BranchIn(BaseModel):
     message_id: str
     title: str | None = None
+
+
+class RetryTaskIn(BaseModel):
+    note: str = Field(default="", max_length=2000)
 
 
 class MembersIn(BaseModel):
@@ -366,7 +370,8 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
     data["pending_approvals"] = [{"id": a.id, "tool": a.tool,
         "bot_name": db.get(Bot, a.bot_id).name if db.get(Bot, a.bot_id) else "Bot"} for a in pending]
     data["files"] = [
-        {"id": f.id, "path": f.path, "size": f.size, "updated_at": f.updated_at.isoformat()}
+        {"id": f.id, "path": f.path, "size": f.size, "updated_at": f.updated_at.isoformat(),
+         "run_id": f.run_id, "created_by_bot_id": f.created_by_bot_id}
         for f in visible_files(db.scalars(
             select(FileRec).where(FileRec.chat_id == chat.id).order_by(FileRec.path)
         ).all())
@@ -1218,7 +1223,9 @@ def post_message(
             raise HTTPException(409, "当前群聊已有执行正在进行，请先停止或等待完成")
         # RUN-13：不新建执行，消息作为「执行中补充」进入当前执行的线程。
         # 分支执行时写分支线程，主线程执行时才写主线程。
-        thread = db.get(Thread, active.thread_id) if active.thread_id else _main_thread(db, chat)
+        thread = (db.get(Thread, active.thread_id)
+                  if active.thread_id and not (active.config_snapshot or {}).get("retry_task_id")
+                  else _main_thread(db, chat))
         msg = add_message(
             db,
             thread=thread,
@@ -1301,6 +1308,78 @@ def post_message(
     return {"message": message_out(msg), "run": run_out(run)}
 
 
+@router.post("/{chat_id}/tasks/{task_id}/retry", status_code=201)
+def retry_task(
+    chat_id: str, task_id: str, payload: RetryTaskIn,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if IS_SQLITE:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    chat = db.scalar(select(Chat).where(Chat.id == chat_id, Chat.user_id == user.id).with_for_update())
+    if not chat:
+        raise HTTPException(404, "群聊不存在")
+    original = owned_or_404(db, Task, task_id, user.id)
+    source = owned_or_404(db, Run, original.run_id, user.id)
+    if source.chat_id != chat.id:
+        raise HTTPException(404, "任务不存在")
+    if original.status not in ("failed", "canceled"):
+        raise HTTPException(409, "只能重试失败或已取消的任务")
+    if _active_run(db, chat.id):
+        raise HTTPException(409, "当前群聊仍在执行，请等待完成后重试此任务")
+    if db.scalar(select(TerminalCommand.id).where(
+        TerminalCommand.chat_id == chat.id, TerminalCommand.status.in_(("queued", "running")),
+    ).limit(1)):
+        raise HTTPException(409, "终端命令正在执行，请等待完成后重试")
+    members = _members(db, chat.id)
+    bot = next((b for b in members if b.id == original.assigned_bot_id and not b.deleted_at), None)
+    if not bot or bot.enabled is False:
+        raise HTTPException(409, "原执行成员已移出或停用，请先恢复该成员")
+    provider = db.get(Provider, bot.provider_id) if bot.provider_id else None
+    if not provider or provider.user_id != user.id:
+        raise HTTPException(409, "原执行成员尚未配置可用模型，请先到智能体页面配置")
+    main = _main_thread(db, chat)
+    original_thread = db.get(Thread, original.thread_id)
+    if not original_thread:
+        raise HTTPException(409, "原任务线程已不可用，无法重试")
+    updates = RunExecutor(source.id)._interjection_messages(db, source, original_thread)
+    instruction = original.instruction
+    if updates:
+        instruction += "\n\n原执行中的用户补充要求：\n" + "\n".join(m.content for m in updates)
+    if payload.note.strip():
+        instruction += "\n\n本次重试补充：\n" + payload.note.strip()
+    instruction += "\n\n只完成这项任务，保留并复用已有资料和产物，按本次实际执行结果判断，不重跑其他已完成任务。"
+    from app.sandbox.workspace import relative_workspace
+    workspace_source = db.scalar(select(Run).where(Run.parent_task_id == original.id).order_by(Run.created_at.desc())) or source
+    run = Run(user_id=user.id, chat_id=chat.id, target_bot_id=bot.id, status="queued", mode="auto",
+              config_snapshot={"run_mode": "auto", "supervisor": {"id": chat.supervisor_bot_id},
+                  "members": [{"id": b.id, "name": b.name} for b in members], "bot_configs": capture_bots(db, members),
+                  "limits": chat.limits_override or {}, "retry_of_task_id": original.id,
+                  "task_workspace": relative_workspace(workspace_source)})
+    db.add(run)
+    db.flush()
+    thread = Thread(user_id=user.id, chat_id=chat.id, parent_thread_id=main.id, type="task",
+                    title=f"重试：{original.instruction[:50]}", bot_id=bot.id)
+    db.add(thread)
+    db.flush()
+    task = Task(user_id=user.id, run_id=run.id, thread_id=thread.id, assigned_bot_id=bot.id,
+                instruction=instruction, expected_output=original.expected_output, step_key=original.step_key,
+                attempt=original.attempt + 1, status="queued")
+    db.add(task)
+    db.flush()
+    run.thread_id = thread.id
+    run.config_snapshot = {**run.config_snapshot, "retry_task_id": task.id}
+    message = add_message(db, thread=main, run_id=run.id, sender_type="user", type_="text",
+        content=f"只重试「{bot.name}」的任务：{original.instruction}" + (f"\n\n补充：{payload.note.strip()}" if payload.note.strip() else ""),
+        meta={"retry_of_task_id": original.id, "task_id": task.id})
+    run.trigger_message_id = message.id
+    chat.last_active_at = now()
+    emit_task_status(db, task)
+    emit_run_status(db, run)
+    db.commit()
+    enqueue(run.id)
+    return {"message": message_out(message), "run": run_out(run), "task": task_out(task, bot)}
+
+
 @router.get("/{chat_id}/files")
 def list_files(chat_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     chat = owned_or_404(db, Chat, chat_id, user.id)
@@ -1312,6 +1391,8 @@ def list_files(chat_id: str, user: User = Depends(current_user), db: Session = D
             "id": f.id,
             "path": f.path,
             "size": f.size,
+            "run_id": f.run_id,
+            "created_by_bot_id": f.created_by_bot_id,
             "updated_at": f.updated_at.isoformat() if f.updated_at else None,
         }
         for f in rows

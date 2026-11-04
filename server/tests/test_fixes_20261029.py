@@ -93,20 +93,25 @@ def test_file_delete_removes_file_record(client, invite):
     chat_id, _ = setup_workspace(client)
     from app.sandbox import files as sandbox
     from app.tools.registry import _file_delete
+    from app.agent.orchestrator import ToolCtx
 
     with SessionLocal() as db:
         user_id = db.get(Chat, chat_id).user_id
         sandbox.write_file(user_id, chat_id, "ghost.txt", "hi")
-        db.add(FileRec(user_id=user_id, chat_id=chat_id, path="ghost.txt", size=2))
+        record = FileRec(user_id=user_id, chat_id=chat_id, path="ghost.txt", size=2)
+        db.add(record)
         db.commit()
 
         class Ctx:
-            pass
+            workspace = ""
+            file_path = ToolCtx.file_path
 
         ctx = Ctx()
         ctx.db, ctx.user_id, ctx.chat_id = db, user_id, chat_id
         asyncio.run(_file_delete(ctx, "ghost.txt"))
         db.commit()
+        assert db.get(FileRec, record.id) is None
+        assert not sandbox.safe_path(user_id, chat_id, "ghost.txt").exists()
 
     assert client.get(f"/api/chats/{chat_id}/files").json() == []
 

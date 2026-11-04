@@ -33,17 +33,17 @@ class DockerBackend:
         from app.sandbox import linux
         await linux.stop_container(chat_id)
 
-    async def run_command(self, user_id: str, chat_id: str, command: str) -> str:
+    async def run_command(self, user_id: str, chat_id: str, command: str, *, workspace: str = "") -> str:
         from app.sandbox import linux
         from app.services.skill_installation import sync_local_skills
         await sync_local_skills(user_id, chat_id)
-        return await linux.run_command(user_id, chat_id, command)
+        return await linux.run_command(user_id, chat_id, command, workspace=workspace)
 
-    async def run_code(self, user_id: str, chat_id: str, code: str, language: str) -> str:
+    async def run_code(self, user_id: str, chat_id: str, code: str, language: str, *, workspace: str = "") -> str:
         from app.sandbox import linux
         from app.services.skill_installation import sync_local_skills
         await sync_local_skills(user_id, chat_id)
-        return await linux.run_code(user_id, chat_id, code, language)
+        return await linux.run_code(user_id, chat_id, code, language, workspace=workspace)
 
 
 @lru_cache(maxsize=1)
@@ -136,6 +136,13 @@ async def run_command(user_id: str, chat_id: str, command: str, *, bot_id=None, 
     from app.sandbox.cube import CubeBackend
     if isinstance(driver, CubeBackend):
         return await driver.run_command(user_id, chat_id, command, bot_id=bot_id, run_id=run_id)
+    from app.sandbox.workspace import workspace_for_run
+    workspace = workspace_for_run(user_id, chat_id, run_id)
+    if workspace:
+        import inspect
+        if "workspace" not in inspect.signature(driver.run_command).parameters:
+            return "沙箱执行失败：当前适配器不支持独立任务目录，请使用 CubeSandbox 或配置支持 workspace 参数的适配器。"
+        return await driver.run_command(user_id, chat_id, command, workspace=workspace)
     return await driver.run_command(user_id, chat_id, command)
 
 
@@ -148,4 +155,11 @@ async def run_code(user_id: str, chat_id: str, code: str, language: str = "pytho
     from app.sandbox.cube import CubeBackend
     if isinstance(driver, CubeBackend):
         return await driver.run_code(user_id, chat_id, code, language, bot_id=bot_id, run_id=run_id)
+    from app.sandbox.workspace import workspace_for_run
+    workspace = workspace_for_run(user_id, chat_id, run_id)
+    if workspace:
+        import inspect
+        if "workspace" not in inspect.signature(driver.run_code).parameters:
+            return "沙箱执行失败：当前适配器不支持独立任务目录，请使用 CubeSandbox 或配置支持 workspace 参数的适配器。"
+        return await driver.run_code(user_id, chat_id, code, language, workspace=workspace)
     return await driver.run_code(user_id, chat_id, code, language)

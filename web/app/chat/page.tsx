@@ -770,6 +770,32 @@ function ChatContent() {
   const onPlanApprove = (msg: Message, steps: PlanStep[]) =>
     msg.run_id && act(() => api.approvePlan(msg.run_id!, steps), "已开始执行");
 
+  const retryTask = async (task: Task) => {
+    if (!chatId || busy || running) return;
+    const id = chatId;
+    setBusy(true);
+    try {
+      const result = await api.retryTask(id, task.id);
+      const updated = await api.chat(id);
+      if (chatIdRef.current !== id) return;
+      branchRef.current = null;
+      setBranch(null);
+      focusRef.current = null;
+      setFocusMessage(null);
+      setChat(updated);
+      setActiveTask(updated.tasks.find((item) => item.id === result.task.id) || result.task);
+      setMessages((previous) => previous.some((message) => message.id === result.message.id) ? previous
+        : [...previous, result.message].sort((a, b) => a.seq - b.seq));
+      reloadMessages(id);
+      toast("已启动单项重试，其他任务与产物保留", "ok");
+    } catch (error) {
+      toastError(error, "任务重试失败");
+      refreshChat(id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onPlanCancel = (msg: Message) => msg.run_id && act(() => api.cancelPlan(msg.run_id!), "已取消计划");
 
   const onApproval = (msg: Message, approve: boolean, reason?: string, alwaysAllow?: boolean) =>
@@ -1236,6 +1262,9 @@ function ChatContent() {
                 previewFile={previewFile}
                 onPreviewClose={() => setPreviewFile(null)}
                 onFileDeleted={onFileDeleted}
+                run={run}
+                onRetryTask={retryTask}
+                busy={busy}
               />
             </aside>
           </>
@@ -1361,6 +1390,9 @@ function ChatContent() {
               previewFile={previewFile}
               onPreviewClose={() => setPreviewFile(null)}
               onFileDeleted={onFileDeleted}
+              run={run}
+              onRetryTask={retryTask}
+              busy={busy}
             />
           </div>
         </div>

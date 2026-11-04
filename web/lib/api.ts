@@ -316,6 +316,10 @@ export const api = {
     ),
   chat: (id: string) => req<import("./types").Chat>(`/chats/${id}`),
   task: (id: string) => req<import("./types").Task>(`/tasks/${id}`),
+  retryTask: (chatId: string, taskId: string, note = "") =>
+    req<{ message: import("./types").Message; run: import("./types").Run; task: import("./types").Task }>(
+      `/chats/${chatId}/tasks/${taskId}/retry`, { method: "POST", body: JSON.stringify({ note }) }
+    ),
   createChat: (body: any) =>
     req<import("./types").Chat>("/chats", { method: "POST", body: JSON.stringify(body) }),
   patchChat: (id: string, body: any) =>

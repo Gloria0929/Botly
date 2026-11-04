@@ -180,6 +180,7 @@ export type Task = {
   status: string;
   result: string | null;
   attempt: number;
+  step_key?: string | null;
   /** RUN-12：计划批次，>0 表示和其他步骤并行执行 */
   batch?: number;
   tokens_used: number;
@@ -217,7 +218,10 @@ export type Run = {
   } | null;
 };
 
-export type ChatFile = { id: string; path: string; size: number; updated_at: string | null };
+export type ChatFile = {
+  id: string; path: string; size: number; updated_at: string | null;
+  run_id?: string | null; created_by_bot_id?: string | null;
+};
 
 export type TerminalEntry = {
   id: string; actor: string; bot_id: string | null; kind: "command" | "code"; language: string;

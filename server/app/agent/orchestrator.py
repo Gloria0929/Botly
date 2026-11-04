@@ -448,9 +448,25 @@ class ToolCtx:
         self.task = task
         self.user_id = run.user_id
         self.chat_id = run.chat_id
+        from app.sandbox.workspace import relative_workspace
+        self.workspace = relative_workspace(run)
         settings = db.get(UserSettings, run.user_id)
         key = decrypt_secret(settings.search_api_key_encrypted) if settings else None
         self.search_key = key
+
+    def file_path(self, path: str, *, write: bool = False) -> str:
+        root = sandbox.chat_root(self.user_id, self.chat_id)
+        rel = sandbox.safe_path(self.user_id, self.chat_id, path).relative_to(root).as_posix()
+        if not self.workspace or rel == self.workspace or rel.startswith(self.workspace + "/"):
+            return rel
+        if rel.startswith("tasks/"):
+            if write:
+                raise sandbox.SandboxError("不能写入其他并行任务的目录，请写入当前任务目录")
+            return rel
+        own = f"{self.workspace}/{rel}"
+        if write or sandbox.safe_path(self.user_id, self.chat_id, own).is_file():
+            return own
+        return rel  # 附件和前置产物仍可从共享根目录读取。
 
     def record_file(self, path: str, size: int) -> None:
         if not is_artifact_file(self.user_id, self.chat_id, path):
@@ -518,8 +534,9 @@ class RunExecutor:
             if not run.parent_run_id:
                 self._ensure_batch_summaries(db, run, chat)
             # RUN-12：子执行（并行子任务）启动时把对应任务从 queued 置为 running
-            if run.parent_task_id:
-                task = db.get(Task, run.parent_task_id)
+            initial_task_id = run.parent_task_id or (run.config_snapshot or {}).get("retry_task_id")
+            if initial_task_id:
+                task = db.get(Task, initial_task_id)
                 if task and task.status == "queued":
                     task.status = "running"
                     task.started_at = task.started_at or now()
@@ -613,12 +630,24 @@ class RunExecutor:
             run = db.get(Run, self.run_id)
             return bool(run and run.parent_run_id)
 
+    def is_independent_task(self, task_id: str) -> bool:
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            return bool(run and task_id == (run.parent_task_id or (run.config_snapshot or {}).get("retry_task_id")))
+
     def _initial_state(self, db: Session, run: Run, chat: Chat) -> dict:
         main = self._main_thread(db, chat)
         # CHT-07：分支线程里的执行把上下文与回复都落在分支，不碰主线程
         thread = db.get(Thread, run.thread_id) if run.thread_id else main
         if not thread or thread.chat_id != chat.id:
             thread = main
+        retry_task_id = (run.config_snapshot or {}).get("retry_task_id")
+        if retry_task_id:
+            task = db.get(Task, retry_task_id)
+            if not task or task.run_id != run.id or task.thread_id != thread.id:
+                raise LLMError("重试任务不存在或不属于当前执行")
+            return {"role": "worker", "bot_id": task.assigned_bot_id, "thread_id": thread.id,
+                    "task_id": task.id, "last": "", "has_calls": False, "cont": False, "done": False}
         # RUN-12：并行子执行固定以 worker 身份跑在自己的任务线程里
         if run.parent_task_id and run.target_bot_id:
             return {
@@ -1187,7 +1216,8 @@ class RunExecutor:
         files = [f.path for f in db.scalars(select(FileRec).where(
             FileRec.user_id == task.user_id, FileRec.run_id.in_(execution_ids),
             FileRec.created_by_bot_id == task.assigned_bot_id,
-        ).order_by(FileRec.path)) if f.path in (task.result or "")]
+        ).order_by(FileRec.path)) if f.path in (task.result or "")
+                 or (f.path.startswith("tasks/") and f.path.rsplit("/", 1)[-1] in (task.result or ""))]
         result = task.result or ""
         if len(result) > 3000:
             result = result[:2000] + "\n[中间内容已截断，完整结果保留在任务详情]\n" + result[-1000:]
@@ -1349,7 +1379,7 @@ class RunExecutor:
                 thread_id=thread.id,
                 parent_run_id=run.id,
                 parent_task_id=task.id,
-                config_snapshot=run.config_snapshot or {},
+                config_snapshot={**(run.config_snapshot or {}), "task_workspace": f"tasks/{task.id}"},
             )
             db.add(child)
             db.flush()
@@ -1929,7 +1959,7 @@ class RunExecutor:
         parent_frame: dict | None = None
         with session_scope() as db:
             run = db.get(Run, self.run_id)
-            is_child = bool(run.parent_run_id)
+            is_child = bool(run.parent_run_id or (run.config_snapshot or {}).get("retry_task_id"))
             chat = db.get(Chat, run.chat_id)
             main = self._main_thread(db, chat)
             task = db.get(Task, task_id)
@@ -2005,7 +2035,10 @@ class RunExecutor:
             # 嵌套子任务失败：交回上级成员，由它决定改派/跳过/继续
             return {**parent_frame, "last": "", "has_calls": False, "cont": True}
         if is_child:
-            self._close_run("failed", f"子任务失败：{reason}")
+            if parent_id:
+                self._close_run("failed", f"子任务失败：{reason}")
+            else:
+                self._finish_failed(f"子任务失败：{reason}")
             if parent_id:
                 self._wake_parent(parent_id)
             return {
@@ -2815,6 +2848,12 @@ class RunExecutor:
             "- 只依据本次执行的工具结果判断任务成功或失败，不把旧报错归因于当前任务。",
             f"- 本次执行的 token 预算为 {budget_label}，当前已使用 {run.tokens_used}；预算每次执行独立计算，不沿用历史预算警告，也不要推测模型账户余额。",
         ]
+        from app.sandbox.workspace import relative_workspace
+        workspace = relative_workspace(run)
+        if workspace and thread is not None and thread.type == "task":
+            parts.append(f"- 当前任务工作目录为 /workspace/{workspace}。相对路径写入只影响本任务目录；"
+                         "交付时引用工具返回的完整相对路径。共享附件仍可读取，其他任务的前置产物用其完整路径读取。"
+                         "代码和命令默认在本任务目录执行，避免使用 /workspace 下的共享绝对路径写入成果。")
         if is_supervisor:
             parts += [
                 "\n## 你的额外职责（总指挥）",
@@ -3155,11 +3194,10 @@ class RunExecutor:
         if thread.type == "task":
             # RUN-12：并行子执行自己也是 Run，任务的 run_id 指向父执行，
             # 所以优先按 parent_task_id 取，旧的串行路径再按「本执行 + 线程」找。
-            task = (
-                db.get(Task, run.parent_task_id)
-                if run.parent_task_id
-                else db.scalar(select(Task).where(Task.thread_id == thread.id, Task.run_id == run.id))
-            )
+            outer_id = run.parent_task_id or (run.config_snapshot or {}).get("retry_task_id")
+            task = db.get(Task, outer_id) if outer_id else None
+            if not task or task.thread_id != thread.id:
+                task = db.scalar(select(Task).where(Task.thread_id == thread.id, Task.run_id == run.id))
             if task:
                 instruction = task.instruction
                 if task.expected_output:

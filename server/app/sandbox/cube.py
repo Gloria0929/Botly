@@ -328,7 +328,10 @@ class CubeBackend:
         return current
 
     def _pull(self, sandbox, user_id, chat_id, old_manifest, bot_id=None, run_id=None):
-        manifest = {}
+        from app.sandbox.workspace import workspace_for_run
+        workspace = workspace_for_run(user_id, chat_id, run_id)
+        manifest = {rel: digest for rel, digest in old_manifest.items()
+                    if rel.startswith("tasks/") and not rel.startswith(workspace + "/")} if workspace else {}
         directories = [WORKSPACE]
         count = 0
         while directories:
@@ -345,6 +348,9 @@ class CubeBackend:
                     raise ValueError("Cube 返回了非法文件名")
                 remote = PurePosixPath(directory) / name
                 rel = str(remote.relative_to(WORKSPACE))
+                if workspace and (rel == "tasks" or rel.startswith("tasks/")):
+                    if not (rel == workspace or rel.startswith(workspace + "/") or workspace.startswith(rel + "/")):
+                        continue  # 不覆盖其他并行任务正在写入的本地文件。
                 if not is_artifact_path(rel):
                     continue  # 技能、依赖、缓存留在远端，不扫描或同步到产物区。
                 kind = str(entry.get("type", "")).lower().removeprefix("file_type_")
@@ -361,16 +367,19 @@ class CubeBackend:
                     raise ValueError(f"Cube 返回了未知文件类型：{kind}")
                 # 不下载远端符号链接，避免沙箱外文件被同步到本地。
         for rel in old_manifest.keys() - manifest.keys():
-            if is_artifact_path(rel):
+            if is_artifact_path(rel) and (not workspace or rel.startswith(workspace + "/")):
                 files.delete_file(user_id, chat_id, rel)
         with session_scope() as db:
             row = db.scalar(select(CubeSession).where(CubeSession.user_id == user_id, CubeSession.chat_id == chat_id))
             row.files_manifest = manifest
             for rec in db.scalars(select(FileRec).where(FileRec.user_id == user_id, FileRec.chat_id == chat_id)):
-                if is_artifact_path(rec.path) and rec.path not in manifest:
+                if (is_artifact_path(rec.path) and rec.path in old_manifest and rec.path not in manifest
+                        and (not workspace or rec.path.startswith(workspace + "/"))):
                     db.delete(rec)
             if bot_id:
                 for rel, digest in manifest.items():
+                    if workspace and not rel.startswith(workspace + "/"):
+                        continue
                     if old_manifest.get(rel) == digest:
                         continue
                     rec = db.scalar(select(FileRec).where(FileRec.user_id == user_id, FileRec.chat_id == chat_id, FileRec.path == rel))
@@ -383,15 +392,19 @@ class CubeBackend:
         return manifest
 
     def _execute(self, user_id, chat_id, command, timeout, bot_id=None, run_id=None):
+        from app.sandbox.workspace import workspace_for_run
+        workspace = workspace_for_run(user_id, chat_id, run_id)
+        workdir = f"{WORKSPACE}/{workspace}" if workspace else WORKSPACE
         sandbox, session = self._open(user_id, chat_id)
         try:
+            ensure_directory(sandbox, workdir)
             pushed = self._push(sandbox, user_id, chat_id, session.files_manifest or {})
             # 先记录模板/已有文件的基线，只有 Agent 本次实际改动才成为交付产物。
-            baseline = self._pull(sandbox, user_id, chat_id, pushed)
+            baseline = self._pull(sandbox, user_id, chat_id, pushed, run_id=run_id)
             # 容器内 timeout 也约束命令，即使 HTTP 客户端取消也不会无限运行。
             wrapped = f"timeout -s KILL {timeout} bash -lc {shlex.quote(command)}"
             try:
-                result = sandbox.commands.run(wrapped, cwd=WORKSPACE, timeout=timeout + 15, envs=TERMINAL_ENV)
+                result = sandbox.commands.run(wrapped, cwd=workdir, timeout=timeout + 15, envs=TERMINAL_ENV)
                 result.exit_code = int(result.exit_code)
                 with session_scope() as db:
                     row = db.scalar(select(CubeSession).where(CubeSession.user_id == user_id, CubeSession.chat_id == chat_id))

@@ -161,6 +161,7 @@ def task_out(task: Task, bot: Bot | None) -> dict:
         "status": task.status,
         "result": task.result,
         "attempt": task.attempt,
+        "step_key": task.step_key,
         "batch": task.batch or 0,
         "tokens_used": task.tokens_used,
         "started_at": iso(task.started_at),

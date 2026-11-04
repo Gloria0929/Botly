@@ -419,12 +419,14 @@ async def _web_read(ctx, url: str) -> str:
 # 文件工具
 # --------------------------------------------------------------------------- #
 async def _file_write(ctx, path: str, content: str) -> str:
+    path = ctx.file_path(path, write=True)
     size = sandbox.write_file(ctx.user_id, ctx.chat_id, path, content)
     ctx.record_file(path, size)
     return f"已写入 {path}（{size} 字节）"
 
 
 async def _file_read(ctx, path: str) -> str:
+    path = ctx.file_path(path)
     return UNTRUSTED_PREFIX + sandbox.read_file(ctx.user_id, ctx.chat_id, path)
 
 
@@ -436,6 +438,7 @@ async def _file_list(ctx) -> str:
 
 
 async def _file_delete(ctx, path: str) -> str:
+    path = ctx.file_path(path, write=True)
     sandbox.delete_file(ctx.user_id, ctx.chat_id, path)
     # 同步删除产物记录并通知文件面板，否则删除后列表里会留下幽灵条目
     rec = ctx.db.scalar(
@@ -629,14 +632,15 @@ def _file_state(ctx) -> dict:
     import hashlib
     from app.sandbox.artifacts import is_artifact_file
     return {item["path"]: hashlib.sha256(sandbox.safe_path(ctx.user_id, ctx.chat_id, item["path"]).read_bytes()).hexdigest()
-        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_artifact_file(ctx.user_id, ctx.chat_id, item["path"])}
+        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_artifact_file(ctx.user_id, ctx.chat_id, item["path"])
+        and (not ctx.workspace or item["path"].startswith(ctx.workspace + "/"))}
 
 
 def _record_execution_files(ctx, before=None) -> None:
     entries = sandbox.list_files(ctx.user_id, ctx.chat_id)
     paths = {item["path"] for item in entries}
     for rec in ctx.db.scalars(select(FileRec).where(FileRec.user_id == ctx.user_id, FileRec.chat_id == ctx.chat_id)):
-        if rec.path not in paths:
+        if rec.path not in paths and (not ctx.workspace or rec.path.startswith(ctx.workspace + "/")):
             ctx.db.delete(rec)
     if before is not None:
         after = _file_state(ctx)

@@ -165,7 +165,7 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
             return {"cont": True}
         if state.get("role") == "worker" and state.get("task_id"):
             # RUN-12：并行子任务是独立执行，跑完关掉自己这条，不等总指挥
-            if ex.is_child_run():
+            if ex.is_independent_task(state["task_id"]):
                 return await ex.finish_child_task(
                     task_id=state["task_id"], content=state.get("last") or ""
                 )

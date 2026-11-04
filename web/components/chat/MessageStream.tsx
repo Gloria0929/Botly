@@ -4,6 +4,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FileText, GitBranch } from "lucide-react";
 import type { Bot, ChatFile, Message, PlanStep, Task } from "@/lib/types";
 import { isVisibleChatMessage } from "@/lib/message-sync";
+import { taskFiles } from "@/lib/task-state";
 import Avatar from "@/components/ui/Avatar";
 import { bytes, clock } from "@/lib/fmt";
 import Markdown from "./Markdown";
@@ -414,7 +415,7 @@ function MessageItem({
             onOpenProcess={msg.meta?.task_id ? () => handlers.onOpenTask(msg.meta.task_id, live?.thread_id || msg.meta.thread_id) : undefined}
           />
         </div>
-        {files.filter((file) => msg.content.includes(file.path)).map((file) => (
+        {taskFiles(files, msg).map((file) => (
           <button key={file.id} onClick={() => handlers.onOpenFile(file)}
             className="mt-2 flex max-w-full items-center gap-2 rounded-lg border border-line bg-panel px-2.5 py-2 text-left hover:border-accent/40">
             <FileText size={14} className="shrink-0 text-accent" />
