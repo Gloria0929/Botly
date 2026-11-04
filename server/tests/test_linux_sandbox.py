@@ -53,7 +53,8 @@ def test_run_command_output(monkeypatch):
     out = asyncio.run(linux_sandbox.run_command("u1", "c1", "echo hi"))
     assert "hello from linux" in out
     exec_args = next(a for a in calls if a[0] == "exec")
-    assert exec_args[:3] == ["exec", "-w", "/workspace"]
+    workdir = exec_args.index("-w")
+    assert exec_args[workdir:workdir + 3] == ["-w", "/workspace", "botly-linux-c1"]
     assert exec_args[-1] == "echo hi"
 
 

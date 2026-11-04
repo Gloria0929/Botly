@@ -160,6 +160,9 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
         # 子执行失败时 model 节点已经自己收尾（fail_task），这里不要再当成功处理
         if state.get("done"):
             return {"done": True}
+        if ex.has_pending_interjections(state["thread_id"]):
+            # 插话在最后一轮输出时到达：仍在原任务/线程继续，不生成假完成结果。
+            return {"cont": True}
         if state.get("role") == "worker" and state.get("task_id"):
             # RUN-12：并行子任务是独立执行，跑完关掉自己这条，不等总指挥
             if ex.is_child_run():

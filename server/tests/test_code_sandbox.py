@@ -61,7 +61,9 @@ def test_run_code_feeds_stdin_to_container(monkeypatch):
     out = asyncio.run(linux_sandbox.run_code("u1", "c1", "print(42)"))
     assert "42" in out
     run = next(c for c in calls if c[0][-1] == "-")
-    assert run[0][:5] == ("exec", "-i", "-w", "/workspace", "botly-linux-c1")
+    assert run[0][:2] == ("exec", "-i")
+    workdir = run[0].index("-w")
+    assert run[0][workdir:workdir + 3] == ("-w", "/workspace", "botly-linux-c1")
     assert run[0][-2] == "python3"
     assert run[1] == b"print(42)"
 

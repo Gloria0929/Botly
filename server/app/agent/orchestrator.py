@@ -673,6 +673,11 @@ class RunExecutor:
             # 工具调用还没执行：交给路由去 tool 节点，open call 会带着原来的
             # tool_call_id 继续，工具侧有自己的按 id 去重。
             return True, ""
+        # 插话在上一轮输出期间到达：在原线程补一轮处理，不能把旧结论重放成最终结果。
+        thread = db.get(Thread, thread_id)
+        latest = max((m.seq for m in self._interjection_messages(db, run, thread)), default=0)
+        if latest > (last.meta or {}).get("interjection_seq", 0):
+            return None
         content = last.content or ""
         return False, "" if content == EMPTY_OUTPUT else content
 
@@ -695,17 +700,6 @@ class RunExecutor:
             replayed = self._replayed_turn(db, run, thread_id)
             if replayed is not None:
                 return replayed
-            # RUN-13：子 Bot 执行中收到新插话时，提前结束当前子任务交回总指挥，
-            # 让总指挥下一轮读到插话并调整，而不是等子任务整个跑完才接上。
-            if not is_supervisor and thread.type == "task" and task_id:
-                main_thread = self._main_thread(db, chat)
-                parent = db.get(Run, run.parent_run_id) if run.parent_run_id else None
-                base = parent.last_interjection_seq if parent else None
-                if self._pending_interjection_seq(db, run, main_thread, base=base):
-                    self._answer_open_calls(
-                        db, thread, run.id, "用户在执行中补充了新要求，本工具调用已中止。"
-                    )
-                    return (False, "用户在执行过程中补充了新要求，已中止当前子任务并交回总指挥处理。")
             # 上一轮流式写到一半进程就没了：草稿永远不会再被写完。空的直接删，
             # 有内容的标成「已中断」，避免前端留着永久“正在输入”的气泡。
             # 不限定线程：子 Bot 那轮可能在主线程还留了一条镜像草稿。
@@ -764,10 +758,14 @@ class RunExecutor:
             # 摘要失败只告警、不影响本轮执行，仍会退回硬截断。
             if is_supervisor and thread.type == "main":
                 await self._maybe_summarize(db, run, thread, kind, base_url, api_key, model)
-            messages = self._build_messages(db, run, chat, thread, bot, is_supervisor, members)
-            # 总指挥本轮已经读到这些插话，标记已读，避免子 Bot 反复当作新插话中止。
+            interjections = self._interjection_messages(db, run, thread)
+            interjection_seq = max((m.seq for m in interjections), default=0)
+            messages = self._build_messages(
+                db, run, chat, thread, bot, is_supervisor, members, interjections=interjections,
+            )
+            # 只标记本轮实际读取的补充，模型调用期间到达的新消息仍留待下一轮。
             if is_supervisor and thread.type == "main":
-                self._mark_interjections_read(db, run, thread)
+                self._mark_interjections_read(db, run, thread, seq=interjection_seq)
             temperature = bot.temperature if bot.temperature is not None else 0.4
             plan_approved = self._plan_already(db, thread_id)
             task = db.get(Task, task_id) if task_id else None
@@ -866,7 +864,9 @@ class RunExecutor:
         content = result.get("content") or buffer
         reasoning = result.get("reasoning_content") or ""
         calls = result.get("tool_calls") or []
-        usage_meta = {"agent_tokens": agent_tokens} if task_id is None else {}
+        usage_meta = {"interjection_seq": interjection_seq}
+        if task_id is None:
+            usage_meta["agent_tokens"] = agent_tokens
 
         if not calls:
             final = content or EMPTY_OUTPUT
@@ -1066,7 +1066,9 @@ class RunExecutor:
             )
         ):
             meta = note.meta or {}
-            if not meta.get("delegation") or meta.get("tool_call_id") != call_id:
+            if not meta.get("delegation") or call_id not in [
+                meta.get("tool_call_id"), *(meta.get("delegate_call_ids") or []),
+            ]:
                 continue
             if thread_id and (meta.get("delegate_thread_id") or main_id) != thread_id:
                 continue
@@ -1175,15 +1177,27 @@ class RunExecutor:
 
     def _delegate_summary(self, db: Session, task: Task) -> str:
         bot = db.get(Bot, task.assigned_bot_id)
+        identity = f"任务 ID：{task.id}；步骤：{task.step_key or task.instruction[:80]}。\n"
         if task.status == "failed":
             head = f"子任务执行失败：{task.result or '未知原因'}。你可以改派给其他成员，或跳过该步骤并向用户说明。"
-            return head
+            return identity + head
         if task.status == "canceled":
-            return f"子任务已取消：{task.result or '用户停止'}"
+            return identity + f"子任务已取消：{task.result or '用户停止'}"
+        execution_ids = [task.run_id, *db.scalars(select(Run.id).where(Run.parent_task_id == task.id))]
+        files = [f.path for f in db.scalars(select(FileRec).where(
+            FileRec.user_id == task.user_id, FileRec.run_id.in_(execution_ids),
+            FileRec.created_by_bot_id == task.assigned_bot_id,
+        ).order_by(FileRec.path)) if f.path in (task.result or "")]
+        result = task.result or ""
+        if len(result) > 3000:
+            result = result[:2000] + "\n[中间内容已截断，完整结果保留在任务详情]\n" + result[-1000:]
         return (
-            f"任务已完成。执行者：{bot.name if bot else ''}。\n"
+            identity + f"任务已完成。执行者：{bot.name if bot else ''}。\n"
             f"期望产出：{task.expected_output or '未指定'}\n"
-            f"结果摘要：\n{(task.result or '')[:1500]}"
+            f"结果摘要：\n{result}\n"
+            f"相关产物记录：{'、'.join(files) if files else '本结果未关联产物记录'}。\n"
+            "请依据期望产出、实际结果及验证证据验收，完成状态不代表已经验收通过。"
+            "先复用已有成果；需要修正时只派发具体的增量修订，不要原样重派。"
         )
 
     def _start_parallel_batch(
@@ -1374,6 +1388,7 @@ class RunExecutor:
             return {}
 
         deferred = False
+        revision = False
         enqueue_ids: list[str] = []
         patch: dict = {}
         with session_scope() as db:
@@ -1446,9 +1461,29 @@ class RunExecutor:
             existing = self._task_for_call(
                 db, run.id, main.id, call.get("id"), thread_id=thread_id
             )
+            if not existing:
+                previous = db.scalar(select(Task).join(Thread, Thread.id == Task.thread_id).where(
+                    Task.run_id == run.id, Task.step_key == step_key, Thread.parent_thread_id == thread_id,
+                ).order_by(Task.created_at.desc()))
+                active = previous and previous.status in ("queued", "running", "waiting_approval", "waiting_reply")
+                unchanged = (previous and previous.status == "completed"
+                    and previous.assigned_bot_id == target.id and previous.instruction == instruction
+                    and (previous.expected_output or "") == expected)
+                revision = bool(previous and previous.status == "completed" and not unchanged)
+                if active or unchanged:
+                    existing = previous
+                    note = next((m for m in db.scalars(select(Message).where(
+                        Message.run_id == run.id, Message.thread_id == main.id, Message.type == "text",
+                    )) if (m.meta or {}).get("delegation") and (m.meta or {}).get("task_id") == existing.id), None)
+                    if note and call.get("id"):
+                        aliases = list((note.meta or {}).get("delegate_call_ids") or [])
+                        if call["id"] not in aliases:
+                            note.meta = {**(note.meta or {}), "delegate_call_ids": [*aliases, call["id"]]}
+                            db.flush()
             if existing:
                 if existing.status in ("completed", "failed", "canceled"):
-                    self._answer_delegate_call(db, main, existing, self._delegate_summary(db, existing))
+                    self._answer_open_calls(db, call_thread or main, run.id,
+                        self._delegate_summary(db, existing), call_id=call.get("id"))
                     return {}
                 if existing.batch:
                     # 并行子执行还没回来：继续等，别重复建任务
@@ -1460,7 +1495,8 @@ class RunExecutor:
 
             # 计划批次只属于总指挥：子 Bot 的嵌套派任务一律串行，避免子执行
             # 再拉起一批孙任务、打乱父执行的等待语义。
-            batch = None if (deferred or nested) else self._parallel_batch(db, run, chat, step_key)
+            # 已完成步骤的明确修订只执行该项，不重新拉起原并行批次。
+            batch = None if (deferred or nested or revision) else self._parallel_batch(db, run, chat, step_key)
             if batch:
                 batch_no, batch_steps, matched_key = batch
                 child_ids, pending = self._start_parallel_batch(
@@ -1752,8 +1788,8 @@ class RunExecutor:
             state = {"completed": "完成", "failed": "失败", "canceled": "取消"}.get(
                 t.status, t.status
             )
-            summary = " ".join((t.result or "").split())[:200]
-            lines.append(f"- {bots.get(t.assigned_bot_id, '')} · {head}（{state}）：{summary}")
+            lines.append(f"- {bots.get(t.assigned_bot_id, '')} · {head}（{state}）：\n"
+                         + self._delegate_summary(db, t))
         add_message(
             db,
             thread=main,
@@ -2568,8 +2604,10 @@ class RunExecutor:
                 Message.type == "text",
             ).order_by(Message.seq)
         ).all()
-        note = next((m for m in rows if (m.meta or {}).get("task_id") == task.id), None)
+        note = next((m for m in rows if (m.meta or {}).get("delegation")
+                     and (m.meta or {}).get("task_id") == task.id), None)
         call_id = (note.meta or {}).get("tool_call_id") if note else None
+        aliases = ((note.meta or {}).get("delegate_call_ids") or []) if note else []
         answer_thread = thread
         target_thread_id = (note.meta or {}).get("delegate_thread_id") if note else None
         if target_thread_id and target_thread_id != thread.id:
@@ -2583,8 +2621,9 @@ class RunExecutor:
                 if fn.get("name") == "delegate" and (args.get("instruction") or "").strip() == task.instruction:
                     call_id = call.get("id")
                     break
-        if call_id:
-            self._answer_open_calls(db, answer_thread, task.run_id, content, call_id=call_id)
+        for cid in dict.fromkeys([call_id, *aliases]):
+            if cid:
+                self._answer_open_calls(db, answer_thread, task.run_id, content, call_id=cid)
 
     def _main_thread(self, db: Session, chat: Chat) -> Thread:
         thread = db.scalar(
@@ -2673,37 +2712,46 @@ class RunExecutor:
             return False
         return self._thread_depth(db, thread_id) < self._limits(db, run)["delegation_depth"]
 
-    def _pending_interjection_seq(
-        self, db: Session, run: Run, thread: Thread, base: int | None = None
-    ) -> int:
-        """主线程里「总指挥还没读到的插话」的最大 seq；没有则 0。
+    def _interjection_messages(self, db: Session, run: Run, thread: Thread) -> list[Message]:
+        """本执行的补充；并行和嵌套子任务读取根执行主线程，互不消费已读位置。"""
+        source = db.get(Run, run.parent_run_id) if run.parent_run_id else run
+        if not source or source.user_id != run.user_id or source.chat_id != run.chat_id:
+            return []
+        source_thread = thread
+        if thread.type == "task":
+            source_thread = db.scalar(select(Thread).where(
+                Thread.chat_id == run.chat_id, Thread.type == "main",
+            ))
+        if not source_thread:
+            return []
+        rows = db.scalars(select(Message).where(
+            Message.thread_id == source_thread.id, Message.run_id == source.id,
+            Message.sender_type == "user", Message.type == "text", Message.status == "done",
+        ).order_by(Message.seq)).all()
+        return [m for m in rows if (m.meta or {}).get("kind") == "interjection"]
 
-        RUN-12：并行子执行是独立的 Run，不能用它自己的 last_interjection_seq
-        （永远是 0）判断，否则执行前用户说过的任何一句话都会让子任务立刻中止；
-        调用方会传入父执行已读到的最新 seq。
-        """
-        base = (run.last_interjection_seq or 0) if base is None else base
-        rows = db.scalars(
-            select(Message).where(
-                Message.thread_id == thread.id,
-                Message.run_id == run.id,
-                Message.type == "text",
-                Message.sender_type == "user",
-            )
-        ).all()
-        return max(
-            (
-                m.seq
-                for m in rows
-                if (m.meta or {}).get("kind") == "interjection" and m.seq > base
-            ),
-            default=0,
-        )
+    def has_pending_interjections(self, thread_id: str) -> bool:
+        """最后一轮输出期间仍有新补充时，图继续原任务，不提前完成或重新派发。"""
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            thread = db.get(Thread, thread_id)
+            marker = db.get(Message, run.last_turn_message_id) if run and run.last_turn_message_id else None
+            if not thread or not marker or marker.thread_id != thread_id:
+                return False
+            latest = max((m.seq for m in self._interjection_messages(db, run, thread)), default=0)
+            return latest > (marker.meta or {}).get("interjection_seq", 0)
 
-    def _mark_interjections_read(self, db: Session, run: Run, thread: Thread) -> None:
-        seq = self._pending_interjection_seq(db, run, thread)
+    def _pending_interjection_seq(self, db: Session, run: Run, thread: Thread) -> int:
+        """主线程里总指挥还没读到的插话的最大 seq；子任务独立读取补充。"""
+        return max((m.seq for m in self._interjection_messages(db, run, thread)
+                    if m.seq > (run.last_interjection_seq or 0)), default=0)
+
+    def _mark_interjections_read(
+        self, db: Session, run: Run, thread: Thread, seq: int | None = None,
+    ) -> None:
+        seq = self._pending_interjection_seq(db, run, thread) if seq is None else seq
         if seq:
-            run.last_interjection_seq = seq
+            run.last_interjection_seq = max(run.last_interjection_seq or 0, seq)
             db.flush()
 
     def _plan_already(self, db: Session, thread_id: str) -> bool:
@@ -2788,8 +2836,12 @@ class RunExecutor:
                 "把具体执行选择交回它，不借澄清指定工具、技能或操作顺序。缺少用户才能决定的信息时如实说明，由子 Bot 再向用户提问。",
                 "- 串行步骤用 delegate 一次派一个，等结果回来再决定下一步；派任务时把计划步骤的标题（或序号）原样填进 delegate 的 step 参数；同一个子任务改派时 step 保持不变——改派次数按 step 判断，换个说法重派不会多出次数。",
                 "- 子任务结果会以工具结果形式返回给你；需要时继续派任务，最后必须给出面向用户的最终回答。",
+                "- 执行中补充属于本次任务的更新。保留已完成的工作和正在执行的任务，先核对已有结果，"
+                "只调整尚未完成或确实需要修正的部分；不要因为用户插话就重新发布整个任务。",
                 "- 缺少关键信息且无法自行判断时，调用 ask_user。",
                 "- 不要声称自己完成了子 Bot 的工作；汇报要基于实际返回结果。",
+                "- 子任务完成后对照期望产出检查实际成果和验证证据，缺少证据时如实说明，不能仅凭完成状态判定验收通过。"
+                "确需返工时只交代未满足的要求和增量修订，复用已有产物。",
                 "- 需要生成文件时，优先让负责该产出的成员写；汇总时读取或引用成员产物，不重复生成同一份内容。",
             ]
         else:
@@ -2800,6 +2852,8 @@ class RunExecutor:
                 "总指挥的建议方法可根据实际情况调整；必须遵守用户明确指定的要求和工具权限。",
                 "- 开始执行时先用一两句话说明你的处理思路（要查什么、写什么、先读哪个文件），然后再调用工具；不要只回一句“收到”。",
                 "- 完成后给出一段可直接交给上级的结果摘要（不是寒暄）。",
+                "- 交接结果说明结论、实际交付文件、已经做过的验证及未解决的问题；未做验证时明确说明，"
+                "不要把推测写成验证通过，也不要只说任务已完成。",
             ]
             if thread is not None and thread.type == "task":
                 parts.append(
@@ -3084,6 +3138,7 @@ class RunExecutor:
         bot: Bot,
         is_supervisor: bool,
         members: list[Bot],
+        interjections: list[Message] | None = None,
     ) -> list[dict]:
         msgs = list(
             db.execute(
@@ -3179,7 +3234,7 @@ class RunExecutor:
                         out.append(
                             {
                                 "role": "system",
-                                "content": "用户在本次执行过程中补充了下面的内容，优先级高于原任务描述，请据此调整后续步骤。",
+                                "content": "用户在本次执行过程中补充了下面的内容，优先级高于原任务描述。保留已有进度，只调整受影响的后续工作，不要因为插话重新派发整个任务。",
                             }
                         )
                     out.append({"role": "user", "content": m.content})
@@ -3231,6 +3286,15 @@ class RunExecutor:
                 # 已经跟随各自的 tool_call 输出过；孤立的结果直接丢弃
                 continue
 
+        if thread.type == "task":
+            updates = self._interjection_messages(db, run, thread) if interjections is None else interjections
+            if updates:
+                out.append({"role": "system", "content":
+                    "以下是用户对本次执行的补充，按时间顺序读取，后面的要求更新前面的要求。"
+                    "继续当前已分配的子任务，保留已有工具结果、文件和进度，只调整与本子任务相关的部分。"
+                    "其他成员的工作仍由总指挥协调，不要重复执行或把当前任务原样重新派发。"
+                    "如果补充改变了目标或边界且无法判断，用 ask_supervisor 澄清；不要仅因插话就宣布任务已完成或已中止。"})
+                out.extend({"role": "user", "content": m.content} for m in updates)
         return out
 
     # ---------------- 流式消息 ----------------

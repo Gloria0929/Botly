@@ -21,16 +21,14 @@ def workspace(client, invite, tag, monkeypatch):
     return account, state
 
 
-def test_user_terminal_is_owned_queued_and_executed_once(client, invite, monkeypatch):
+def test_user_terminal_is_owned_executed_immediately_and_not_replayed(client, invite, monkeypatch):
     account, state = workspace(client, invite, "manual", monkeypatch)
     chat_id = account["chat_id"]
     response = client.post(f"/api/chats/{chat_id}/terminal", json={"command": "echo terminal"})
     assert response.status_code == 201, response.text
     command_id = response.json()["id"]
-    assert response.json()["status"] == "queued" and state["created"] == 0
-    assert client.post(f"/api/chats/{chat_id}/terminal", json={"command": "other"}).status_code == 409
-    assert client.post(f"/api/chats/{chat_id}/messages", json={"content": "新任务"}).status_code == 409
-    assert command_id in terminal.pending()
+    assert response.json()["status"] == "completed" and state["created"] == 1
+    assert command_id not in terminal.pending()
     asyncio.run(terminal.execute(command_id, claim=True))
     history = client.get(f"/api/chats/{chat_id}/terminal").json()
     assert history["sandbox_id"] == "cube-1" and history["provider"] == "cube"
@@ -42,6 +40,13 @@ def test_user_terminal_is_owned_queued_and_executed_once(client, invite, monkeyp
     # 用户手动命令产出的文件不标成 Agent 交付物。
     assert files.safe_path(account["id"], chat_id, "result.png").exists()
     assert client.get(f"/api/chats/{chat_id}/files").json() == []
+    pending_id = terminal.create(account["id"], chat_id, "尚未执行的命令")
+    assert pending_id in terminal.pending()
+    assert client.post(f"/api/chats/{chat_id}/terminal", json={"command": "other"}).status_code == 409
+    assert client.post(f"/api/chats/{chat_id}/messages", json={"content": "新任务"}).status_code == 409
+    with SessionLocal() as db:
+        db.get(TerminalCommand, pending_id).status = "failed"
+        db.commit()
     register(client, invite, "terminal-foreign@test.dev")
     assert client.get(f"/api/chats/{chat_id}/terminal").status_code == 404
     assert client.post(f"/api/chats/{chat_id}/terminal", json={"command": "pwd"}).status_code == 404

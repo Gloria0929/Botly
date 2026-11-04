@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
-from app.core.models import Chat, Message, Run, Task, Thread, UsageLog
+from app.core.models import Chat, FileRec, Message, Run, Task, Thread, UsageLog
 from app.agent.orchestrator import RunExecutor, _step_key, add_message
 from tests.conftest import register, setup_workspace
+from tests.test_parallel import drain_run, run_worker
 
 
 def _new_run(client, invite, email, prepare=None):
@@ -131,6 +134,101 @@ def _delegate(ctx, *, instruction: str, step: str | None, call_id: str) -> dict:
             call=call,
         )
     )
+
+
+@pytest.mark.parametrize("revision", [False, True])
+@pytest.mark.parametrize("parallel", [False, True])
+def test_duplicate_delegate_reuses_completed_work_but_explicit_revision_runs(
+    client, invite, monkeypatch, revision, parallel,
+):
+    from app.agent import orchestrator
+
+    ctx = _new_run(client, invite, f"duplicate-delegate-{revision}-{parallel}@test.dev")
+    supervisor_turns = 0
+    worker_turns = 0
+
+    async def respond(**kw):
+        nonlocal supervisor_turns, worker_turns
+        if kw["ctx"]["role"] == "worker":
+            if kw["ctx"]["bot_name"] == "研究员":
+                worker_turns += 1
+            yield {"type": "done", "content": "要点已整理，依据已核对", "tool_calls": []}
+            return
+        supervisor_turns += 1
+        if parallel and supervisor_turns == 1:
+            yield {"type": "done", "content": "", "tool_calls": [{"id": "duplicate-plan", "type": "function",
+                "function": {"name": "propose_plan", "arguments": json.dumps({"steps": [
+                    {"title": "资料收集", "bot": "研究员", "expected": "要点清单", "depends_on": []},
+                    {"title": "独立复核", "bot": "架构师", "depends_on": []},
+                ]}, ensure_ascii=False)}}]}
+        elif supervisor_turns == (2 if parallel else 1) or (parallel and supervisor_turns == 3):
+            assignments = [
+                ("initial-work", "整理资料"),
+                ("repeat-work", "只补充价格依据，复用现有资料" if revision else "整理资料"),
+            ]
+            if parallel:
+                assignments = [assignments[0 if supervisor_turns == 2 else 1]]
+            calls = [{"id": cid, "type": "function", "function": {"name": "delegate", "arguments": json.dumps({
+                "bot": "研究员", "instruction": instruction, "step": "资料收集", "expected_output": "要点清单",
+            }, ensure_ascii=False)}} for cid, instruction in assignments]
+            yield {"type": "done", "content": "", "tool_calls": calls}
+        else:
+            results = [m for m in kw["messages"] if m["role"] == "tool" and m["tool_call_id"] != "duplicate-plan"]
+            assert {m["tool_call_id"] for m in results} == {"initial-work", "repeat-work"}
+            assert all("要点已整理" in m["content"] for m in results)
+            yield {"type": "done", "content": "已验收并汇总", "tool_calls": []}
+
+    monkeypatch.setattr(orchestrator, "stream_chat", respond)
+    if parallel:
+        run_worker(ctx["run_id"])
+        assert client.post(f"/api/runs/{ctx['run_id']}/plan/approve", json={}).status_code == 200
+    assert drain_run(client, ctx["run_id"])["status"] == "completed"
+    assert worker_turns == (2 if revision else 1)
+    with SessionLocal() as db:
+        tasks = db.scalars(select(Task).where(Task.run_id == ctx["run_id"])).all()
+        assert len(tasks) == worker_turns + int(parallel) and all(t.status == "completed" for t in tasks)
+
+
+def test_duplicate_active_delegate_resumes_same_task_and_answers_both_calls(client, invite):
+    ctx = _new_run(client, invite, "duplicate-active@test.dev")
+    for cid in ("active-first", "active-again"):
+        with SessionLocal() as db:
+            add_message(db, thread=db.get(Thread, ctx["main_id"]), run_id=ctx["run_id"],
+                        sender_type="bot", sender_bot_id=ctx["supervisor_id"], type_="tool_call",
+                        meta={"tool_calls": [{"id": cid, "type": "function", "function": {
+                            "name": "delegate", "arguments": json.dumps({"bot": "研究员", "instruction": "整理资料",
+                                                                         "step": "资料收集"}, ensure_ascii=False),
+                        }}]})
+            db.commit()
+        patch = _delegate(ctx, instruction="整理资料", step="资料收集", call_id=cid)
+        if cid == "active-first":
+            task_id = patch["task_id"]
+        assert patch["task_id"] == task_id
+    asyncio.run(RunExecutor(ctx["run_id"]).finish_task(task_id=task_id, content="原任务结果已完成"))
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count(Task.id)).where(Task.run_id == ctx["run_id"])) == 1
+        results = db.scalars(select(Message).where(Message.thread_id == ctx["main_id"], Message.type == "tool_result")).all()
+        assert {(m.meta or {})["tool_call_id"] for m in results} == {"active-first", "active-again"}
+        assert all("原任务结果已完成" in m.content for m in results)
+
+
+def test_parallel_handoff_keeps_expected_output_artifact_and_validation_details(client, invite):
+    ctx = _new_run(client, invite, "parallel-handoff@test.dev")
+    with SessionLocal() as db:
+        task = Task(user_id=ctx["user_id"], run_id=ctx["run_id"], thread_id=ctx["main_id"],
+                    assigned_bot_id=ctx["bots"]["研究员"]["id"], instruction="整理厂商资料", step_key="资料收集",
+                    expected_output="附来源的厂商对比报告", batch=1, status="completed",
+                    result="已整理来源。" * 100 + "交付 report.md；已核对三家官网，仍需用户确认报价税率。")
+        db.add(task)
+        db.add(FileRec(user_id=ctx["user_id"], chat_id=ctx["chat_id"], run_id=ctx["run_id"], path="report.md",
+                       created_by_bot_id=ctx["bots"]["研究员"]["id"], size=600))
+        db.flush()
+        RunExecutor(ctx["run_id"])._maybe_write_batch_summary(db, db.get(Thread, ctx["main_id"]), task)
+        msg = db.scalar(select(Message).where(Message.run_id == ctx["run_id"], Message.type == "system"))
+        assert "附来源的厂商对比报告" in msg.content
+        assert "相关产物记录：report.md" in msg.content
+        assert "仍需用户确认报价税率" in msg.content
+        assert "完成状态不代表已经验收通过" in msg.content
 
 
 def test_reassign_limit_counts_same_step_across_rephrasing(client, invite):

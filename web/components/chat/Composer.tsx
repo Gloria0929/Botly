@@ -245,7 +245,7 @@ export default function Composer({
           {running ? (
             <>
               <span className="flex items-center gap-1">
-                <Zap size={10} /> 执行中 Enter 发送 = 插话，总指挥在下一步前读取
+                <Zap size={10} /> 执行中 Enter 发送 = 补充要求，下一轮读取并继续原任务
               </span>
               <span>点「停止」结束执行，已完成步骤与产物保留</span>
             </>
