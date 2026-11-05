@@ -95,7 +95,7 @@ export default function StatusPage() {
         <div className="page">
           <PageHeader
             eyebrow="OPS / HEALTH"
-            title="运行状况"
+            title="状态"
             description="执行完成率、失败原因分布与系统告警；统计只包含你自己的执行。"
             actions={
               <>
@@ -213,7 +213,7 @@ export default function StatusPage() {
                   icon={<Activity size={14} />}
                   label="当前队列"
                   value={String(t?.queued || 0)}
-                  hint={`Redis ${data?.queue.depth || 0} · 运行中 ${t?.running || 0}`}
+                  hint={`Redis ${data?.queue.depth || 0} · 状态中 ${t?.running || 0}`}
                 />
               </div>
 
@@ -310,7 +310,7 @@ export default function StatusPage() {
               </div>
 
               <p className="mt-8 text-[10.5px] leading-relaxed text-faint">
-                告警由 Worker 每分钟检查：队列积压 ≥ 10、执行运行超过 20 分钟、近 60 分钟失败率 ≥ 30%；
+                告警由 Worker 每分钟检查：队列积压 ≥ 10、执行状态超过 20 分钟、近 60 分钟失败率 ≥ 30%；
                 同类告警 30 分钟内不重复。阈值可通过 `BOTLY_ALERT_*` 环境变量调整。
               </p>
             </>

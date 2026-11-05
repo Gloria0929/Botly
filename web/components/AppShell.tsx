@@ -38,17 +38,17 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "工作空间",
     items: [
-      { href: "/chat", label: "团队会话", icon: MessagesSquare },
+      { href: "/chat", label: "会话", icon: MessagesSquare },
       { href: "/bots", label: "智能体", icon: Blocks },
-      { href: "/skills", label: "技能库", icon: Sparkles },
-      { href: "/memory", label: "团队记忆", icon: Brain },
-      { href: "/mcp", label: "工具连接", icon: Plug },
+      { href: "/skills", label: "技能", icon: Sparkles },
+      { href: "/memory", label: "记忆", icon: Brain },
+      { href: "/mcp", label: "工具", icon: Plug },
     ],
   },
   {
     label: "监控与洞察",
     items: [
-      { href: "/status", label: "运行状况", icon: Activity },
+      { href: "/status", label: "状态", icon: Activity },
       { href: "/usage", label: "用量", icon: BarChart3 },
       { href: "/logs", label: "日志", icon: ScrollText },
     ],

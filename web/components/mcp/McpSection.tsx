@@ -201,7 +201,7 @@ export default function McpSection() {
     <section>
       <PageHeader
         eyebrow="INTEGRATIONS / MCP"
-        title="工具连接"
+        title="工具"
         description="连接团队使用的服务与工具，扩展智能体的工作能力。"
         actions={
           <button className="btn-primary" onClick={openNew}>

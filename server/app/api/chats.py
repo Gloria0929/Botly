@@ -121,7 +121,7 @@ def _members(db: Session, chat_id: str) -> list[Bot]:
 
 def _active_run(db: Session, chat_id: str) -> Run | None:
     # 只看顶层执行：并行子执行也是 Run，但它不应该成为「当前群聊在执行什么」
-    # 的答案，否则插话会写进子任务线程、停止也停错对象（RUN-12）。
+    # 的答案，否则引导会写进子任务线程、停止也停错对象（RUN-12）。
     return db.scalar(
         select(Run)
         .where(
@@ -387,6 +387,8 @@ def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Dep
                                                Run.kind == "free", Run.status.in_(ACTIVE))).all()
         for peer in peer_runs:
             free = peer.config_snapshot.get("free") or {}
+            if peer.status == "queued":
+                continue  # 排队接话不显示成正在工作，也不能覆盖另一轮的等待审批状态。
             if free.get("direct_response") and not free.get("has_started") and not free.get("selected", {}).get("required"):
                 continue
             status_map[peer.target_bot_id] = "waiting" if peer.status == "waiting" else "working"
@@ -464,7 +466,7 @@ def update_chat(
         if depth is not None and (type(depth) is not int or not 1 <= depth <= 5):
             raise HTTPException(400, "委派深度应为 1–5 层")
     if "run_mode" in data and data["run_mode"] not in ("auto", "step"):
-        raise HTTPException(400, "运行模式只能是 auto 或 step")
+        raise HTTPException(400, "状态模式只能是 auto 或 step")
 
     old_supervisor = chat.supervisor_bot_id
     new_supervisor = data.get("supervisor_bot_id", old_supervisor)
@@ -1229,7 +1231,7 @@ def _post_free_message(db: Session, chat: Chat, main: Thread, payload: MessageIn
     members = [b for b in _members(db, chat.id) if b.deleted_at is None]
     ids = list(dict.fromkeys([*([payload.mention_bot_id] if payload.mention_bot_id else []),
                              *payload.mention_bot_ids, *mentioned_members(content, members)]))
-    everyone = payload.everyone or bool(re.search(r"@everyone(?=[\s，。！？、；：,.!?;:]|$)", content))
+    everyone = payload.everyone or bool(re.search(r"@(?:全员|everyone)(?=[\s，。！？、；：,.!?;:]|$)", content))
     reply = None
     if payload.reply_to:
         reply = owned_or_404(db, Message, payload.reply_to, chat.user_id)
@@ -1244,7 +1246,7 @@ def _post_free_message(db: Session, chat: Chat, main: Thread, payload: MessageIn
         if by_id[bid].enabled is False or not by_id[bid].provider_id:
             raise HTTPException(409, f"Bot「{by_id[bid].name}」已停用或尚未配置模型")
     if not everyone and len(ids) > chat.max_speakers:
-        raise HTTPException(400, "@ 的成员数超过本群发言人数上限，请在群聊设置中调整或使用 @everyone")
+        raise HTTPException(400, "@ 的成员数超过本群发言人数上限，请在群聊设置中调整或使用 @全员")
     available = [b for b in members if b.enabled is not False and b.provider_id]
     if not available and (everyone or ids or not chat.muted):
         raise HTTPException(409, "请至少为一位启用的成员配置模型")

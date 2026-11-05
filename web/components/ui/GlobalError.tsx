@@ -5,7 +5,7 @@ import { toast } from "@/lib/ui";
 import { errText } from "@/lib/api";
 
 /**
- * 全局错误兜底：任何没被业务代码 catch 的 Promise 拒绝或运行时异常，
+ * 全局错误兜底：任何没被业务代码 catch 的 Promise 拒绝或状态时异常，
  * 都以错误提示的形式弹出来，避免「点了一下、什么都没发生」。
  */
 export default function GlobalError() {

@@ -114,7 +114,7 @@ def test_full_flow_plan_delegate_summarize(client, invite, mention_supervisor):
     assert all(m["sender_type"] == "bot" and m["content"] for m in replies)
 
     files = client.get(f"/api/chats/{chat_id}/files").json()
-    assert {f["path"] for f in files} >= {"research.md", "report.md"}
+    assert {f["path"] for f in files} >= {"output/research.md", "output/report.md"}
     assert run["tokens_used"] > 0
 
 
@@ -465,7 +465,7 @@ def test_new_run_ignores_old_control_messages_and_keeps_named_bot_replies(client
     ).json()["run"]["id"]
     built = build_main_history(run_id, chat_id)
     assert all(m["content"] not in stale_notes for m in built)
-    assert not any("执行过程中补充" in m["content"] for m in built), "旧插话不能成为本轮的优先指令"
+    assert not any("执行过程中补充" in m["content"] for m in built), "旧引导不能成为本轮的优先指令"
     assert not any(m["content"] == "@研究员 继续旧评审" for m in built)
     reply = next(m for m in built if "评审完成，发现一处价格错误" in m["content"])
     assert reply["role"] == "assistant" and "研究员" in reply["content"] and "参考资料" in reply["content"]
@@ -479,7 +479,7 @@ def test_new_run_ignores_old_control_messages_and_keeps_named_bot_replies(client
 
 
 def test_current_request_survives_long_running_text_history(client, invite):
-    """裁剪历史不能把本轮用户目标和插话挤掉。"""
+    """裁剪历史不能把本轮用户目标和引导挤掉。"""
     from sqlalchemy import select
 
     from app.core.db import SessionLocal
@@ -934,7 +934,7 @@ def test_interjection_joins_the_running_execution(client, invite):
     assert body["run"]["id"] == run_id
     assert body["message"]["meta"]["kind"] == "interjection"
 
-    # 普通消息仍然不允许并发，且不能因为插话多出一条执行
+    # 普通消息仍然不允许并发，且不能因为引导多出一条执行
     assert client.post(
         f"/api/chats/{chat_id}/messages", json={"content": "另一条普通消息"}
     ).status_code == 409
@@ -944,10 +944,10 @@ def test_interjection_joins_the_running_execution(client, invite):
 
     built = build_main_history(run_id, chat_id)
     user_msgs = [m["content"] for m in built if m["role"] == "user"]
-    assert "补充：只看国内厂商，重点比较价格。" in user_msgs, "插话正文原样进入上下文"
+    assert "补充：只看国内厂商，重点比较价格。" in user_msgs, "引导正文原样进入上下文"
     assert any(
         m["role"] == "system" and "执行过程中补充" in m["content"] for m in built
-    ), "插话要用系统提示标注优先级，且不污染用户原话"
+    ), "引导要用系统提示标注优先级，且不污染用户原话"
 
     # 恢复后仍然能继续执行完
     assert client.post(f"/api/runs/{run_id}/plan/approve", json={}).status_code == 200

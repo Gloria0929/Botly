@@ -54,7 +54,7 @@ export default function ChatList({
   return (
     <div className="chat-list flex h-full min-h-0 flex-col border-r border-line">
       <header className="flex h-16 shrink-0 items-center gap-2 border-b border-line/70 px-5">
-        <span className="text-[14px] font-semibold tracking-[-0.02em] text-ink">团队会话</span>
+        <span className="text-[14px] font-semibold tracking-[-0.02em] text-ink">会话</span>
         {onClose && (
           <button onClick={onClose} aria-label="关闭会话列表" className="icon-btn ml-auto h-7 w-7 lg:hidden">
             <X size={16} />
@@ -64,7 +64,7 @@ export default function ChatList({
 
       <div className="space-y-2.5 px-3.5 pb-2 pt-4">
         <button onClick={newChat} className="chat-list-create flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-line bg-panel text-[12px] font-medium text-ink transition-colors hover:border-line2 hover:bg-panel3/40"
-          title="新建团队会话" aria-label="新建团队会话">
+          title="新建会话" aria-label="新建会话">
           <Plus size={15} strokeWidth={1.7} />新建会话
         </button>
         <label className="chat-list-search flex items-center gap-2 rounded-lg border border-transparent px-2.5 transition-colors focus-within:border-line2 focus-within:bg-panel">
@@ -83,7 +83,7 @@ export default function ChatList({
         {!loading && chats.length === 0 && (
           <div className="px-3 py-10 text-center text-[12px] leading-relaxed text-faint">
             <MessageSquarePlus size={24} className="mx-auto mb-3 text-muted" />
-            <p className="font-medium text-ink">你的第一个团队会话</p>
+            <p className="font-medium text-ink">你的第一个会话</p>
             <p className="mt-2">把成员聚在一起，开始协作。</p>
             <button className="btn-soft mt-4" onClick={newChat}><Plus size={14} />新建会话</button>
           </div>
@@ -216,7 +216,7 @@ export function NewChatDialog({
   };
 
   return (
-    <Modal open onClose={() => { if (!loading) onClose(); }} title="新建团队会话" subtitle="选一个模板，一键组建团队；也可以自己选择成员。" width="max-w-2xl"
+    <Modal open onClose={() => { if (!loading) onClose(); }} title="新建会话" subtitle="选一个模板，一键组建团队；也可以自己选择成员。" width="max-w-2xl"
       footer={<><button className="btn-ghost" onClick={onClose} disabled={loading}>取消</button>{mode === "custom" && <button className="btn-primary" onClick={submit} disabled={loading || !picked.length}>{loading && <Loader2 size={13} className="animate-spin" />}创建会话</button>}</>}>
       <div className="mb-4"><span className="label">群聊模式</span>
         <Select ariaLabel="群聊模式" value={chatMode} disabled={loading} onChange={(value) => {
@@ -315,7 +315,7 @@ export function NewChatDialog({
               placeholder={chatMode === "free" ? "不设负责人" : "选择总指挥"}
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-faint">
-              {chatMode === "free" ? "负责人在无人回应时兜底，需要多人分工时出计划。成员可以自己互相交接。" : "总指挥负责拆解任务与派任务，额外拥有 delegate 与计划工具。"}
+              {chatMode === "free" ? "没有明确对话对象时由负责人先接话，其他成员看完后按需补充；成员可以互相交接。" : "总指挥负责拆解任务与派任务，额外拥有 delegate 与计划工具。"}
             </p>
           </div>
         </div>

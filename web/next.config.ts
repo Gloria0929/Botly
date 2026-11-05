@@ -13,7 +13,8 @@ const nextConfig: NextConfig = {
       `connect-src 'self'${development ? " ws: wss:" : ""}`,
       "object-src 'none'", "base-uri 'self'", "frame-ancestors 'none'",
     ].join("; ");
-    return [{ source: "/:path*", headers: [
+    // 静态预览由 API 设置专用 CSP，允许嵌入但禁止访问宿主会话。
+    return [{ source: "/((?!api/preview/).*)", headers: [
       { key: "Content-Security-Policy", value: policy },
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "Referrer-Policy", value: "no-referrer" },

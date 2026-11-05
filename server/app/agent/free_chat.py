@@ -1,4 +1,4 @@
-"""自由群聊直接回应；静默与发言上限在实际输出时处理。"""
+"""自由群聊：先接话、再补充，明确的多人邀请可并行。"""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ from app.agent.llm import LLMError
 from app.agent.signals import AwaitChildren
 from app.core.db import IS_SQLITE, session_scope
 from app.core.events import emit
-from app.core.models import Bot, Chat, Message, Run, now, uid
+from app.core.models import Bot, Chat, Message, Run, Task, uid
 from app.core.redis_bus import enqueue
 
 ACTIVE = ("queued", "running", "waiting", "waiting_children")
@@ -23,6 +23,39 @@ def mentioned_members(content: str, members: list[Bot]) -> list[str]:
         if match:
             matches.append((match.start(), bot.id))
     return [bot_id for _, bot_id in sorted(matches)]
+
+
+def handoff_members(content: str, members: list[Bot]) -> list[str]:
+    """只有正文行首直接 @ 才是接话邀请，引用、代码和普通提及不是派发。"""
+    body = re.sub(r"```.*?```|~~~.*?~~~", "", content, flags=re.S)
+    lines = [line.strip() for line in body.splitlines() if line.lstrip().startswith("@")]
+    return list(dict.fromkeys(bid for line in lines for bid in mentioned_members(line, members)))
+
+
+def free_run_blocked(db, run: Run) -> bool:
+    """在 Worker 的认领锁内检查：同群同成员依用户消息顺序回应。"""
+    if run.kind != "free" or not run.trigger_message_id:
+        return False
+    trigger = db.get(Message, run.trigger_message_id)
+    if not trigger:
+        return False
+    if run.parent_run_id and db.scalar(select(Run.id).where(
+        Run.chat_id == run.chat_id, Run.kind == "free", Run.target_bot_id == run.target_bot_id,
+        Run.id != run.id, Run.status == "running",
+    ).limit(1)):
+        return True  # 旧话题后来追加的接话，也不能与已经开口的新回复重叠。
+    earlier = db.scalars(select(Run).join(Message, Message.id == Run.trigger_message_id).where(
+        Run.chat_id == run.chat_id, Run.kind == "free", Run.status.in_(ACTIVE),
+        Message.seq < trigger.seq,
+    ).order_by(Message.seq, Run.created_at)).all()
+    for other in earlier:
+        if not other.parent_run_id:
+            # 先把旧消息分发给接话对象，新消息才能知道该排在谁后面。
+            if other.status in ("queued", "running") and not other.config_snapshot.get("free", {}).get("direct_started"):
+                return True
+        elif run.parent_run_id and other.target_bot_id == run.target_bot_id:
+            return True
+    return False
 
 
 class FreeChatMixin:
@@ -42,24 +75,31 @@ class FreeChatMixin:
         run.config_snapshot = {**run.config_snapshot, "free": state}
 
     def _free_ready(self, db, run: Run) -> bool:
-        state = (run.config_snapshot or {}).get("free") or {}
         children = list(db.scalars(select(Run).where(Run.parent_run_id == run.id)))
-        if not any(child.status in ACTIVE for child in children):
-            return True
-        consumed = set(state.get("consumed_peers", []))
-        return any(child.kind == "free" and child.id not in consumed and child.status not in ACTIVE
-                   for child in children)
+        return not any(child.status in ACTIVE for child in children)
 
     def _conversation_partner(self, db, run: Run, members: list[Bot]) -> str | None:
         available = {bot.id for bot in members}
         trigger = db.get(Message, run.trigger_message_id)
         if trigger:
+            # 延续用户的对话对象，而不是把最后引导的成员误当成新负责人。
+            previous = db.scalars(select(Run).join(Message, Message.id == Run.trigger_message_id).where(
+                Run.chat_id == run.chat_id, Run.kind == "free", Run.parent_run_id.is_(None),
+                Message.seq < trigger.seq,
+            ).order_by(Message.seq.desc()))
+            for prior in previous:
+                state = prior.config_snapshot.get("free") or {}
+                targets = state.get("targets", [])
+                partner = targets[0] if state.get("directed") and len(targets) == 1 else state.get("primary_bot_id")
+                if partner in available:
+                    return partner
             recent = db.scalars(select(Message).where(
                 Message.thread_id == trigger.thread_id, Message.seq < trigger.seq,
                 Message.sender_type == "bot", Message.type == "text", Message.status == "done",
             ).order_by(Message.seq.desc()).limit(20))
             for message in recent:
-                if message.sender_bot_id in available and not message.meta.get("delegation"):
+                if (message.sender_bot_id in available and not message.meta.get("delegation")
+                        and not message.meta.get("free_observer")):
                     return message.sender_bot_id
         leader = (run.config_snapshot.get("supervisor") or {}).get("id")
         return leader if leader in available else members[0].id if members else None
@@ -85,7 +125,8 @@ class FreeChatMixin:
                 state.setdefault("speaker_claims", list(dict.fromkeys(state["spoken"])))
                 state.setdefault("speaker_turns", [])
                 run.round = max(1, run.round)
-                targets = state["targets"] if state["directed"] else [bot.id for bot in members]
+                targets = state["targets"] if state["directed"] else [bot.id for bot in members
+                    if bot.id == state["primary_bot_id"] or bot.proactivity > 0]
                 if not state["directed"]:
                     targets.sort(key=lambda bid: bid != state["primary_bot_id"])
                 queue = [{"bot_id": bid, "required": state["directed"] or bid == state["primary_bot_id"],
@@ -100,20 +141,39 @@ class FreeChatMixin:
                 consumed.add(peer.id)
                 result = peer.config_snapshot.get("free") or {}
                 if result.get("spoken"):
-                    state["spoken"] = [*state["spoken"], peer.target_bot_id]
+                    state["spoken"] = list(dict.fromkeys([*state["spoken"], peer.target_bot_id]))
                     if not state["everyone"]:
                         for bid in result.get("mentions", []):
-                            queue.append({"bot_id": bid, "required": True, "round": peer.round + 1})
+                            queue.append({"bot_id": bid, "required": True, "round": peer.round + 1,
+                                          "handoff_message_id": result.get("response_message_id")})
             state["consumed_peers"] = list(consumed)
             active_peers = [peer for peer in peers if peer.status in ACTIVE]
             scheduled = {(entry["bot_id"], entry["round"]) for entry in state["scheduled"]}
+            trigger = db.get(Message, run.trigger_message_id)
+            newer_message = bool(trigger and db.scalar(select(Message.id).where(
+                Message.thread_id == trigger.thread_id, Message.sender_type == "user", Message.type == "text",
+                Message.seq > trigger.seq,
+            ).limit(1)))
+            queue = [item for item in queue if item["bot_id"] in available]
+            # 主接话者失败/被停用时，由下一位可用成员接话，不生成虚假的「收到」。
+            if not active_peers and not state["directed"] and not state["spoken"] and not chat.muted:
+                if not any(item["required"] and (item["bot_id"], item["round"]) not in scheduled for item in queue):
+                    fallback = next((bot.id for bot in members if not any(bid == bot.id for bid, _ in scheduled)), None)
+                    if fallback:
+                        state["primary_bot_id"] = fallback
+                        queue.insert(0, {"bot_id": fallback, "required": True, "primary": True, "round": 1})
+            queue.sort(key=lambda item: not item["required"])
             ids = []
+            pending_queue = []
+            scheduled_round = None
             for candidate in queue:
                 bid = candidate["bot_id"]
                 key = bid, candidate["round"]
                 if bid not in available or candidate["round"] > state["max_rounds"] or key in scheduled:
                     continue
                 if chat.muted and not state["directed"] and not candidate["required"]:
+                    continue
+                if not candidate["required"] and (newer_message or any(entry["bot_id"] == bid for entry in state["scheduled"])):
                     continue
                 if state["everyone"] and any(entry["bot_id"] == bid for entry in state["scheduled"]):
                     continue
@@ -122,6 +182,12 @@ class FreeChatMixin:
                     continue
                 if len(state["speaker_turns"]) >= state["max_speakers"] * state["max_rounds"]:
                     continue
+                # 被明确点名的同轮成员可并行；普通补充每次只放行一个，读取前面完整回应。
+                if active_peers or (ids and (not state["directed"] or not candidate["required"]
+                                            or candidate["round"] != scheduled_round)):
+                    pending_queue.append(candidate)
+                    continue
+                scheduled_round = candidate["round"]
                 state["turn"] += 1
                 candidate.update(turn=state["turn"], root_run_id=run.id)
                 child_id = uid()
@@ -141,7 +207,7 @@ class FreeChatMixin:
                 state["scheduled"] = [*state["scheduled"], {"bot_id": bid, "round": candidate["round"]}]
                 scheduled.add(key)
                 run.round = max(run.round, candidate["round"])
-            state["queue"] = []
+            state["queue"] = pending_queue
             waiting = bool(ids or active_peers or any(child.kind == "chime" and child.status in ACTIVE for child in children))
             state["phase"] = "responding" if waiting else "idle"
             self._save_free_state(run, state)
@@ -176,6 +242,13 @@ class FreeChatMixin:
                 addressed = bool(parent and parent.config_snapshot.get("free", {}).get("directed")) or (
                     selected["required"] and not selected.get("primary"))
                 can_reply = not chat.muted or addressed or run.config_snapshot["free"].get("has_started")
+                if not selected["required"] and not run.config_snapshot["free"].get("has_started"):
+                    trigger = db.get(Message, run.trigger_message_id)
+                    if trigger and db.scalar(select(Message.id).where(
+                        Message.thread_id == trigger.thread_id, Message.sender_type == "user", Message.type == "text",
+                        Message.seq > trigger.seq,
+                    ).limit(1)):
+                        can_reply = False
                 if can_reply and current and current.enabled is not False and not current.deleted_at and any(bot.id == current.id for bot in members):
                     return {"role": "peer", "bot_id": selected["bot_id"], "thread_id": run.thread_id,
                             "task_id": None, "last": "", "has_calls": False, "cont": False, "done": False}
@@ -199,6 +272,13 @@ class FreeChatMixin:
                 return False
             state = dict(root.config_snapshot["free"])
             chat = db.get(Chat, root.chat_id)
+            if not selected["required"] and not run.config_snapshot["free"].get("has_started"):
+                trigger = db.get(Message, run.trigger_message_id)
+                if trigger and db.scalar(select(Message.id).where(
+                    Message.thread_id == trigger.thread_id, Message.sender_type == "user", Message.type == "text",
+                    Message.seq > trigger.seq,
+                ).limit(1)):
+                    return False
             claims = list(state.get("speaker_claims", []))
             turns = list(state.get("speaker_turns", []))
             bid = selected["bot_id"]
@@ -243,12 +323,29 @@ class FreeChatMixin:
             if content.strip() and content.strip() != "[PASS]":
                 state["spoken"] = [*state["spoken"], bot_id]
                 members = self._member_bots(db, db.get(Chat, run.chat_id), run)
+                response = db.scalar(select(Message).where(
+                    Message.run_id == run.id, Message.sender_bot_id == bot_id, Message.type == "text",
+                    Message.status == "done",
+                ).order_by(Message.seq.desc()))
+                state["response_message_id"] = response.id if response else None
+                delegated = set(db.scalars(select(Task.assigned_bot_id).where(Task.run_id == run.id)))
                 state["mentions"] = [] if state["everyone"] else [
-                    bid for bid in mentioned_members(content, members) if bid != bot_id]
+                    bid for bid in handoff_members(content, members) if bid != bot_id and bid not in delegated]
             self._save_free_state(run, state)
             emit(db, run.user_id, run.chat_id, "bot.typing",
                  {"bot_id": bot_id, "run_id": run.parent_run_id or run.id, "typing": False})
             return bool(run.parent_run_id)
+
+    def _duplicate_free_reply(self, content: str) -> bool:
+        normalized = re.sub(r"[\W_]+", "", content).casefold() or content.strip()
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            peers = select(Run.id).where(Run.parent_run_id == run.parent_run_id, Run.id != run.id)
+            return any((re.sub(r"[\W_]+", "", message.content).casefold() or message.content.strip()) == normalized
+                       for message in db.scalars(select(Message).where(
+                           Message.run_id.in_(peers), Message.type == "text", Message.status == "done",
+                           Message.sender_type == "bot",
+                       )) if message.content.strip())
 
     def _mark_peer_pass(self, message_id: str) -> None:
         with session_scope() as db:

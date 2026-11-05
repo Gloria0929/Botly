@@ -267,7 +267,7 @@ def _guard_stdio_server(server: McpServer) -> None:
     with SessionLocal() as db:
         owner = db.get(User, server.user_id)
         if not owner or owner.status != "active" or owner.email.lower() not in ADMIN_EMAILS:
-            raise McpError("仅管理员可运行 MCP stdio 服务")
+            raise McpError("仅管理员可状态 MCP stdio 服务")
 
 
 async def _spawn_stdio(command: str, args: list, env: dict):

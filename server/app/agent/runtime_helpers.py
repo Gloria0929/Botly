@@ -5,6 +5,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.agent.messages import add_message
+from app.agent.scheduling import _step_key
 from app.sandbox import files as sandbox
 from app.sandbox.artifacts import is_output_file
 from app.core.events import emit
@@ -112,15 +113,6 @@ EMPTY_OUTPUT = "（无输出）"
 
 
 log = get_logger("agent")
-
-
-def _step_key(value: str) -> str:
-    """把计划步骤（或指令）归一化成稳定键。
-
-    改派时总指挥常换个说法，所以优先用计划步骤的标题；没给标题才退回指令
-    文本。折叠空白 + 小写，避免只差空格或大小写就被当成另一个子任务。
-    """
-    return " ".join((value or "").split()).lower()[:200]
 
 
 def settle_run_tasks(db: Session, run: Run, status: str, reason: str) -> None:
@@ -262,21 +254,27 @@ class ToolCtx:
     def file_path(self, path: str, *, write: bool = False) -> str:
         root = sandbox.chat_root(self.user_id, self.chat_id)
         rel = sandbox.safe_path(self.user_id, self.chat_id, path).relative_to(root).as_posix()
-        if not self.workspace or rel == self.workspace or rel.startswith(self.workspace + "/"):
+        if self.workspace != "output" and (rel == self.workspace or rel.startswith(self.workspace + "/")):
+            return rel
+        # 旧任务路径仍可读取；写入时统一映射到 output 下的对应任务。
+        if rel.startswith("tasks/"):
+            target = "output/" + rel
+            if write and (self.workspace == "output" or not target.startswith(self.workspace + "/")):
+                raise sandbox.SandboxError("不能写入其他并行任务的目录，请写入当前任务目录")
+            if write or sandbox.safe_path(self.user_id, self.chat_id, target).is_file():
+                return target
             return rel
         if rel.startswith("output/"):
             from app.sandbox.workspace import output_directory
             output_dir = output_directory(self.workspace)
+            if write and self.workspace == "output" and rel.startswith("output/tasks/"):
+                raise sandbox.SandboxError("不能写入其他并行任务的产物目录")
             if rel == output_dir or rel.startswith(output_dir + "/"):
                 return rel
             if write:
                 if rel.startswith("output/tasks/"):
                     raise sandbox.SandboxError("不能写入其他并行任务的产物目录")
                 return f"{output_dir}/{rel[len('output/'):]}"
-            return rel
-        if rel.startswith("tasks/"):
-            if write:
-                raise sandbox.SandboxError("不能写入其他并行任务的目录，请写入当前任务目录")
             return rel
         own = f"{self.workspace}/{rel}"
         if write or sandbox.safe_path(self.user_id, self.chat_id, own).is_file():
@@ -294,6 +292,7 @@ class ToolCtx:
         )
         if rec:
             rec.size = size
+            rec.updated_at = now()
             rec.created_by_bot_id, rec.run_id = self.bot.id, self.run.id
         else:
             rec = FileRec(

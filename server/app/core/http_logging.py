@@ -70,6 +70,9 @@ class RequestLogMiddleware:
             return
 
         path: str = scope.get("path", "")
+        if path.startswith("/api/preview/"):
+            parts = path.split("/", 4)
+            path = "/api/preview/[redacted]/" + (parts[4] if len(parts) > 4 else "")
         method: str = scope.get("method", "")
         headers = _headers(scope)
         rid = headers.get("x-request-id") or logs.new_request_id()
@@ -137,7 +140,7 @@ class RequestLogMiddleware:
                 extra,
             )
             # 异常时 Starlette 外层的 ServerErrorMiddleware 负责渲染 500，
-            # 它运行时本中间件已经退出；保留 rid 让异常处理器仍能拿到它。
+            # 它状态时本中间件已经退出；保留 rid 让异常处理器仍能拿到它。
             if not failed:
                 logs.request_id_var.reset(token)
 

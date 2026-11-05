@@ -4,7 +4,14 @@ from __future__ import annotations
 from app.core.config import MAX_PARALLEL_SUBTASKS
 
 
+def _step_key(value: str) -> str:
+    """计划、派发和重试共用的稳定键，与 Task.step_key 长度保持一致。"""
+    return " ".join((value or "").split()).lower()[:200]
+
+
 def schedule_plan(steps: list[dict]) -> list[dict]:
+    if any(not isinstance(step, dict) or not isinstance(step.get("title"), str) for step in steps):
+        raise ValueError("计划步骤必须是对象，且 title 必须是字符串")
     if not any("depends_on" in step for step in steps):
         # 兼容已保存的旧计划；大批次分成多个并行批次，不再整体退回串行。
         groups: dict[int, list[dict]] = {}
@@ -23,7 +30,7 @@ def schedule_plan(steps: list[dict]) -> list[dict]:
         return result
 
     titles = [(step.get("title") or "").strip() for step in steps]
-    if not all(titles) or len(set(titles)) != len(titles):
+    if not all(titles) or len({_step_key(title) for title in titles}) != len(titles):
         raise ValueError("计划步骤标题不能为空或重复，依赖必须引用唯一的步骤标题")
     dependencies = {}
     for title, step in zip(titles, steps):
@@ -46,9 +53,10 @@ def schedule_plan(steps: list[dict]) -> list[dict]:
         ready = [title for title in titles if title in remaining and not (set(dependencies[title]) & remaining)]
         if not ready:
             raise ValueError("计划存在循环依赖，请重新判断前置关系")
-        for offset in range(0, len(ready), MAX_PARALLEL_SUBTASKS):
-            for title in ready[offset:offset + MAX_PARALLEL_SUBTASKS]:
-                result.append({**by_title[title], "title": title, "depends_on": dependencies[title], "batch": batch})
-            batch += 1
-        remaining.difference_update(ready)
+        # 每派完一批重新判断就绪状态，让刚解锁的步骤利用下一批剩余容量。
+        selected = ready[:MAX_PARALLEL_SUBTASKS]
+        for title in selected:
+            result.append({**by_title[title], "title": title, "depends_on": dependencies[title], "batch": batch})
+        batch += 1
+        remaining.difference_update(selected)
     return result

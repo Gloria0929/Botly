@@ -25,7 +25,7 @@ export function NoChatState({ onCreate }: { onCreate: () => void }) {
       </p>
       <button className="btn-primary mt-7 rounded-full px-5" onClick={onCreate}>
         <Plus size={15} />
-        新建团队会话
+        新建会话
       </button>
       <div className="mt-12 flex flex-wrap justify-center gap-5 text-[11px] text-faint">
         {[

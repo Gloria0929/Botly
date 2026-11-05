@@ -512,7 +512,7 @@ function ChatContent() {
     if (!chat) return;
     const ok = await confirm({
       title: `解散「${chat.name}」？`,
-      description: "该群聊的全部消息、子任务、产物文件与运行记录都会被删除，且无法恢复。",
+      description: "该群聊的全部消息、子任务、产物文件与状态记录都会被删除，且无法恢复。",
       confirmText: "解散",
       danger: true,
     });
@@ -746,7 +746,7 @@ function ChatContent() {
                       chat.run_mode === "auto" ? "已切换到逐步确认" : "已切换到自动模式"
                     )
                   }
-                  title="切换运行模式"
+                  title="切换状态模式"
                   className={`flex items-center gap-1 rounded-md border px-1.5 py-1 text-[10.5px] ${
                     chat.run_mode === "step"
                       ? "border-warn/40 text-warn"

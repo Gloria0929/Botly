@@ -41,6 +41,18 @@ function jsonError(status, detail) {
   return () => Response.json({ detail }, { status });
 }
 
+test("取消预览轮询不弹网络错误，启动诊断留给预览面板展示", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const canceled = client(() => { throw new DOMException("aborted", "AbortError"); }, "/chat");
+  await assert.rejects(canceled.api.fileBackend("page", "status", controller.signal));
+  assert.equal(canceled.calls[0].init.signal, controller.signal);
+  assert.deepEqual(canceled.notices, []);
+  const failed = client(jsonError(502, "启动命令执行失败"), "/chat");
+  await assert.rejects(failed.api.fileBackend("page", "start", new AbortController().signal), { message: "启动命令执行失败" });
+  assert.deepEqual(failed.notices, []);
+});
+
 test("错误账号密码显示后端 detail，停留在登录页", async () => {
   const c = client(jsonError(401, "邮箱或密码错误"));
   await assert.rejects(c.api.login("wrong@example.com", "wrong-password"), (error) => {

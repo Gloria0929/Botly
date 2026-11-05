@@ -172,7 +172,7 @@ def build_graph(ex: "RunExecutor", checkpointer: "BaseCheckpointSaver[Any]"):
         if state.get("done"):
             return {"done": True}
         if await ex.has_pending_interjections(state["thread_id"]):
-            # 插话在最后一轮输出时到达：仍在原任务/线程继续，不生成假完成结果。
+            # 引导在最后一轮输出时到达：仍在原任务/线程继续，不生成假完成结果。
             return {"cont": True}
         if state.get("role") == "worker" and state.get("task_id"):
             # RUN-12：并行子任务是独立执行，跑完关掉自己这条，不等总指挥

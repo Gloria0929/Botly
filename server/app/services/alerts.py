@@ -1,7 +1,7 @@
 """8.6 告警：队列积压、执行卡死、失败率。
 
 Worker 每分钟调用一次 `check_alerts`。告警写 `alerts` 表（系统级，不含用户隐私），
-运行状况看板读取；同类告警在冷却期内不重复写，避免刷屏。
+状态看板读取；同类告警在冷却期内不重复写，避免刷屏。
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def check_alerts(db: Session) -> list[Alert]:
             kind="queue_backlog",
             level="warning",
             title=f"执行队列积压 {backlog} 个",
-            body=f"数据库排队 {queued} 个，Redis 队列 {depth} 个，阈值 {ALERT_QUEUE_BACKLOG}。请检查 Worker 是否在运行。",
+            body=f"数据库排队 {queued} 个，Redis 队列 {depth} 个，阈值 {ALERT_QUEUE_BACKLOG}。请检查 Worker 是否在状态。",
         )
         if alert:
             fired.append(alert)
@@ -81,7 +81,7 @@ def check_alerts(db: Session) -> list[Alert]:
             db,
             kind="run_stuck",
             level="critical",
-            title=f"{len(stuck)} 个执行运行超过 {ALERT_RUN_STUCK_MINUTES} 分钟",
+            title=f"{len(stuck)} 个执行状态超过 {ALERT_RUN_STUCK_MINUTES} 分钟",
             body="疑似卡死：" + "、".join(r.id[:8] for r in stuck[:5]),
         )
         if alert:

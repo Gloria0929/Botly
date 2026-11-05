@@ -218,7 +218,7 @@ class Bot(Base, TimestampMixin):
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     temperature: Mapped[float] = mapped_column(default=0.4)
     tools: Mapped[list] = mapped_column(JSON, default=list)
-    # 已启用的技能 id 列表（运行时提供目录，由智能体按任务加载正文）
+    # 已启用的技能 id 列表（状态时提供目录，由智能体按任务加载正文）
     skills: Mapped[list] = mapped_column(JSON, default=list)
     is_supervisor_template: Mapped[bool] = mapped_column(Boolean, default=False)
     # BOT-06：停用后不再参与任何新执行（不能被派任务、不能被 @、不能当总指挥），
@@ -354,7 +354,7 @@ class Run(Base, TimestampMixin):
     # 最近一轮模型输出对应的消息 id：DB 已提交、检查点未写入时崩溃，重放
     # model 节点据此复用这一轮结果，避免重复调用、重复计步与重复消息（8.3）
     last_turn_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # RUN-13：总指挥已读到的最新插话 seq。子 Bot 独立读取补充并继续原任务，
+    # RUN-13：总指挥已读到的最新引导 seq。子 Bot 独立读取补充并继续原任务，
     # 每轮输出的 meta.interjection_seq 记录实际读取位置，用于收尾前检查新补充。
     last_interjection_seq: Mapped[int] = mapped_column(Integer, default=0)
     # CHT-07：分支线程里的执行。为空表示跑在主线程；否则 supervisor 的上下文
@@ -548,7 +548,7 @@ class Event(Base):
 
 
 class Alert(Base):
-    """8.6：系统级告警（队列积压、执行卡死、失败率），供运行状况看板读取。
+    """8.6：系统级告警（队列积压、执行卡死、失败率），供状态看板读取。
 
     不挂 user_id：告警描述的是整个部署的健康度，body 里也不写具体用户/群聊内容。
     """

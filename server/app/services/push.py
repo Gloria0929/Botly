@@ -112,7 +112,7 @@ def keys() -> dict[str, Any]:
                     pass
                 logger.info("已生成 VAPID 密钥：%s", _KEY_FILE)
             except Exception:  # noqa: BLE001 - 只读盘不阻塞启动
-                logger.warning("VAPID 密钥写入失败（%s），本次运行仍可用", _KEY_FILE)
+                logger.warning("VAPID 密钥写入失败（%s），本次状态仍可用", _KEY_FILE)
         _cached = data
         return _cached
 

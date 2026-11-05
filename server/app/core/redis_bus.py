@@ -5,7 +5,7 @@
 - 事件广播用 Pub/Sub，只作为「有新事件了」的唤醒信号；
   真正的数据仍从 events 表按 id 顺序读取，因此不会丢事件、不会乱序，
   并且天然支持 SSE 的 Last-Event-ID 补发。
-- Redis 不可用时自动降级为纯 DB 轮询，应用仍可运行（便于本地排查）。
+- Redis 不可用时自动降级为纯 DB 轮询，应用仍可状态（便于本地排查）。
 """
 from __future__ import annotations
 

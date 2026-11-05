@@ -95,9 +95,9 @@ def test_files_panel_only_shows_agent_deliverables(client, invite):
         # 历史记录中的内部文件也不能进入产物面板。
         db.add(FileRec(user_id=account["id"], chat_id=chat_id, created_by_bot_id=bot.id, path="skills/reader/SKILL.md", size=10))
         db.commit()
-    assert {row["path"] for row in client.get(f"/api/chats/{chat_id}/files").json()} == {"report.md"}
-    assert {row["path"] for row in client.get(f"/api/chats/{chat_id}").json()["files"]} == {"report.md"}
-    assert files.read_file(account["id"], chat_id, "skills/reader/SKILL.md") == "测试内容"
+    assert {row["path"] for row in client.get(f"/api/chats/{chat_id}/files").json()} == {"output/report.md"}
+    assert {row["path"] for row in client.get(f"/api/chats/{chat_id}").json()["files"]} == {"output/report.md"}
+    assert files.read_file(account["id"], chat_id, "output/skills/reader/SKILL.md") == "测试内容"
     # 附件仍可下载和供 Agent 读取。
     assert client.get(f"/api/files/{uploaded.json()['id']}/download").content == b"input"
 
@@ -122,7 +122,7 @@ def test_remote_installed_skill_stays_in_cube_and_upload_is_not_reclassified(cli
         result = asyncio.run(_run_command(ctx, "echo report"))
         assert "cube output" in result
         db.commit()
-    assert {row["path"] for row in client.get(f"/api/chats/{chat_id}/files").json()} == {"result.png"}
+    assert {row["path"] for row in client.get(f"/api/chats/{chat_id}/files").json()} == {"output/result.png"}
     assert not files.safe_path(account["id"], chat_id, "skills/reader/SKILL.md").exists()
     assert not files.safe_path(account["id"], chat_id, "reader/references/notes.txt").exists()
     assert box.data["/workspace/skills/reader/SKILL.md"] == b"installed"

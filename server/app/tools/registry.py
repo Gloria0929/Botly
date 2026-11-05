@@ -543,6 +543,7 @@ async def _skill_file_read(ctx, path: str) -> str:
                 result += "\n\n参考文件（需要时用 skill_file_read 读取）：\n" + "\n".join(
                     f"- {skill.name}/{rel}" for rel in skill.files
                 )
+            ctx.skill_usage = {"loaded": [skill.id], "reason": f"读取 {skill.name}/SKILL.md"}
             return result
         if skill and rel in (skill.files or []):
             target = (skill, rel)
@@ -569,7 +570,7 @@ async def _skill_file_read(ctx, path: str) -> str:
 register(
     Tool(
         name="file_write",
-        description="在当前群聊的沙箱目录写入文本文件。",
+        description="在当前群聊沙箱的 output 目录写入文本文件。相对路径自动归入当前任务的 output 子目录。",
         parameters={
             "type": "object",
             "properties": {
@@ -625,6 +626,53 @@ register(
     )
 )
 
+async def _skill_select(ctx, skills: list[str], reason: str = "") -> str:
+    """可选的批量加载入口；不使用技能时无需调用。"""
+    from app.agent.skill_usage import usage_state
+    from app.tools import skills as skillmod
+
+    rows = skillmod.for_bot(ctx.db, ctx.user_id, ctx.bot)
+    by_name = {s.name: s for s in rows}
+    chosen = list(dict.fromkeys(skills))
+    unknown = [name for name in chosen if name not in by_name]
+    if unknown:
+        raise ToolError("这些技能未启用或未授权给当前成员：" + "、".join(unknown))
+    if not rows:
+        raise ToolError("当前成员没有启用技能")
+    loaded = usage_state(ctx.db, ctx.run.id, ctx.thread_id, ctx.bot.id, rows).loaded_ids
+    parts = ["技能选择：" + ("、".join(chosen) or "本阶段不使用技能")]
+    if reason.strip():
+        parts.append(f"选择理由：{reason.strip()}")
+    for name in chosen:
+        skill = by_name[name]
+        if skill.id in loaded:
+            parts.append(f"技能「{name}」的完整说明已在本线程加载，请复用已有工具结果。")
+        else:
+            ctx.skill_usage = None
+            content = await _skill_file_read(ctx, f"{skill.id}/SKILL.md")
+            if not ctx.skill_usage or skill.id not in ctx.skill_usage.get("loaded", []):
+                raise ToolError(f"未能加载技能「{name}」：{content}")
+            parts.append(content)
+    if not chosen:
+        parts.append("可直接按当前目标继续。不使用技能时无需调用本工具或说明理由。")
+    ctx.skill_usage = {"loaded": [by_name[name].id for name in chosen],
+                       "skipped": not chosen, "reason": reason.strip()}
+    return "\n\n".join(parts)
+
+
+register(Tool(
+    name="skill_select",
+    description="判断当前任务需要技能时，可用此工具按名称加载相关技能的完整说明。"
+                "只加载有帮助的技能，已加载的正文自动复用。不需要技能时直接继续工作，无需调用本工具。",
+    parameters={"type": "object", "properties": {
+        "skills": {"type": "array", "items": {"type": "string"}, "maxItems": 3,
+                   "description": "按本阶段实际需要选择技能完整名称，通常 1–2 个"},
+        "reason": {"type": "string", "maxLength": 500,
+                   "description": "可选：技能对当前目标有什么帮助"},
+    }, "required": ["skills"], "additionalProperties": False},
+    level="L1", kind="builtin", executor=_skill_select,
+))
+
 register(
     Tool(
         name="skill_file_read",
@@ -658,17 +706,18 @@ def _strip_fence(code: str) -> str:
 # 容器就是该群聊那台 Ubuntu，和 run_command 共用 /workspace。
 def _file_state(ctx) -> dict:
     import hashlib
-    from app.sandbox.artifacts import is_output_file
-    from app.sandbox.workspace import output_directory
-    output_dir = output_directory(ctx.workspace)
+    from app.sandbox.artifacts import in_execution_scope, is_artifact_file
     return {item["path"]: hashlib.sha256(sandbox.safe_path(ctx.user_id, ctx.chat_id, item["path"]).read_bytes()).hexdigest()
-        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_output_file(ctx.user_id, ctx.chat_id, item["path"])
-        and (not ctx.workspace or item["path"].startswith(output_dir + "/"))}
+        for item in sandbox.list_files(ctx.user_id, ctx.chat_id) if is_artifact_file(ctx.user_id, ctx.chat_id, item["path"])
+        and in_execution_scope(item["path"], ctx.workspace)}
 
 
 def _record_execution_files(ctx, before=None) -> None:
     from app.sandbox.workspace import output_directory
+    from app.sandbox.artifacts import collect_generated_files
     ctx.assert_lease()
+    if before is not None:
+        collect_generated_files(ctx.user_id, ctx.chat_id, ctx.workspace, before, _file_state(ctx))
     entries = sandbox.list_files(ctx.user_id, ctx.chat_id)
     paths = {item["path"] for item in entries}
     output_dir = output_directory(ctx.workspace)
@@ -749,7 +798,7 @@ register(
                 "language": {
                     "type": "string",
                     "enum": ["python", "node", "bash", "sh"],
-                    "description": "运行语言，默认 python",
+                    "description": "状态语言，默认 python",
                 },
             },
             "required": ["code"],
@@ -765,7 +814,7 @@ register(
 
 
 # --------------------------------------------------------------------------- #
-# 常驻 Linux 运行环境（每个群聊一个容器，root + 联网，L3 默认审批）
+# 常驻 Linux 状态环境（每个群聊一个容器，root + 联网，L3 默认审批）
 # --------------------------------------------------------------------------- #
 async def _run_command(ctx, command: str) -> str:
     from app.sandbox import runtime as linux_sandbox
@@ -784,7 +833,7 @@ register(
         name="run_command",
         description=(
             "在常驻的 Linux 环境（Ubuntu 容器，root + 联网）里执行 shell 命令。"
-            "工作目录是群聊沙箱 /workspace，状态与文件跨调用持久保留，可 pip/apt 安装依赖。"
+            "工作目录是群聊沙箱 /workspace/output 下的当前任务目录，所有生成文件保存在此目录。状态与文件跨调用持久保留，可 pip/apt 安装依赖。"
             "用于编译、跑脚本、装包、操作文件系统等需要完整操作系统的任务。"
         ),
         parameters={
@@ -822,7 +871,7 @@ DELEGATE_TOOL = Tool(
                 "type": "string",
                 "description": (
                     "这一步在计划里的标题或序号，例如「资料收集」或「2」。"
-                    "同一子任务改派时保持这个值不变；不填则按指令文本判断。"
+                    "有已确认计划时必须对应其中唯一一步；同一子任务改派时保持这个值不变。无计划时不填则按指令文本判断。"
                 ),
             },
             "expected_output": {"type": "string", "description": "期望产出，便于验收"},
@@ -840,6 +889,7 @@ PLAN_TOOL = Tool(
         "只有一项执行工作时直接调用 delegate 派任务，无需计划；问候、状态查询和简短解释直接回答。"
         "由你自主判断任务依赖，不要让用户选择并行或串行。每步填写 depends_on："
         "独立任务填 []，依赖其他步骤的任务填写前置步骤标题。执行器会自动安排并行与串行批次。"
+        "根据输入产物和共享文件/状态的读写冲突判断依赖；不同主题或独立文件可并行，使用前置结论、修改同一文件或终审要等待对应步骤。"
     ),
     parameters={
         "type": "object",

@@ -14,6 +14,7 @@ from app.agent.memory_context import memory_context
 from app.core.models import Bot, Chat, ChatMember, Memory, Message, Run, Task, Thread
 from app.agent.runtime_helpers import (
     _parse_json,
+    _step_key,
 )
 
 
@@ -245,7 +246,7 @@ class ContextBuilderMixin:
             return latest > (marker.meta or {}).get("interjection_seq", 0)
 
     def _pending_interjection_seq(self, db: Session, run: Run, thread: Thread) -> int:
-        """主线程里总指挥还没读到的插话的最大 seq；子任务独立读取补充。"""
+        """主线程里总指挥还没读到的引导的最大 seq；子任务独立读取补充。"""
         return max((m.seq for m in self._interjection_messages(db, run, thread)
                     if m.seq > (run.last_interjection_seq or 0)), default=0)
 
@@ -322,8 +323,17 @@ class ContextBuilderMixin:
         from app.sandbox.workspace import output_directory, relative_workspace
         workspace = relative_workspace(run)
         output_dir = output_directory(workspace)
-        parts.append(f"- 产物面板只展示 /workspace/output 中的文件；需要交付的文件写入 /workspace/{output_dir}，"
-                     f"文件工具使用完整相对路径 {output_dir}/文件名。其他目录用于工作文件，不显示为产物。")
+        parts.append(f"- 所有生成的文件（源码、构建结果、图片、文档等）统一保存在 /workspace/{output_dir}。"
+                     f"代码和命令默认在该目录执行；文件工具可直接使用相对文件名，或完整路径 {output_dir}/文件名。"
+                     "使用技能脚本时也必须显式指定此输出目录。共享附件和技能仍从原路径读取。"
+                     "前端项目必须执行构建并把完整静态产物（index.html、JS、CSS、图片等）保存在该目录下的 dist、build 或 out 中，"
+                     "使用相对资源路径（例如 Vite base: './'），路由优先使用 hash 模式；右侧「预览」可直接打开构建后的页面。"
+                     "前后端项目不能只打包前端：还须在项目目录生成 preview.json，格式为 "
+                     "{\"backend\":{\"command\":\"npm start\",\"cwd\":\"backend\",\"port\":3000,\"api_prefix\":\"/api\"}}。"
+                     "cwd 相对于 preview.json；启动命令必须以前台方式运行，不加 nohup 或 &；先安装后端依赖并验证真实 API。"
+                     "预览面板会启动并保留后端进程，将前端 /api 请求转发到该沙箱端口，日志也保存在 output 内。"
+                     "preview.json 必须放在 HTML 入口的某级父目录（最外层为 output）。纯静态项目无需此文件。"
+                     "需要服务端渲染的项目须提供静态导出才能在这里预览。完成后给出真实的入口文件路径。")
         if workspace and thread is not None and thread.type == "task":
             parts.append(f"- 当前任务工作目录为 /workspace/{workspace}。相对路径写入只影响本任务目录；"
                          "交付时引用工具返回的完整相对路径。共享附件仍可读取，其他任务的前置产物用其完整路径读取。"
@@ -333,10 +343,14 @@ class ContextBuilderMixin:
             parts += [
                 "\n## 群聊同伴",
                 "这是一个真实的群聊。像同事一样说话，有自己的看法和语气，可以简短、开玩笑，不用汇报格式。",
+                "在自由群聊里，职务表示你的专长，不是每轮都要执行的调度流程。即使你的角色是总指挥，也先直接接话，"
+                "不要把寒暄、讨论、观点或普通追问拆成计划、任务或审批。",
                 "没有人给你规定台词。与你无关或别人已经说清楚时，只输出 [PASS]。不要重复别人刚说过的话。",
                 "用户明确邀请大家开会或讨论时，可以简短参与；普通问候和短追问不需要全员轮流回应。",
-                "想请同伴帮忙，直接 @对方，用自己的话提请求。每个阶段只设一个负责人，避免重复认领。",
-                "需要长时间查资料、写代码或写文件时，可调用 delegate 交接给同伴，细节放在任务线程。",
+                "确实需要同伴接话时，另起一行，以 @对方 开头写清具体问题；普通提及他人直接写名字，引用内容不触发交接。",
+                "你可以用自己的工具完成用户交给你的工作。只有确实需要另一位成员执行具体子任务时才调用 delegate；"
+                "同一件事在直接 @ 和 delegate 中选一种，不要重复请求。任务结果由发起成员接回并回应用户。",
+                "需要用户补充信息时直接在聊天里提问，等待下一条消息，不弹出任务式确认卡片。",
                 "调用工具取得结果后，在群里用一两句话说明，不要复制长报告。",
             ]
             primary_id = run.config_snapshot.get("free", {}).get("primary_bot_id")
@@ -351,7 +365,7 @@ class ContextBuilderMixin:
                 parts.append(f"你的积极度为 {bot.proactivity if bot.proactivity is not None else 0.5}。只在有实质补充或不同观点时说一两句话；没必要接话时直接输出 [PASS]，不要解释为什么不参与。")
                 parts.append("用户请求由对话对象负责。不要重复认领或执行同一任务；需要协作时通过自然的 @ 发言联系同伴。")
             if bot.id == (run.config_snapshot.get("supervisor") or {}).get("id"):
-                parts.append("你是可选的负责人，仅在无人发言时兜底、需要多人分工时用 propose_plan 出计划；不逐个点名、不规定别人的回复。")
+                parts.append("你是可选的默认接话人，成员对话时无需出面主持、点名或总结；需要正式计划审批时由用户切换任务模式。")
             return "\n".join(p for p in parts if p)
         if is_supervisor:
             parts += [
@@ -366,9 +380,13 @@ class ContextBuilderMixin:
                 "- 拆解时自主决定并行或串行，不要询问用户执行方式，也不需要用户提醒并行。"
                 "每步必须填 depends_on：独立任务为 []；需要前置产物、结论或同一文件写入顺序时，填写前置步骤标题。"
                 "研究不同主题、实现互不依赖的模块可并行；根据调研写报告、按实现做终审必须等待前置结果。"
+                "逐项检查输入是否已具备、是否修改同一共享文件或状态；存在读写或写写冲突时设置依赖，"
+                "能明确划分独立文件和产物的工作可并行。同一成员承接多项独立工作不意味着必须串行。"
                 "不要为了凑固定条数或固定顺序虚构依赖。执行器根据依赖自动计算 batch 并限制并发数量。",
-                "- 按确认计划的 batch 顺序派任务；同一批可一次发出多个 delegate，也可先派其中一项，执行器会补齐同批其他项并行执行。"
-                "上一批全部完成后再进入下一批；发现依赖变化时自主更新后续计划，不能抢跑依赖未完成的步骤。",
+                "- 优先按确认计划的 batch 顺序派任务；同一批可一次发出多个 delegate，也可先派其中一项，执行器会补齐同批已就绪的未启动步骤。"
+                "每步只等待 depends_on 指定的前置任务最新一次执行成功；无关步骤失败不阻塞已就绪工作。"
+                "需要前置结果的步骤等结果回来再派，委派时带上相关结论、产物路径和验收要求。"
+                "发现依赖变化时自主更新后续计划，不能抢跑依赖未完成的步骤；重试或修订只派具体步骤。",
                 "- 例如写 HTML 派给程序员，查天气/查资料派给研究员，写需求文档派给架构师/编辑，评审派给终审；按成员实际职责选择。"
                 "没有合适的可用成员时说明缺口，成员失败时澄清目标、调整任务或改派，不自行接管专业执行。",
                 "- 子 Bot 不理解目标时可以用 ask_supervisor 向你提问；只澄清目标、边界、已有信息和验收口径，"
@@ -376,7 +394,7 @@ class ContextBuilderMixin:
                 "- 串行步骤用 delegate 一次派一个，等结果回来再决定下一步；派任务时把计划步骤的标题（或序号）原样填进 delegate 的 step 参数；同一个子任务改派时 step 保持不变——改派次数按 step 判断，换个说法重派不会多出次数。",
                 "- 子任务结果会以工具结果形式返回给你；需要时继续派任务，最后必须给出面向用户的最终回答。",
                 "- 执行中补充属于本次任务的更新。保留已完成的工作和正在执行的任务，先核对已有结果，"
-                "只调整尚未完成或确实需要修正的部分；不要因为用户插话就重新发布整个任务。",
+                "只调整尚未完成或确实需要修正的部分；不要因为用户引导就重新发布整个任务。",
                 "- 缺少关键信息且无法自行判断时，调用 ask_user。",
                 "- 不要声称自己完成了子 Bot 的工作；汇报要基于实际返回结果。",
                 "- 子任务完成后对照期望产出检查实际成果和验证证据，缺少证据时如实说明，不能仅凭完成状态判定验收通过。"
@@ -433,12 +451,17 @@ class ContextBuilderMixin:
         )
         trigger = db.get(Message, run.trigger_message_id) if run.trigger_message_id else None
         message_run_ids = {run.id}
+        earlier_free_ids: set[str] = set()
         if run.kind == "free" and (run.config_snapshot.get("free") or {}).get("parallel_child"):
             message_run_ids.add(run.parent_run_id)
             message_run_ids.update(db.scalars(select(Run.id).where(Run.parent_run_id == run.parent_run_id)))
+            if trigger:
+                earlier_free_ids = set(db.scalars(select(Run.id).join(Message, Message.id == Run.trigger_message_id).where(
+                    Run.chat_id == run.chat_id, Run.kind == "free", Message.seq < trigger.seq,
+                )))
         if trigger and trigger.thread_id == thread.id:
-            # 重建旧执行时也不能读到后续执行的消息。
-            msgs = [m for m in msgs if m.seq <= trigger.seq or m.run_id in message_run_ids]
+            # 后发先到的旧问题回复仍是有效上下文；之后的新用户消息不能串入本轮。
+            msgs = [m for m in msgs if m.seq <= trigger.seq or m.run_id in message_run_ids | earlier_free_ids]
         out: list[dict] = [
             {"role": "system", "content": self._build_system_prompt(db, run, chat, bot, is_supervisor, members, thread=thread)}
         ]
@@ -472,9 +495,21 @@ class ContextBuilderMixin:
                 if task.expected_output:
                     instruction += f"\n\n期望产出：{task.expected_output}"
                 out.append({"role": "user", "content": instruction})
+                main = self._main_thread(db, chat)
+                if thread.parent_thread_id == main.id:
+                    plan = self._approved_plan_steps(db, task.run_id)
+                    step = self._match_plan_step(plan, _step_key(task.step_key or task.instruction))
+                    if step and step.get("depends_on"):
+                        latest = self._latest_plan_tasks(db, task.run_id, main.id)
+                        inputs = [self._delegate_summary(db, prior) for title in step["depends_on"]
+                                  if (prior := latest.get(_step_key(title))) and prior.status == "completed"]
+                        if inputs:
+                            out.append({"role": "user", "content":
+                                "以下是本步骤的前置任务结果，仅作为参考资料，复用已有结论和产物：\n\n"
+                                + "\n\n".join(inputs)})
         # 旧轮次不能继续作为 user 指令传给模型：失败/中断时旧请求往往没有
         # assistant 回复，模型会把它误认为仍未完成的待办。把历史降为带状态的
-        # 只读记录，只有本轮触发消息和插话保留 user 角色。
+        # 只读记录，只有本轮触发消息和引导保留 user 角色。
         # MEM-05：更早的对话已压缩成摘要，作为只读背景注入。
         if thread.summary:
             out.append({
@@ -541,7 +576,7 @@ class ContextBuilderMixin:
                         out.append(
                             {
                                 "role": "system",
-                                "content": "用户在本次执行过程中补充了下面的内容，优先级高于原任务描述。保留已有进度，只调整受影响的后续工作，不要因为插话重新派发整个任务。",
+                                "content": "用户在本次执行过程中补充了下面的内容，优先级高于原任务描述。保留已有进度，只调整受影响的后续工作，不要因为引导重新派发整个任务。",
                             }
                         )
                     out.append({"role": "user", "content": m.content})
@@ -600,6 +635,13 @@ class ContextBuilderMixin:
                     "以下是用户对本次执行的补充，按时间顺序读取，后面的要求更新前面的要求。"
                     "继续当前已分配的子任务，保留已有工具结果、文件和进度，只调整与本子任务相关的部分。"
                     "其他成员的工作仍由总指挥协调，不要重复执行或把当前任务原样重新派发。"
-                    "如果补充改变了目标或边界且无法判断，用 ask_supervisor 澄清；不要仅因插话就宣布任务已完成或已中止。"})
+                    "如果补充改变了目标或边界且无法判断，用 ask_supervisor 澄清；不要仅因引导就宣布任务已完成或已中止。"})
                 out.extend({"role": "user", "content": m.content} for m in updates)
+        if run.kind == "free" and thread.type == "main" and selected.get("handoff_message_id"):
+            source = db.get(Message, selected["handoff_message_id"])
+            if source and source.thread_id == thread.id and source.run_id in message_run_ids:
+                sender = next((member.name for member in members if member.id == source.sender_bot_id), "同伴")
+                out.append({"role": "user", "content":
+                    f"本轮接话请求来自「{sender}」：\n{source.content}\n\n"
+                    "遵循原始用户的要求与约束，只回答这条接话请求，不要重新回答已经处理过的整个问题。"})
         return out

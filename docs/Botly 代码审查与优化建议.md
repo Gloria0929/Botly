@@ -16,7 +16,7 @@ Botly 的功能完整度很高:后端有 60 多个测试文件,有 Alembic 迁�
 
 未细读:`orchestrator.py` 的大部分业务逻辑、`api/chats.py`、`sandbox/cube.py`、技能安装、MCP 的 HTTP 传输细节、大部分前端页面。
 
-标注「推断」的条目没有实际运行验证,建议实测后再动手。
+标注「推断」的条目没有实际状态验证,建议实测后再动手。
 
 ## 三、问题总览
 
@@ -212,7 +212,7 @@ class Event(Base):
 - `_light_migrate` 与 Alembic 的版本脚本在加列上重复,哪边是准的并不清楚。
 - `_migrate_bot_name_uniqueness` 每次启动都执行 `ALTER TABLE bots DROP CONSTRAINT IF EXISTS ...` 和 `CREATE UNIQUE INDEX IF NOT EXISTS ...`,`ALTER TABLE` 需要表级强锁,且这一步没有 advisory lock,API 和 Worker 同时启动可能互相等待。
 - `_ensure_alembic` 遇到老库会直接 `stamp head`,等于假定旧库已经是最新结构。
-- 多处 `except Exception: pass`,迁移失败会被静默吞掉,应用带着不完整的表结构继续运行。
+- 多处 `except Exception: pass`,迁移失败会被静默吞掉,应用带着不完整的表结构继续状态。
 
 建议:
 
@@ -232,7 +232,7 @@ class Event(Base):
 - 没有 `.github/`,没有 CI。建议至少跑:`pytest`、`tsc --noEmit`、`npm test`、`pip-audit`、`npm audit`。
 - 没有 LICENSE 文件。
 - `requirements.txt` 全是 `>=`,没有锁文件;建议用 `pip-tools` 或 `uv` 生成 lock,Docker 构建按 lock 安装。
-- `server/Dockerfile` 和 `web/Dockerfile` 都以 root 运行,没有 `HEALTHCHECK`;建议加非 root 用户和健康检查,compose 里 `depends_on` 改用 `condition: service_healthy`。
+- `server/Dockerfile` 和 `web/Dockerfile` 都以 root 状态,没有 `HEALTHCHECK`;建议加非 root 用户和健康检查,compose 里 `depends_on` 改用 `condition: service_healthy`。
 - nginx 只监听 80,没有 TLS、HSTS 和安全响应头;`BOTLY_COOKIE_SECURE` 需要手动开,建议当 `BOTLY_BASE_URL` 是 https 时默认开启。
 - Docker 沙箱(`sandbox/linux.py`)的 `docker run` 没有 `--cap-drop ALL`、`--security-opt no-new-privileges`,也没有限制网络;如果只用于本机测试,请在配置说明里写清楚。
 - `package.json` 有 `lint: next lint`,但没有安装 eslint,也没有 eslint 配置,这个脚本跑不起来。
@@ -287,7 +287,7 @@ class Event(Base):
 | 编号 | 当前实现与验证 |
 | --- | --- |
 | S1 | 保存、更新、刷新、能力探测、实际请求共用地址校验。默认拒绝内网、元数据、非 HTTP 服务及无效地址；请求连接固定到已校验的 IP，保留 Host/SNI，不跟随重定向、不继承环境代理。错误响应正文不向用户回显。旧接入也在调用前重新检查。 |
-| S2 | stdio 默认禁用；创建、导入、修改、重新检测及运行均限制管理员。启用后还必须匹配部署配置的完整命令参数白名单，命令使用绝对路径，禁止 shell 元字符。子进程只获得 PATH、HOME 和服务显式配置的 env。 |
+| S2 | stdio 默认禁用；创建、导入、修改、重新检测及状态均限制管理员。启用后还必须匹配部署配置的完整命令参数白名单，命令使用绝对路径，禁止 shell 元字符。子进程只获得 PATH、HOME 和服务显式配置的 env。 |
 | S3 | nginx 覆盖 XFF，容器只信任固定代理地址；应用与日志统一使用经过 ASGI 代理校验的客户端地址，不再读取原始 XFF。登录、注册、找回密码及发送验证邮件均有按 IP 限流。已验证连续修改 XFF 不能绕过限流。 |
 | S4 | 非开发环境必须配置有效的 BOTLY_BASE_URL 才能生成认证链接，开发链接也只在开发/测试环境返回。已验证伪造 Host / X-Forwarded-Host 不会改变重置链接。 |
 | S5 | Markdown 图片仅自动加载鉴权的上传/文件接口，拒绝外部图片、路径穿越及认证重定向地址。Next 与 nginx 提供 CSP 和安全响应头，直接访问开发服务也有防护。 |
@@ -302,7 +302,7 @@ class Event(Base):
 
 50 用户独立 Postgres 验收：50/50 执行完成，并发峰值 20，350 项隔离检查通过；200 请求的消息接口 p95 为 85.0ms，群聊列表 p95 为 119.4ms。使用离线 mock 模型和本机环境，此结果用于回归容量与隔离，不代表真实模型/远端沙箱的吞吐。
 
-生产构建与开发服务的缓存目录已隔离（`.next` / `.next-dev`），防止构建校验覆盖运行中的 CSS。修复后生产构建通过，聊天页布局及 CSS 200 响应均已检查。
+生产构建与开发服务的缓存目录已隔离（`.next` / `.next-dev`），防止构建校验覆盖状态中的 CSS。修复后生产构建通过，聊天页布局及 CSS 200 响应均已检查。
 
 第一轮验证：后端 `pytest` 全量 384 项通过；前端 `npm test` 41 项通过，类型检查与生产构建通过。50 用户验收通过；`git diff --check` 无异常。
 
@@ -317,6 +317,6 @@ class Event(Base):
 | E1 | 移除 .github 忽略项，CI 文件可正常纳入版本控制；CI 增加独立 PostgreSQL 并发事件回归。补充服务端 Docker 上下文过滤、前端 public 资源复制与健康检查。未执行完整 Docker 部署。 |
 | E2 | 编排入口从 3434 行拆到约 670 行；派发、任务交接、工具、上下文和收尾职责拆入独立模块。聊天事件与通知抽成 hook，空状态组件及设置页弹窗、字段组件独立。保留现有调用入口和状态机行为。 |
 
-本轮在用户要求停止测试之前，已有后端 389 项、前端 45 项通过，类型检查与生产构建通过；PostgreSQL 并发提交回归包含在内。追加的独立 50 用户验收也已完成：50/50 执行完成，峰值 20，350 项隔离检查通过。用户要求不再运行测试后停止追加验证。
+本轮在用户要求停止测试之前，已有后端 389 项、前端 45 项通过，类型检查与生产构建通过；PostgreSQL 并发提交回归包含在内。追加的独立 50 用户验收也已完成：50/50 执行完成，峰值 20，350 项隔离检查通过。用户要求不再状态测试后停止追加验证。
 
 本机业务库已备份到 `server/data/backups/backup-20261104-055125-570373.dump`，迁移检查结果为 `0011`。API、Worker、Web 已于 2026-11-04 重启加载修复，启动器 PID 记录在 `/private/tmp/botly-finish-runtime.json`。代码仍位于当前工作区，未发布到远端。

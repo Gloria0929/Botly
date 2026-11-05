@@ -14,6 +14,10 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
+from html import escape
+from pathlib import Path
+from string import Template
+from urllib.parse import urljoin
 
 from app.core.config import MAIL_DEV, MAIL_FROM, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USER
 from app.core.logging_setup import get_logger
@@ -78,22 +82,17 @@ def send(to: str, subject: str, text: str, html: str | None = None) -> bool:
 def password_reset_mail(link: str, ttl_minutes: int) -> tuple[str, str, str]:
     subject = "重置你的 Botly 密码"
     text = (
-        "有人（或你自己）在 Botly 请求重置这个邮箱对应的密码。\n\n"
-        f"点下面的链接设置新密码，{ttl_minutes} 分钟内有效，且只能使用一次：\n{link}\n\n"
-        "链接打开后需要输入两次新密码。重置成功后，其他设备上的登录状态会立即失效。\n\n"
-        "如果这不是你本人操作，忽略这封邮件即可，密码不会被修改。\n"
+        "我们收到了你的 Botly 密码重置请求。\n\n"
+        f"打开下面的链接，设置一个新密码。链接在 {ttl_minutes} 分钟内有效，且仅可使用一次：\n{link}\n\n"
+        "密码重置成功后，已登录的设备需要使用新密码重新登录。\n\n"
+        "没有申请重置？忽略这封邮件即可。你的密码不会因此改变。\n"
     )
-    html = f"""\
-<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.7;color:#1f2328">
-  <p>有人（或你自己）在 Botly 请求重置这个邮箱对应的密码。</p>
-  <p>点下面的按钮设置新密码，<b>{ttl_minutes} 分钟</b>内有效，且只能使用一次：</p>
-  <p style="margin:20px 0">
-    <a href="{link}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#4f63ff;color:#fff;text-decoration:none">设置新密码</a>
-  </p>
-  <p style="color:#6b7280;font-size:12.5px;word-break:break-all">{link}</p>
-  <p>重置成功后，其他设备上的登录状态会立即失效。</p>
-  <p style="color:#6b7280;font-size:12.5px">如果这不是你本人操作，忽略这封邮件即可，密码不会被修改。</p>
-</div>"""
+    template = Path(__file__).with_name("templates") / "password_reset.html"
+    html = Template(template.read_text(encoding="utf-8")).substitute(
+        reset_link=escape(link, quote=True),
+        ttl_minutes=ttl_minutes,
+        logo_url=escape(urljoin(link, "/email-logo.png"), quote=True),
+    )
     return subject, text, html
 
 

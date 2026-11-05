@@ -224,6 +224,18 @@ export type Run = {
   } | null;
 };
 
+export type PreviewBackendStatus = {
+  running: boolean;
+  ready: boolean;
+  port: number;
+  log: string;
+  phase?: "starting" | "ready" | "stopped" | "failed" | "timeout" | "config_changed";
+  message?: string;
+  elapsed_seconds?: number;
+  timeout_seconds?: number;
+  log_path?: string;
+};
+
 export type ChatFile = {
   id: string; path: string; size: number; updated_at: string | null;
   run_id?: string | null; created_by_bot_id?: string | null;
@@ -377,7 +389,7 @@ export type Me = {
   };
 };
 
-/** 8.6 运行状况看板 */
+/** 8.6 状态看板 */
 export type StatsOverview = {
   days: number;
   totals: {

@@ -18,6 +18,7 @@ from .api import (
     metrics,
     notifications,
     providers,
+    preview,
     push,
     runs,
     sandbox,
@@ -73,11 +74,13 @@ app.add_middleware(
 
 # 最后加入即最外层：提交发生在响应字节离开之前，且在日志中间件
 # 的读取之后，不影响日志统计与流式响应。
+app.add_middleware(preview.PreviewCorsMiddleware)
 app.add_middleware(CommitBeforeResponseMiddleware)
 
 for r in (
         auth.router,
         providers.router,
+        preview.router,
         bots.router,
         chats.router,
         runs.router,

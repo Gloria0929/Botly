@@ -395,6 +395,11 @@ export const api = {
     const res = await request(`/files/${fileId}/content`, {}, "无法读取文件");
     return res.text();
   },
+  fileSite: (fileId: string) => req<{ url: string; expires_in: number; backend: { port: number; manifest: string } | null }>(`/files/${fileId}/site`),
+  fileBackend: (fileId: string, action: "start" | "stop" | "status" = "start", signal?: AbortSignal) =>
+    req<import("./types").PreviewBackendStatus>(`/files/${fileId}/backend`, {
+      method: "POST", body: JSON.stringify({ action }), signal,
+    }, !!signal),
   deleteFile: (fileId: string) => req<{ ok: boolean }>(`/files/${fileId}`, { method: "DELETE" }),
 
   // 日志（只读）
@@ -408,7 +413,7 @@ export const api = {
   },
   logModules: () => req<import("./types").LogModule[]>("/logs/modules"),
 
-  // 运行状况看板（8.6）
+  // 状态看板（8.6）
   statsOverview: (days = 7) =>
     req<import("./types").StatsOverview>(`/stats/overview?days=${days}`),
   acknowledgeAlert: (id: string) =>

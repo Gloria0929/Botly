@@ -45,3 +45,33 @@ def is_output_file(user_id: str, chat_id: str, path: str) -> bool:
     if len(parts) < 2 or parts[0] != "output":
         return False
     return is_artifact_file(user_id, chat_id, path)
+
+
+def in_execution_scope(path: str, workspace: str) -> bool:
+    from app.sandbox.workspace import is_task_path, output_directory
+    if not is_task_path(path):
+        return True
+    own = output_directory(workspace)
+    legacy = own.removeprefix("output/")
+    return own != "output" and (path.startswith(own + "/") or path.startswith(legacy + "/"))
+
+
+def collect_generated_files(user_id: str, chat_id: str, workspace: str, before: dict, after: dict) -> dict[str, bytes]:
+    """脚本显式写到旧目录时，将本次新增/修改的产物归档，不搬走其工作文件。"""
+    from app.sandbox import files
+    from app.sandbox.workspace import output_directory
+    output = output_directory(workspace)
+    legacy = output.removeprefix("output/")
+    collected = {}
+    for path, digest in after.items():
+        if path.startswith("output/") or before.get(path) == digest or not in_execution_scope(path, workspace):
+            continue
+        relative = path.removeprefix(legacy + "/") if legacy != "output" else path
+        target = f"{output}/{relative}"
+        # 显式写入 output 的同名交付文件优先，不被工作区的中间版本覆盖。
+        if target in after and before.get(target) != after[target]:
+            continue
+        data = files.safe_path(user_id, chat_id, path).read_bytes()
+        files.write_bytes(user_id, chat_id, target, data)
+        collected[target] = data
+    return collected

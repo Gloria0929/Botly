@@ -1,6 +1,25 @@
+/** API 的无时区时间一律为 UTC；已有 Z 或正负偏移量时保留原时区。 */
+export function parseTimestamp(iso: string | null | undefined): number {
+  if (!iso?.trim()) return NaN;
+  const value = iso.trim();
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
+}
+
+export function elapsedTime(
+  startedAt: string | null | undefined,
+  endedAt: string | null | undefined,
+  now = Date.now(),
+): string {
+  const start = parseTimestamp(startedAt);
+  const end = endedAt ? parseTimestamp(endedAt) : now;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+  const seconds = Math.max(0, Math.floor((end - start) / 1000));
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+}
+
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "";
-  const d = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z");
+  const d = new Date(parseTimestamp(iso));
   const diff = (Date.now() - d.getTime()) / 1000;
   if (diff < 60) return "刚刚";
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
@@ -11,7 +30,7 @@ export function timeAgo(iso: string | null | undefined): string {
 
 export function clock(iso: string | null | undefined): string {
   if (!iso) return "";
-  const d = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z");
+  const d = new Date(parseTimestamp(iso));
   return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
@@ -31,7 +50,7 @@ export function num(n: number): string {
 
 export function countdown(iso: string | null | undefined): string {
   if (!iso) return "";
-  const d = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z");
+  const d = new Date(parseTimestamp(iso));
   const ms = d.getTime() - Date.now();
   if (ms <= 0) return "已过期";
   const h = Math.floor(ms / 3600000);

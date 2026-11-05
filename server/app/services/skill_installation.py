@@ -1,4 +1,4 @@
-"""把账号技能库安装到会话沙箱，源文件缓存只用于管理和恢复。"""
+"""把账号技能安装到会话沙箱，源文件缓存只用于管理和恢复。"""
 from __future__ import annotations
 
 import asyncio

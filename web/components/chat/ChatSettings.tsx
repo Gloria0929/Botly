@@ -9,7 +9,7 @@ import type { Chat } from "@/lib/types";
 import { toast } from "@/lib/ui";
 
 /**
- * 群聊设置：运行模式、token 预算覆盖、L2 写入审批、始终允许的工具（APV-06）。
+ * 群聊设置：状态模式、token 预算覆盖、L2 写入审批、始终允许的工具（APV-06）。
  * 改动即时保存，只影响当前群聊。
  */
 export default function ChatSettings({
@@ -181,7 +181,7 @@ export default function ChatSettings({
               onChange={(e) => patch({ muted: e.target.checked }, "muted", e.target.checked ? "已静音，@ 仍可唤醒成员" : "已恢复主动发言")}
               className="accent-[var(--accent)]" />静音：成员不主动发言，@ 和定向回复仍生效
           </label>
-          <p className="text-[10.5px] leading-relaxed text-faint">人数只是上限，不按名额预先挑一组成员，也不要求每条消息凑满。@everyone 通知全体成员，每人最多一次；轮次限制成员间的接话。</p>
+          <p className="text-[10.5px] leading-relaxed text-faint">人数只是上限，不按名额预先挑一组成员，也不要求每条消息凑满。@全员 通知全体成员，每人最多一次；轮次限制成员间的接话。</p>
         </div>}
         {error && (
           <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
@@ -190,7 +190,7 @@ export default function ChatSettings({
         )}
         <div>
           <div className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium">
-            <Workflow size={13} className="text-accent" /> 运行模式
+            <Workflow size={13} className="text-accent" /> 状态模式
           </div>
           <div className="grid grid-cols-2 gap-2">
             {(
@@ -248,7 +248,7 @@ export default function ChatSettings({
           </div>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
             token 预算填 0 表示无限制。委派深度 1 表示只有总指挥能派任务，2 表示子 Bot 还能再向下一层；
-            1–5 层。两项都只影响之后开始的执行，运行时长不设上限。
+            1–5 层。两项都只影响之后开始的执行，状态时长不设上限。
           </p>
           <div className="mt-2 flex items-center gap-2">
             <button className="btn-primary" onClick={saveLimits} disabled={busy === "limits"}>

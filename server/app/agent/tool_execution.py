@@ -18,6 +18,7 @@ from app.agent.execution_config import execution_bot, execution_provider, superv
 from app.agent.llm import LLMError, estimate_tokens
 from app.core.logging_setup import task_id_var
 from app.agent.scheduling import schedule_plan
+from app.agent.skill_usage import call_source
 from app.core.models import Approval, Chat, McpServer, Message, Question, Run, Task, Thread, UserSettings, now
 from app.core.security import args_hash, decrypt_secret
 from app.agent.signals import PauseSignal
@@ -212,8 +213,9 @@ class ToolExecutionMixin:
                 steps = (old.meta or {}).get("steps") or steps
                 return (
                     "用户已确认以下计划，请以这些最终步骤为准派任务：同一个 batch 的步骤"
-                    "由执行器根据你判断的 depends_on 自动安排；同批可以先派一项，系统会补齐其他项并行。不同 batch 等"
-                    "上一批结果回来再派；delegate 的 step 参数原样填步骤标题。拿到结果后"
+                    "由执行器根据你判断的 depends_on 自动安排；同批可以先派一项，系统会补齐已就绪的未启动项并行。"
+                    "每步等待其前置依赖最新一次执行成功，无关步骤失败不阻塞已就绪工作；重试只派具体步骤。"
+                    "delegate 的 step 参数原样填最终步骤标题，指令中带上相关前置结果和产物路径。拿到结果后"
                     "再汇总，不要只复述计划。\n" + json.dumps(steps, ensure_ascii=False), steps,
                 )
             bot = execution_bot(db, run, bot_id)
@@ -301,6 +303,12 @@ class ToolExecutionMixin:
             error = toolmod.validate_args(control, args)
             if error:
                 return f"参数不合法：{error}"
+        if name in ("propose_plan", "ask_user") and not task_id:
+            with session_scope() as db:
+                run = db.get(Run, self.run_id)
+                card_type = "plan" if name == "propose_plan" else "question"
+                if run.kind == "free" and not self._find_card(db, run.id, card_type, call.get("id")):
+                    return "自由群聊中请直接回应或用聊天文字提问；需要正式计划审批时请用户切换到任务模式。"
         if name == "propose_plan" and not is_supervisor:
             with session_scope() as db:
                 run = db.get(Run, self.run_id)
@@ -547,7 +555,18 @@ class ToolExecutionMixin:
             task = db.get(Task, task_id) if task_id else None
             ctx = ToolCtx(db, run, chat, bot, task, self._assert_lease)
             ctx.tool_call_id = call.get("id")
-            return asyncio.run(self._invoke_builtin(tool, args, ctx))
+            ctx.thread_id = thread_id
+            result = asyncio.run(self._invoke_builtin(tool, args, ctx))
+            usage = getattr(ctx, "skill_usage", None)
+            if usage and result.startswith(("技能「", "技能选择：")):
+                source = call_source(db, run.id, thread_id, bot_id, call.get("id"))
+                # 成功读取与结构化证据同事务落库；重放、换工具调用 id 均可复用。
+                add_message(db, thread=db.get(Thread, thread_id), run_id=run.id,
+                            sender_type="system", type_="tool_result", content=result,
+                            meta={"tool_call_id": call.get("id"), "tool": tool.name,
+                                  "skill_usage": {**usage, "bot_id": bot_id,
+                                      "interjection_seq": (source.meta or {}).get("interjection_seq", 0) if source else 0}})
+            return result
 
     def _load_builtin_context(self, bot_id: str, task_id: str | None, thread_id: str, call: dict):
         with session_scope() as db:

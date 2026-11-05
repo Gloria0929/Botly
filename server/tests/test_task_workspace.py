@@ -38,7 +38,7 @@ def parallel_workspace(client, invite, label):
                         target_bot_id=bot["id"], thread_id=thread.id, status="running",
                         config_snapshot={**root.config_snapshot, "task_workspace": f"tasks/{task.id}"})
             db.add(child); db.flush()
-            result[key] = {"run_id": child.id, "task_id": task.id, "bot_id": bot["id"], "workspace": f"tasks/{task.id}"}
+            result[key] = {"run_id": child.id, "task_id": task.id, "bot_id": bot["id"], "workspace": f"output/tasks/{task.id}"}
         db.commit()
     return result
 
@@ -77,7 +77,7 @@ def test_parallel_same_name_outputs_do_not_overwrite_and_shared_inputs_are_reada
         }
 
 
-def test_old_parallel_execution_keeps_original_directory(client, invite):
+def test_old_execution_also_defaults_to_output(client, invite):
     state = parallel_workspace(client, invite, "legacy")
     with SessionLocal() as db:
         run = db.get(Run, state["a"]["run_id"])
@@ -85,8 +85,8 @@ def test_old_parallel_execution_keeps_original_directory(client, invite):
         db.commit()
         a = context(db, state, "a")
         asyncio.run(_file_write(a, "report.md", "旧任务继续"))
-        assert files.read_file(state["user_id"], state["chat_id"], "report.md") == "旧任务继续"
-        assert not a.workspace
+        assert files.read_file(state["user_id"], state["chat_id"], "output/report.md") == "旧任务继续"
+        assert a.workspace == "output"
 
 
 def test_workspace_lookup_rejects_foreign_execution(client, invite):

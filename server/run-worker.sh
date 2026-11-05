@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 Worker（前台运行）。Agent 循环全部在这里执行，不启动它任务不会动。
+# 启动 Worker（前台状态）。Agent 循环全部在这里执行，不启动它任务不会动。
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -190,7 +190,7 @@ export default function MembersModal({
             )}
           </div>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-faint">
-            {free ? "负责人是可选的，只在无人回应时兜底，或在需要多人分工时出计划。" : "总指挥负责拆解任务并派任务；更换总指挥对下一次执行生效。"}
+            {free ? "负责人是可选的，没有明确对话对象时优先接话；其他成员按需要补充。" : "总指挥负责拆解任务并派任务；更换总指挥对下一次执行生效。"}
           </p>
           {free && chat?.supervisor_bot_id && <button className="btn-ghost mt-2" disabled={!!busy} onClick={async () => {
             setBusy("leader");

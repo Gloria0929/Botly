@@ -1,4 +1,4 @@
-"""RUN-13 插话更新原任务上下文，串行、并行及收尾期间均不丢进度。"""
+"""RUN-13 引导更新原任务上下文，串行、并行及收尾期间均不丢进度。"""
 from __future__ import annotations
 
 import asyncio
@@ -173,7 +173,7 @@ def test_interjection_continues_original_task_and_preserves_tool_results(
         assert db.get(Task, original_task_id).result == "价格对比已完成"
         notes = [m for m in db.scalars(select(Message).where(Message.run_id == run_id))
                  if (m.meta or {}).get("delegation")]
-        assert len(notes) == len(tasks), "插话不得生成第二次派发消息"
+        assert len(notes) == len(tasks), "引导不得生成第二次派发消息"
 
 
 @pytest.mark.parametrize("nested", [False, True])

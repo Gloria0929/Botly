@@ -30,7 +30,7 @@ const RUN_STATUS: Record<string, { label: string; cls: string }> = {
   failed: { label: "失败", cls: "text-danger" },
   stopped: { label: "已停止", cls: "text-faint" },
   waiting: { label: "等待用户", cls: "text-warn" },
-  running: { label: "运行中", cls: "text-accent" },
+  running: { label: "状态中", cls: "text-accent" },
   queued: { label: "排队中", cls: "text-faint" },
 };
 

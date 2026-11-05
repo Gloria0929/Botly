@@ -90,6 +90,7 @@ export default function MessageStream({
     members.forEach((b) => (m[b.id] = b));
     return m;
   }, [members]);
+  const messageMap = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages]);
 
   // 群聊保留工具轮的文字说明，工具参数与返回通过任务面板查看。
   const items = useMemo(() => {
@@ -180,6 +181,7 @@ export default function MessageStream({
           <div key={m.id} data-message-id={m.id} className={focusMessageId === m.id ? "rounded-lg bg-accent/[0.05] p-2 ring-1 ring-accent/30" : undefined}>
           <MessageItem
             msg={m}
+            quotedMessage={messageMap.get(m.meta?.reply_to || m.meta?.trigger_message_id)}
             bot={m.sender_bot_id ? botMap[m.sender_bot_id] : undefined}
             me={me}
             members={members}
@@ -230,6 +232,7 @@ function ActivityMessage({ bot, activity, onOpenTask }: {
 
 function MessageItem({
   msg,
+  quotedMessage,
   bot,
   me,
   members,
@@ -243,6 +246,7 @@ function MessageItem({
   onReply,
 }: {
   msg: Message;
+  quotedMessage?: Message;
   bot?: Bot;
   me: { name: string } | null;
   members: Bot[];
@@ -256,6 +260,16 @@ function MessageItem({
   onReply?: (msg: Message) => void;
 }) {
   const streaming = msg.status === "streaming";
+  const quotedName = quotedMessage?.sender_type === "user" ? me?.name || "你"
+    : members.find((member) => member.id === quotedMessage?.sender_bot_id)?.name
+      || quotedMessage?.sender_bot_name || "成员";
+  const replyPreview = (msg.meta?.reply_to || msg.meta?.trigger_message_id) && (
+    <div className="mb-2 border-l-2 border-line pl-2.5 text-[11.5px] leading-relaxed text-faint">
+      {quotedMessage
+        ? <><span className="font-medium">回复 {quotedName}：</span>{quotedMessage.content.replace(/\s+/g, " ").slice(0, 140)}</>
+        : "回复较早的消息"}
+    </div>
+  );
 
   if (msg.type === "handoff") return <HandoffLine text={msg.content} />;
   if (msg.type === "system")
@@ -327,9 +341,10 @@ function MessageItem({
           <div className="break-words rounded-2xl rounded-br-md border border-line bg-panel2 px-3.5 py-2.5 text-[13.5px] leading-relaxed text-ink">
             {interjection && (
               <div className="mb-1 text-[10px] font-medium font-mono uppercase tracking-wide text-faint">
-                插话 · 执行中补充
+                引导 · 执行中补充
               </div>
             )}
+            {replyPreview}
             <div className="whitespace-pre-wrap">{msg.content}</div>
           </div>
           <div className="mt-1 flex items-center justify-end gap-1.5 text-[10.5px] text-faint">
@@ -362,7 +377,7 @@ function MessageItem({
   const botAvatar = bot?.avatar || msg.sender_bot_avatar || "bot";
   const botRole = msg.sender_bot_deleted ? undefined : bot?.role || msg.sender_bot_role;
   const hasContent = !!msg.content?.trim();
-  // 运行中的 token 数：task.status 事件会实时刷新 chat.tasks 里的 tokens_used
+  // 状态中的 token 数：task.status 事件会实时刷新 chat.tasks 里的 tokens_used
   const tokensSoFar = live?.tokens_used || 0;
   const summaryFallback = {
     status: taskStatus,
@@ -408,6 +423,7 @@ function MessageItem({
           </span>
           {msg.status === "interrupted" && <span className="text-[10.5px] text-warn">输出已中断</span>}
         </div>
+        {replyPreview}
         {streaming && !hasContent ? (
           // CHT-04：模型还没吐字时，消息流里明确显示「正在输入」
           <div className="inline-flex items-center gap-2 rounded-2xl rounded-tl-md border border-line bg-panel2/60 px-3.5 py-2.5">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, Download, FileText, ListChecks, Loader2, PanelRightClose, RotateCw, Terminal, Trash2, X } from "lucide-react";
+import { ChevronLeft, Download, FileText, ListChecks, Loader2, Monitor, PanelRightClose, RotateCw, Terminal, Trash2, X } from "lucide-react";
 import { api, errText, toastError } from "@/lib/api";
 import { acceptMessageEvent, createMessageSync, mergeMessageDelta, mergeMessageSnapshot, mergeMessageUpdate } from "@/lib/message-sync";
 import { acquireChatEvents, type ChatEventSource } from "@/lib/chat-events";
@@ -15,6 +15,7 @@ import { toast } from "@/lib/ui";
 import { ToolBlock } from "./cards";
 import Markdown from "./Markdown";
 import SandboxTerminal from "./SandboxTerminal";
+import SitePreview, { SiteFrame } from "./SitePreview";
 
 const TASK_STATUS: Record<string, string> = {
   queued: "排队中",
@@ -64,7 +65,7 @@ export default function SidePanel({
   onRetryTask?: (task: Task) => void;
   busy?: boolean;
 }) {
-  const [tab, setTab] = useState<"tasks" | "files" | "terminal">("tasks");
+  const [tab, setTab] = useState<"tasks" | "files" | "preview" | "terminal">("tasks");
   const [preview, setPreview] = useState<ChatFile | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const confirm = useConfirm();
@@ -126,7 +127,7 @@ export default function SidePanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-panel">
-      <div className="flex h-16 shrink-0 items-center gap-1 border-b border-line px-2">
+      <div className="flex h-16 shrink-0 items-center gap-0.5 overflow-x-auto whitespace-nowrap border-b border-line px-2 [&>button]:shrink-0 [&>button]:px-1.5">
         <button
           onClick={() => setTab("tasks")}
           className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] transition-colors ${
@@ -145,6 +146,11 @@ export default function SidePanel({
           <FileText size={13} /> 产物
           {files.length > 0 && <span className="text-[10.5px] text-faint">{files.length}</span>}
         </button>
+        <button
+          onClick={() => setTab("preview")}
+          aria-pressed={tab === "preview"}
+          className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12px] transition-colors ${tab === "preview" ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}
+        ><Monitor size={13} /> 预览</button>
         <button
           onClick={() => { setTerminalOpenedFor(chatId); setTab("terminal"); }}
           aria-pressed={tab === "terminal"}
@@ -266,7 +272,7 @@ export default function SidePanel({
             ))}
           </div>
         )
-      ) : tab === "terminal" ? null : preview ? (
+      ) : tab === "terminal" ? null : tab === "preview" ? <SitePreview key={chatId} files={files} /> : preview ? (
         <FilePreview key={preview.id} file={preview} onClose={() => { setPreview(null); onPreviewClose?.(); }}
           onDelete={() => deleteArtifact(preview)} deleting={deletingId === preview.id} deleteDisabled={!!deletingId} />
       ) : (
@@ -275,7 +281,7 @@ export default function SidePanel({
             <div className="px-3 py-8 text-center text-[12px] leading-relaxed text-faint">
               暂无产物
               <br />
-              沙箱中的文件会出现在这里
+              output 中的文件会出现在这里
             </div>
           )}
           {files.map((f) => (
@@ -570,7 +576,6 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
   const isMarkdown = /\.(md|markdown)$/i.test(file.path);
   const isHtml = /\.html?$/i.test(file.path);
   const [htmlView, setHtmlView] = useState<"preview" | "source">("preview");
-  const [reloadKey, setReloadKey] = useState(0);
 
   return (
     <section aria-label="产物预览" className="flex min-h-0 flex-1 flex-col overflow-hidden bg-panel">
@@ -589,15 +594,6 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
                   {v === "preview" ? "预览" : "源码"}
                 </button>
               ))}
-              {htmlView === "preview" && (
-                <button
-                  onClick={() => setReloadKey((k) => k + 1)}
-                  className="rounded-md px-1.5 py-0.5 text-muted hover:text-ink"
-                  title="重新加载"
-                >
-                  <RotateCw size={11} />
-                </button>
-              )}
             </div>
           )}
           <a
@@ -615,23 +611,7 @@ export function FilePreview({ file, onClose, onDelete, deleting, deleteDisabled 
         {isImage ? <div className="min-h-0 flex-1 overflow-auto p-3"><img src={`/api/files/${file.id}/preview`} alt={name} className="h-auto max-w-full rounded" /></div> : isPdf ? (
           <iframe title={name} src={`/api/files/${file.id}/preview`} className="min-h-0 w-full flex-1 border-0" />
         ) : isHtml && htmlView === "preview" ? (
-          // srcDoc 直接渲染，沙箱只放行脚本：不能碰宿主页面的 Cookie/存储，也不能读 /api
-          <div className="flex min-h-0 flex-1 flex-col bg-white">
-            {loading ? (
-              <div className="p-4"><Loader2 size={16} className="animate-spin text-faint" /></div>
-            ) : err ? (
-              <div className="p-4 text-[12px] text-danger">{err}</div>
-            ) : (
-              <iframe
-                key={reloadKey}
-                title={name}
-                srcDoc={content}
-                sandbox="allow-scripts"
-                referrerPolicy="no-referrer"
-                className="min-h-0 w-full flex-1 border-0"
-              />
-            )}
-          </div>
+          <SiteFrame file={file} />
         ) : (
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {loading ? (

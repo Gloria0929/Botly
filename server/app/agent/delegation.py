@@ -99,7 +99,7 @@ class DelegationMixin:
             if not isinstance(step, dict):
                 continue
             raw = step.get("batch")
-            key = raw if isinstance(raw, int) and raw > 0 else -(idx + 1)
+            key = raw if type(raw) is int and raw > 0 else -(idx + 1)
             if key not in groups:
                 groups[key] = []
                 order.append(key)
@@ -107,17 +107,32 @@ class DelegationMixin:
         return [groups[k] for k in order]
 
     @staticmethod
-    def _step_matches(step: dict, index: int, key: str) -> bool:
-        title = _step_key(step.get("title") or "")
-        if not key or not title:
-            return False
-        if key == title or key == str(index + 1):
-            return True
-        # 模型可能只传「资料收集」，而计划标题是「资料收集：xxx」。
-        # 太短的键（比如序号「2」）不做包含匹配，避免误命中。
-        if len(key) >= 4 and (key in title or title in key):
-            return True
-        return False
+    def _match_plan_step(steps: list[dict], key: str) -> dict | None:
+        """完整标题优先，其次序号，简称只允许唯一匹配。"""
+        exact = [step for step in steps if _step_key(step.get("title") or "") == key]
+        if exact:
+            return exact[0] if len(exact) == 1 else None
+        if key.isdecimal() and 1 <= int(key) <= len(steps):
+            return steps[int(key) - 1]
+        matches = [step for step in steps if len(key) >= 4
+                   and (title := _step_key(step.get("title") or ""))
+                   and (key in title or title in key)]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _latest_plan_tasks(db: Session, run_id: str, main_id: str) -> dict[str, Task]:
+        """仅总指挥直接派发的最新尝试能满足计划依赖，嵌套同名任务不计入。"""
+        latest: dict[str, Task] = {}
+        for task in db.scalars(select(Task).join(Thread, Thread.id == Task.thread_id).where(
+            Task.run_id == run_id, (Thread.parent_thread_id == main_id) | (Task.thread_id == main_id),
+        ).order_by(Task.created_at.desc())):
+            latest.setdefault(_step_key(task.step_key or task.instruction), task)
+        return latest
+
+    @staticmethod
+    def _blocked_dependencies(step: dict, latest: dict[str, Task]) -> list[str]:
+        return [title for title in step.get("depends_on", [])
+                if (task := latest.get(_step_key(title))) is None or task.status != "completed"]
 
     def _parallel_batch(
         self, db: Session, run: Run, chat: Chat, step_key: str
@@ -128,13 +143,14 @@ class DelegationMixin:
         if run.parent_run_id or chat.run_mode == "step":
             return None
         steps = self._approved_plan_steps(db, run.id)
-        if not steps:
+        matched = self._match_plan_step(steps, step_key)
+        if not matched:
             return None
         for group in self._plan_batches(steps):
             if len(group) < 2:
                 continue
-            for index, step in group:
-                if not self._step_matches(step, index, step_key):
+            for _, step in group:
+                if step is not matched:
                     continue
                 batch_no = step.get("batch") if isinstance(step.get("batch"), int) else 1
                 return int(batch_no), [s for _, s in group], _step_key(step.get("title") or "")
@@ -151,7 +167,7 @@ class DelegationMixin:
         )
         parts = [title]
         if others:
-            parts.append(f"这一步和「{others}」同时由其他成员执行，只完成本步骤，不要重复他们的工作。")
+            parts.append(f"同批其他步骤「{others}」由各自任务负责，只完成本步骤，不要重复其他步骤的工作。")
         expected = (step.get("expected") or "").strip()
         if expected:
             parts.append(f"期望产出：{expected}")
@@ -170,7 +186,7 @@ class DelegationMixin:
             FileRec.user_id == task.user_id, FileRec.run_id.in_(execution_ids),
             FileRec.created_by_bot_id == task.assigned_bot_id,
         ).order_by(FileRec.path)) if f.path in (task.result or "")
-                 or (f.path.startswith("tasks/") and f.path.rsplit("/", 1)[-1] in (task.result or ""))]
+                 or (f.path.startswith(("tasks/", "output/")) and f.path.rsplit("/", 1)[-1] in (task.result or ""))]
         result = task.result or ""
         if len(result) > 3000:
             result = result[:2000] + "\n[中间内容已截断，完整结果保留在任务详情]\n" + result[-1000:]
@@ -203,56 +219,66 @@ class DelegationMixin:
         这里按 step 建索引优先复用它的指令；没发过的步骤用计划标题补一条。
         """
         ask_by_step: dict[str, tuple[dict, dict]] = {}
+        plan = self._approved_plan_steps(db, run.id)
         for msg in self._open_tool_calls(db, main.id, run.id):
             c = ((msg.meta or {}).get("tool_calls") or [{}])[0]
             fn = c.get("function") or {}
             if fn.get("name") != "delegate":
                 continue
             a = _parse_json(fn.get("arguments") or "{}")
-            key = _step_key(a.get("step") or a.get("instruction") or "")
-            ask_by_step.setdefault(key, (c, a))
+            raw_key = a.get("step") or a.get("instruction") or ""
+            if not isinstance(raw_key, str):
+                continue  # 交回常规工具校验，不能让其他调用的坏参数中断本批。
+            key = _step_key(raw_key)
+            matched = self._match_plan_step(plan, key)
+            if matched:
+                ask_by_step.setdefault(_step_key(matched["title"]), (c, a))
         ask_by_step[matched_key] = (call, args)
+
+        latest = self._latest_plan_tasks(db, run.id, main.id)
+        steps = [step for step in steps if not self._blocked_dependencies(step, latest)]
+        # 先校验全部待补派的步骤，避免建了一半任务才发现成员停用或参数无效。
+        assignments = {}
+        for step in steps:
+            key = _step_key(step["title"])
+            if key in latest:
+                continue
+            ask = ask_by_step.get(key)
+            if ask:
+                error = toolmod.validate_args(toolmod.DELEGATE_TOOL, ask[1])
+                if error:
+                    raise ValueError(f"「{step['title']}」派发参数不合法：{error}")
+            target_name = ask[1]["bot"] if ask else step.get("bot") or ""
+            target = self._resolve_member(members, target_name)
+            if not target or target.enabled is False or target.id == bot_id:
+                raise ValueError(f"「{step['title']}」的执行者「{target_name}」不存在、已停用或是总指挥本人，请调整执行者后重试")
+            instruction = ((ask[1].get("instruction") if ask else "") or "").strip()
+            if ask and not instruction:
+                raise ValueError(f"「{step['title']}」指令为空，请补充具体任务内容")
+            assignments[key] = (target, instruction or self._plan_instruction(step, steps),
+                                (ask[1].get("expected_output") if ask else "") or step.get("expected") or "")
 
         child_ids: list[str] = []
         keys: list[str] = []
         for step in steps:
             key = _step_key(step.get("title") or "")
             keys.append(key)
-            task = db.scalar(
-                select(Task)
-                .where(Task.run_id == run.id, Task.step_key == key)
-                .order_by(Task.created_at.desc())
-            )
-            attempt = 1
+            task = latest.get(key)
             if task:
-                if task.status in ("queued", "running", "waiting_approval", "waiting_reply"):
-                    # 还在跑：等它，别重复派
-                    continue
-                if task.status == "failed" and task.attempt <= MAX_REASSIGN:
-                    # RUN-10：同一子任务允许改派一次，批次内换人重试同样适用
-                    attempt = task.attempt + 1
-                else:
-                    # 已经完成/取消/改派次数用尽：把结果补给它自己的 delegate
-                    ask = ask_by_step.get(key)
-                    if ask and ask[0].get("id"):
-                        self._answer_delegate_call(db, main, task, self._delegate_summary(db, task))
-                    continue
+                # 显式重试/修订留给该调用自行执行；补派只能复用完全相同的已完成工作。
+                ask = ask_by_step.get(key)
+                if task.status == "completed" and ask and not toolmod.validate_args(toolmod.DELEGATE_TOOL, ask[1]):
+                    target = self._resolve_member(members, ask[1]["bot"])
+                    expected = ask[1].get("expected_output") or step.get("expected") or ""
+                    if (target and target.id == task.assigned_bot_id
+                            and ask[1]["instruction"].strip() == task.instruction
+                            and expected == (task.expected_output or "") and ask[0].get("id")):
+                        self._answer_open_calls(db, main, run.id, self._delegate_summary(db, task),
+                                                call_id=ask[0]["id"])
+                continue
 
-            target = self._resolve_member(members, step.get("bot") or "")
-            if not target or target.id == bot_id:
-                log.warning("并行批次跳过无法派发的步骤 run=%s 步骤=%r", run.id, step.get("title"))
-                continue
+            target, instruction, expected = assignments[key]
             ask = ask_by_step.get(key)
-            instruction = ((ask[1].get("instruction") if ask else "") or "").strip()
-            if not instruction:
-                instruction = self._plan_instruction(step, steps)
-            if not instruction:
-                continue
-            expected = (
-                (ask[1].get("expected_output") if ask else "")
-                or step.get("expected")
-                or ""
-            )
 
             thread = Thread(
                 user_id=run.user_id,
@@ -271,13 +297,14 @@ class DelegationMixin:
                 assigned_bot_id=target.id,
                 instruction=instruction,
                 expected_output=expected,
-                attempt=attempt,
+                attempt=1,
                 step_key=key,
                 batch=batch_no,
                 status="queued",
             )
             db.add(task)
             db.flush()
+            latest[key] = task
             note_meta = {
                 "task_id": task.id,
                 "thread_id": thread.id,
@@ -318,7 +345,7 @@ class DelegationMixin:
                     "bot_name": target.name,
                     "expected_output": expected,
                     "status": "queued",
-                    "attempt": attempt,
+                    "attempt": task.attempt,
                     "batch": batch_no,
                     "parallel": True,
                 },
@@ -343,12 +370,9 @@ class DelegationMixin:
                 task.id, batch_no, target.name, instruction[:120],
             )
 
-        batch_tasks = db.scalars(
-            select(Task).where(Task.run_id == run.id, Task.step_key.in_(keys))
-        ).all()
         pending = any(
-            t.status in ("queued", "running", "waiting_approval", "waiting_reply")
-            for t in batch_tasks
+            latest[key].status in ("queued", "running", "waiting_approval", "waiting_reply")
+            for key in keys if key in latest
         )
         return child_ids, pending
 
@@ -380,6 +404,7 @@ class DelegationMixin:
 
         deferred = False
         revision = False
+        retry = False
         enqueue_ids: list[str] = []
         patch: dict = {}
         with session_scope() as db:
@@ -442,19 +467,22 @@ class DelegationMixin:
                     return {}
 
             main = self._main_thread(db, chat)
-            if not nested:
+            if not nested and run.kind != "free":
                 plan = self._approved_plan_steps(db, run.id)
-                matched = next((step for index, step in enumerate(plan)
-                                if self._step_matches(step, index, step_key)), None)
-                if matched and "depends_on" in matched:
-                    finished = {_step_key(t.step_key or t.instruction) for t in db.scalars(
-                        select(Task).where(Task.run_id == run.id, Task.status == "completed")
-                    )}
-                    blocked = [step["title"] for step in plan if step["batch"] < matched["batch"]
-                               and _step_key(step["title"]) not in finished]
+                matched = self._match_plan_step(plan, step_key)
+                if plan and not matched and any("depends_on" in step for step in plan):
+                    self.write_tool_result(thread_id, call,
+                        "无法唯一匹配计划步骤，请在 step 中填写最终计划的完整标题或序号；新增工作请先调整计划。")
+                    return {}
+                if matched:
+                    # 序号、简称和完整标题必须存成同一个键，供依赖、去重及改派计数共用。
+                    step_key = _step_key(matched["title"])
+                    expected = expected or matched.get("expected") or ""
+                    latest = self._latest_plan_tasks(db, run.id, main.id)
+                    blocked = self._blocked_dependencies(matched, latest)
                     if blocked:
                         self.write_tool_result(thread_id, call,
-                            "前置批次尚未完成，不能提前执行此步骤。请先完成或调整这些步骤：" + "、".join(blocked))
+                            "前置依赖尚未完成，不能提前执行此步骤。请先完成或调整这些步骤：" + "、".join(blocked))
                         return {}
             # 节点落库后、检查点写入前重启时，复用同一调用已经创建的任务。
             existing = self._task_for_call(
@@ -469,6 +497,7 @@ class DelegationMixin:
                     and previous.assigned_bot_id == target.id and previous.instruction == instruction
                     and (previous.expected_output or "") == expected)
                 revision = bool(previous and previous.status == "completed" and not unchanged)
+                retry = bool(previous and previous.status == "failed")
                 if active or unchanged:
                     existing = previous
                     note = next((m for m in db.scalars(select(Message).where(
@@ -495,13 +524,17 @@ class DelegationMixin:
             # 计划批次只属于总指挥：子 Bot 的嵌套派任务一律串行，避免子执行
             # 再拉起一批孙任务、打乱父执行的等待语义。
             # 已完成步骤的明确修订只执行该项，不重新拉起原并行批次。
-            batch = None if (deferred or nested or revision or run.kind == "free") else self._parallel_batch(db, run, chat, step_key)
+            batch = None if (deferred or nested or revision or retry or run.kind == "free") else self._parallel_batch(db, run, chat, step_key)
             if batch:
                 batch_no, batch_steps, matched_key = batch
-                child_ids, pending = self._start_parallel_batch(
-                    db, run, chat, main, members, batch_no, batch_steps, matched_key,
-                    call, args, bot_id,
-                )
+                try:
+                    child_ids, pending = self._start_parallel_batch(
+                        db, run, chat, main, members, batch_no, batch_steps, matched_key,
+                        call, args, bot_id,
+                    )
+                except ValueError as exc:
+                    self.write_tool_result(thread_id, call, str(exc))
+                    return {}
                 if pending:
                     enqueue_ids = child_ids
                     deferred = True
@@ -521,7 +554,10 @@ class DelegationMixin:
                 failed = [
                     t
                     for t in db.scalars(
-                        select(Task).where(Task.run_id == run.id, Task.status == "failed")
+                        select(Task).join(Thread, Thread.id == Task.thread_id).where(
+                            Task.run_id == run.id, Task.status == "failed",
+                            (Thread.parent_thread_id == thread_id) | (Task.thread_id == thread_id),
+                        )
                     ).all()
                     if (t.step_key or _step_key(t.instruction)) == step_key
                 ]

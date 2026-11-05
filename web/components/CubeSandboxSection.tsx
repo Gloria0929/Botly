@@ -410,7 +410,7 @@ export default function CubeSandboxSection({
           <div className="border-t border-line pt-3">
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h4 className="text-[12px] font-medium text-muted">
-                远端运行记录
+                远端状态记录
               </h4>
               <span className="text-[11px] text-faint">
                 {connection.session_count || 0} 个会话沙箱
@@ -455,7 +455,7 @@ export default function CubeSandboxSection({
               </p>
             )}
             <p className="mt-3 text-[11px] leading-relaxed text-faint">
-              代码和命令在 Cube 中运行。请在
+              代码和命令在 Cube 中状态。请在
               <Link
                 href="/bots"
                 className="mx-1 text-muted underline underline-offset-2 hover:text-ink"

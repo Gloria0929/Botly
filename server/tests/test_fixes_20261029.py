@@ -25,7 +25,7 @@ def test_chat_limit_override_is_validated(client, invite):
     register(client, invite, "chat-limits@test.dev")
     chat_id, _ = setup_workspace(client)
 
-    # 运行时长限制已删除，旧字段按未知限额拒绝
+    # 状态时长限制已删除，旧字段按未知限额拒绝
     assert client.patch(
         f"/api/chats/{chat_id}", json={"limits_override": {"max_duration_min": 120}}
     ).status_code == 400

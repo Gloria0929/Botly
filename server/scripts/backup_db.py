@@ -64,7 +64,7 @@ def _pg_url() -> str:
 
 
 def _backup_postgres(dst: Path) -> None:
-    # DATABASE_URL 已含密码；作为进程参数会有短暂暴露，脚本运行在受信主机上可接受。
+    # DATABASE_URL 已含密码；作为进程参数会有短暂暴露，脚本状态在受信主机上可接受。
     cmd = ["pg_dump", "-Fc", "-Z6", "--no-owner", "--no-privileges", "-f", str(dst), _pg_url()]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

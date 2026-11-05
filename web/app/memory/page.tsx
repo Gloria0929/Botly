@@ -173,7 +173,7 @@ export default function MemoryPage() {
         <div className="page">
           <PageHeader
             eyebrow="CONTEXT / MEMORY"
-            title="团队记忆"
+            title="记忆"
             description="让团队记住重要的偏好、约定和项目背景，每次协作都能接续上下文。"
             actions={<button className="btn-primary" onClick={() => setAdding(true)}><Plus size={14} />添加记忆</button>}
           />

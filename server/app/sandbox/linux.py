@@ -207,7 +207,7 @@ def _format(out: bytes | str, err: bytes | str, code: int, limit: int) -> str:
 
 async def run_command(user_id: str, chat_id: str, command: str, *, workspace: str = "") -> str:
     if not LINUX_SANDBOX_ENABLED:
-        return "Linux 运行环境未启用（管理员未开启 BOTLY_LINUX_SANDBOX_ENABLED）。"
+        return "Linux 状态环境未启用（管理员未开启 BOTLY_LINUX_SANDBOX_ENABLED）。"
     command = (command or "").strip()
     if not command:
         return "命令为空。"
@@ -271,7 +271,7 @@ async def run_code(user_id: str, chat_id: str, code: str, language: str = "pytho
     if not CODE_SANDBOX_ENABLED:
         return "代码执行未启用（管理员未开启 BOTLY_CODE_SANDBOX_ENABLED）。"
     if not LINUX_SANDBOX_ENABLED:
-        return "Linux 运行环境未启用（管理员未开启 BOTLY_LINUX_SANDBOX_ENABLED）。"
+        return "Linux 状态环境未启用（管理员未开启 BOTLY_LINUX_SANDBOX_ENABLED）。"
     runner = _RUNNERS.get((language or "python").lower())
     if not runner:
         return f"不支持的语言：{language}。可选：{'、'.join(_RUNNERS)}。"

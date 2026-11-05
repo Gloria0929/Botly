@@ -107,7 +107,7 @@ if APP_ENV in {"production", "prod"}:
     if not _raw_enc:
         raise RuntimeError("生产环境必须单独配置 BOTLY_ENCRYPTION_KEY")
 ADMIN_EMAILS = {e.strip().lower() for e in os.getenv("BOTLY_ADMIN_EMAILS", "").split(",") if e.strip()}
-RESET_TOKEN_TTL_MINUTES = max(5, int(os.getenv("BOTLY_RESET_TOKEN_TTL_MINUTES", "60")))
+RESET_TOKEN_TTL_MINUTES = max(5, int(os.getenv("BOTLY_RESET_TOKEN_TTL_MINUTES", "10")))
 VERIFY_TOKEN_TTL_HOURS = max(1, int(os.getenv("BOTLY_VERIFY_TOKEN_TTL_HOURS", "24")))
 SANDBOX_QUOTA_MB = 200
 
@@ -126,7 +126,7 @@ OAUTH_ALLOW_SIGNUP = os.getenv("BOTLY_OAUTH_ALLOW_SIGNUP", "1").lower() in ("1",
 OAUTH_TIMEOUT = max(5, int(os.getenv("BOTLY_OAUTH_TIMEOUT", "15")))
 
 # ---- NTF-06 Web Push（Service Worker + VAPID）----
-# VAPID 私钥：PEM 文本或 32 字节原始私钥的 base64url。不配置时首次运行自动生成，
+# VAPID 私钥：PEM 文本或 32 字节原始私钥的 base64url。不配置时首次状态自动生成，
 # 持久化到 DATA_DIR/vapid.json（多实例部署请显式配置，保证各实例用同一把公钥）。
 VAPID_PRIVATE_KEY = os.getenv("BOTLY_VAPID_PRIVATE_KEY", "").strip()
 # VAPID sub 声明，要求是 mailto: 或 https: 开头
@@ -172,7 +172,7 @@ CODE_EXEC_LEVEL = os.getenv("BOTLY_CODE_EXEC_LEVEL", "L2").upper()
 if CODE_EXEC_LEVEL not in ("L1", "L2", "L3"):
     CODE_EXEC_LEVEL = "L2"
 
-# ---- 常驻 Linux 运行环境（每个群聊一个容器，root + 联网，可装包）----
+# ---- 常驻 Linux 状态环境（每个群聊一个容器，root + 联网，可装包）----
 LINUX_SANDBOX_ENABLED = os.getenv("BOTLY_LINUX_SANDBOX_ENABLED", "1").lower() not in ("0", "false", "no")
 # Docker 仅供本地测试；云沙箱通过受信任的服务端适配器接入，未配置时不启动容器。
 SANDBOX_PROVIDER = os.getenv("BOTLY_SANDBOX_PROVIDER", "none").strip().lower()

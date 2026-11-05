@@ -241,7 +241,7 @@ def test_cube_reuses_chat_sandbox_and_syncs_binary_files(client, invite, monkeyp
     files.write_file(account["id"], account["chat_id"], "input.txt", "用户附件")
     out = asyncio.run(runtime.run_command(account["id"], account["chat_id"], "echo hi"))
     assert "cube output" in out
-    assert "运行环境：Cube · 沙箱 cube-1" in out
+    assert "状态环境：Cube · 沙箱 cube-1" in out
     assert state["created"] == 1
     assert state["sandboxes"]["cube-1"].data["/workspace/input.txt"] == "用户附件".encode()
     assert files.safe_path(account["id"], account["chat_id"], "result.png").read_bytes() == b"\x89PNG\x00\xff"
@@ -311,7 +311,7 @@ def test_agent_code_tool_uses_owned_cube_instead_of_local_docker(client, invite,
         "name": "code_exec", "arguments": json.dumps({"code": "print(42)", "language": "python"})}}
     result = asyncio.run(RunExecutor(run_id).execute_tool(thread_id=thread_id, bot_id=bot["id"],
         task_id=None, call=call, role="worker"))
-    assert "运行环境：Cube · 沙箱 cube-1" in result
+    assert "状态环境：Cube · 沙箱 cube-1" in result
     assert state["created"] == 1 and "python3" in state["commands"][-1][1]
     assert client.get("/api/sandbox").json()["session_count"] == 1
     client.post(f"/api/runs/{run_id}/stop")
@@ -357,11 +357,11 @@ def test_cube_tool_registers_and_removes_file_panel_records(client, invite, monk
         ctx = ToolCtx(db, run, chat, bot, None)
         assert "cube output" in asyncio.run(_run_command(ctx, "echo test"))
         db.commit()
-        rec = db.scalar(select(FileRec).where(FileRec.chat_id == chat.id, FileRec.path == "result.png"))
+        rec = db.scalar(select(FileRec).where(FileRec.chat_id == chat.id, FileRec.path == "output/result.png"))
         assert rec is not None
         response = client.get(f"/api/files/{rec.id}/download")
         assert response.content == b"\x89PNG\x00\xff"
-        files.delete_file(account["id"], chat.id, "result.png")
+        files.delete_file(account["id"], chat.id, "output/result.png")
         _record_execution_files(ctx)
         db.commit()
     assert client.get(f"/api/chats/{account['chat_id']}/files").json() == []

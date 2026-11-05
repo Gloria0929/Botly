@@ -57,8 +57,8 @@ export default function Composer({
     }
   }, [text]);
 
-  const everyone: Bot = { id: "everyone", name: "everyone", role: "全体成员", avatar: "bot",
-    system_prompt: "", provider_id: null, model: null, temperature: 0.4, tools: [], deleted: false, display_name: "everyone" };
+  const everyone: Bot = { id: "everyone", name: "全员", role: "全体成员", avatar: "bot",
+    system_prompt: "", provider_id: null, model: null, temperature: 0.4, tools: [], deleted: false, display_name: "全员" };
   const filtered = [...members, ...(chatMode === "free" ? [everyone] : [])]
     .filter((m) => m.name.toLowerCase().includes(mentionQuery.toLowerCase()));
   // 停用的 Bot 只展示、不可选：键盘上下和回车也只在可用成员里走
@@ -80,7 +80,7 @@ export default function Composer({
     if (!v || disabledReason || uploading) return;
     setAttachments([]);
     if (running && chatMode !== "free") {
-      // RUN-13：执行中发送的是插话，不新建执行
+      // RUN-13：执行中发送的是引导，不新建执行
       onInterject(v);
       setText("");
       return;
@@ -205,8 +205,8 @@ export default function Composer({
               }}
               placeholder={
                 running
-                  ? chatMode === "free" ? "继续聊天，成员会并行回应…" : "执行中：可输入补充，总指挥会在下一步前读到…"
-                  : chatMode === "free" ? "说点什么，或 @成员、@everyone…" : "描述你的任务，或 @ 一位成员…"
+                  ? chatMode === "free" ? "继续聊天，或 @成员接话…" : "执行中：可输入补充，总指挥会在下一步前读到…"
+                  : chatMode === "free" ? "说点什么，或 @成员、@全员…" : "描述你的任务，或 @ 一位成员…"
               }
               className="max-h-40 min-h-[48px] w-full resize-none bg-transparent text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-faint"
             />
@@ -234,7 +234,7 @@ export default function Composer({
             <span className="ml-1 mr-auto hidden text-[10px] text-faint sm:block">Enter 发送 · Shift + Enter 换行</span>
             <span className="mr-auto sm:hidden" />
             {running && (
-              // CHT-03：执行进行中时发送按钮变为「停止」；插话改由 Enter 发送
+              // CHT-03：执行进行中时发送按钮变为「停止」；引导改由 Enter 发送
               <button
                 onClick={onStop}
                 className="mb-0.5 flex h-7 items-center gap-1.5 rounded-lg bg-danger px-2.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
@@ -261,7 +261,7 @@ export default function Composer({
           {running ? (
             <>
               <span className="flex items-center gap-1">
-                <Zap size={10} /> {chatMode === "free" ? "可继续发送消息，成员并行判断、并行回应" : "执行中 Enter 发送 = 补充要求，下一轮读取并继续原任务"}
+                <Zap size={10} /> {chatMode === "free" ? "可连续发送 · 同一成员依次接话 · @ 可指定对话对象" : "执行中 Enter 发送 = 补充要求，下一轮读取并继续原任务"}
               </span>
               <span>点「停止」结束执行，已完成步骤与产物保留</span>
             </>

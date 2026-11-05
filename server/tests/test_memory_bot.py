@@ -81,7 +81,7 @@ def test_memory_save_run_limit(client, invite):
 
     ctx = _ctx_for(run_id)
     try:
-        for content in ("用户偏好交付前运行全部回归测试。", "项目部署使用 Postgres 数据库。", "每周五需要发送项目进度报告。"):
+        for content in ("用户偏好交付前状态全部回归测试。", "项目部署使用 Postgres 数据库。", "每周五需要发送项目进度报告。"):
             out = asyncio.run(_memory_save(ctx, content=content))
             assert out.startswith("已保存")
         out4 = asyncio.run(_memory_save(ctx, content="用户约定第 4 条：文档放 docs 目录。"))

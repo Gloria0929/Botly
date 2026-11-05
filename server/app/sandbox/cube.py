@@ -372,7 +372,7 @@ class CubeBackend:
         from app.sandbox.workspace import is_task_path, output_directory, workspace_for_run
         workspace = workspace_for_run(user_id, chat_id, run_id)
         output_dir = output_directory(workspace)
-        scopes = (workspace, output_dir)
+        scopes = (workspace, output_dir, workspace.removeprefix("output/"))
         manifest = {rel: digest for rel, digest in old_manifest.items()
                     if is_task_path(rel) and not any(rel.startswith(scope + "/") for scope in scopes)} if workspace else {}
         directories = [WORKSPACE]
@@ -412,6 +412,14 @@ class CubeBackend:
         for rel in old_manifest.keys() - manifest.keys():
             if is_artifact_path(rel) and (not workspace or any(rel.startswith(scope + "/") for scope in scopes)):
                 files.delete_file(user_id, chat_id, rel)
+        if bot_id:
+            from app.sandbox.artifacts import collect_generated_files
+            collected = collect_generated_files(user_id, chat_id, workspace, old_manifest, manifest)
+            for rel, data in collected.items():
+                remote = str(PurePosixPath(WORKSPACE) / rel)
+                ensure_directory(sandbox, str(PurePosixPath(remote).parent))
+                sandbox.files.write(remote, data)
+                manifest[rel] = hashlib.sha256(data).hexdigest()
         with session_scope() as db:
             row = db.scalar(select(CubeSession).where(CubeSession.user_id == user_id, CubeSession.chat_id == chat_id))
             row.files_manifest = manifest
@@ -429,6 +437,7 @@ class CubeBackend:
                 rec.size = files.safe_path(user_id, chat_id, rel).stat().st_size
                 if bot_id and old_manifest.get(rel) != digest:
                     rec.created_by_bot_id, rec.run_id = bot_id, run_id
+                    rec.updated_at = now()
             emit(db, user_id, chat_id, "files.updated", {"chat_id": chat_id})
         return manifest
 
@@ -442,7 +451,7 @@ class CubeBackend:
             pushed = self._push(sandbox, user_id, chat_id, session.files_manifest or {})
             # 先同步已有文件并登记 output 内容，基线用于识别本次 Agent 改动。
             baseline = self._pull(sandbox, user_id, chat_id, pushed, run_id=run_id)
-            # 容器内 timeout 也约束命令，即使 HTTP 客户端取消也不会无限运行。
+            # 容器内 timeout 也约束命令，即使 HTTP 客户端取消也不会无限状态。
             wrapped = f"timeout -s KILL {timeout} bash -lc {shlex.quote(command)}"
             try:
                 result = sandbox.commands.run(wrapped, cwd=workdir, timeout=timeout + 15, envs=TERMINAL_ENV)
@@ -453,7 +462,7 @@ class CubeBackend:
             finally:
                 self._pull(sandbox, user_id, chat_id, baseline, bot_id, run_id)
             combined = "\n".join(v.strip() for v in (result.stdout, result.stderr) if v.strip())
-            return (UNTRUSTED_PREFIX + f"运行环境：Cube · 沙箱 {sandbox.sandbox_id}\n退出码 {result.exit_code}\n"
+            return (UNTRUSTED_PREFIX + f"状态环境：Cube · 沙箱 {sandbox.sandbox_id}\n退出码 {result.exit_code}\n"
                 + (combined[:20000] or "（无输出）"))
         finally:
             close_client(sandbox)
@@ -469,7 +478,7 @@ class CubeBackend:
     async def run_code(self, user_id, chat_id, code, language, *, bot_id=None, run_id=None):
         runner = {"python": "python3", "node": "node", "bash": "bash", "sh": "sh"}.get(language)
         if not runner:
-            raise ValueError("不支持的运行语言")
+            raise ValueError("不支持的状态语言")
         # 代码放在 stdin，由固定解释器执行；不将代码插入 shell 命令本体。
         import base64
         payload = base64.b64encode(code.encode()).decode()

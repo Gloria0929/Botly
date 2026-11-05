@@ -18,7 +18,7 @@ from app.sandbox.artifacts import is_output_file
 
 router = APIRouter(prefix="/files", tags=["files"])
 
-PREVIEW_EXT = {".md", ".txt", ".json", ".csv", ".py", ".js", ".ts", ".html", ".yaml", ".yml", ".log"}
+PREVIEW_EXT = {".md", ".txt", ".json", ".csv", ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".html", ".htm", ".yaml", ".yml", ".log"}
 PREVIEW_MEDIA = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".pdf": "application/pdf"}
 
 

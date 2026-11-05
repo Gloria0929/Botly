@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 API（前台运行，Ctrl-C 退出）
+# 启动 API（前台状态，Ctrl-C 退出）
 set -euo pipefail
 cd "$(dirname "$0")"
 

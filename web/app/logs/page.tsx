@@ -123,7 +123,7 @@ export default function LogsPage() {
         <div className="page">
           <PageHeader
             eyebrow="OPS / LOGS"
-            title="运行日志"
+            title="状态日志"
             description={
               <>
                 和 <code className="font-mono text-[11.5px] text-muted">data/logs/app.log</code>{" "}

@@ -1,4 +1,4 @@
-"""独立 Worker：从 Redis 队列取执行并运行 Agent 循环。
+"""独立 Worker：从 Redis 队列取执行并状态 Agent 循环。
 
 与 API 进程分离，关闭浏览器不影响执行；进程重启后，
 DB 里 status=running 且租约过期的执行会被重新入队，从断点继续。
@@ -200,6 +200,9 @@ def _claim(run_id: str, worker_id: str) -> int:
             db.execute(text("SELECT pg_advisory_xact_lock(782341991)"))
         run = db.get(Run, run_id)
         if not run or run.status != "queued":
+            return False
+        from app.agent.free_chat import free_run_blocked
+        if free_run_blocked(db, run):
             return False
         total = db.scalar(select(func.count(Run.id)).where(
             Run.status == "running",

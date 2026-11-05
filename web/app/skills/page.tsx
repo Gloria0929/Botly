@@ -224,7 +224,7 @@ export default function SkillsPage() {
         <div className="page">
           <PageHeader
             eyebrow="AGENT / SKILLS"
-            title="技能库"
+            title="技能"
             description="沉淀团队的工作方法，让专业能力在不同智能体之间复用。"
             actions={
               <>

@@ -26,7 +26,7 @@ import {
 import type { Bot, Message, PlanStep, Task } from "@/lib/types";
 import Avatar from "@/components/ui/Avatar";
 import Select from "@/components/ui/Select";
-import { bytes, clock, countdown, num } from "@/lib/fmt";
+import { bytes, clock, countdown, elapsedTime, num } from "@/lib/fmt";
 
 /* ------------------------------------------------------------------ */
 /* 计划卡片                                                            */
@@ -309,15 +309,6 @@ export function TaskDoneCard({
 /* ------------------------------------------------------------------ */
 const LIVE_STATUS = new Set(["queued", "running", "waiting_approval", "waiting_reply"]);
 
-function elapsedText(task: Task, now: number): string {
-  if (!task.started_at) return "";
-  const start = Date.parse(task.started_at);
-  if (Number.isNaN(start)) return "";
-  const end = task.ended_at ? Date.parse(task.ended_at) : now;
-  const sec = Math.max(0, Math.round((end - start) / 1000));
-  return sec >= 60 ? `${Math.floor(sec / 60)} 分 ${sec % 60} 秒` : `${sec} 秒`;
-}
-
 /** 挂在下发消息/子 Bot 回复下方的一行概要，随任务状态实时更新。 */
 export function TaskSummaryLine({
   live,
@@ -351,7 +342,7 @@ export function TaskSummaryLine({
         </span>
       )}
       {!!attempt && attempt > 1 && <span>· 第 {attempt} 次执行</span>}
-      {live?.started_at && <span>· 已运行 {elapsedText(live, now) || "—"}</span>}
+      {live?.started_at && <span>· 已运行 {elapsedTime(live.started_at, live.ended_at, now) || "—"}</span>}
       <span>· {num(tokens)} tokens</span>
       {onOpen && (
         <button onClick={onOpen} className="text-accent hover:underline">
@@ -428,7 +419,7 @@ export function TaskInlineDetail({
                 : "用量统计中…"}
             </span>
             {!!live?.attempt && <span>第 {live.attempt} 次执行</span>}
-            {live?.started_at && <span className="flex items-center gap-1"><Clock3 size={10} /> {elapsedText(live, now) || "—"}</span>}
+            {live?.started_at && <span className="flex items-center gap-1"><Clock3 size={10} /> {elapsedTime(live.started_at, live.ended_at, now) || "—"}</span>}
           </div>
           {onOpenProcess ? (
             <button onClick={onOpenProcess} className="flex items-center gap-1 text-[11px] text-accent hover:underline">

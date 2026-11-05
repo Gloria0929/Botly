@@ -21,7 +21,7 @@ const mono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Botly · 多智能体工作台",
   description: "把多步骤工作交给一支 AI 团队，过程可见，风险可控。",
-  icons: { icon: "/icon.svg" },
+  icons: { icon: "/icon.svg?v=collaboration" },
 };
 
 const themeScript = `

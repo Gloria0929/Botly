@@ -17,7 +17,7 @@ CHAT_TEMPLATES = [
      "description": "从选题和资料收集到成稿、审校，协作完成内容。",
      "members": ["supervisor", "researcher", "writer", "reviewer"]},
     {"id": "software-development", "name": "软件开发", "avatar": "wrench",
-     "description": "拆解需求，编写可运行的代码，再检查质量和交付结果。",
+     "description": "拆解需求，编写可状态的代码，再检查质量和交付结果。",
      "members": ["supervisor", "coder", "reviewer"]},
     {"id": "data-analysis", "name": "数据分析", "avatar": "chart",
      "description": "清洗数据、计算指标、生成分析脚本，复核结论。",

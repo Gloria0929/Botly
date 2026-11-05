@@ -1,4 +1,4 @@
-"""8.6 运行状况看板：完成率、失败原因分布与最近失败。"""
+"""8.6 状态看板：完成率、失败原因分布与最近失败。"""
 from __future__ import annotations
 
 from datetime import timedelta

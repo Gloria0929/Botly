@@ -1,4 +1,4 @@
-"""常驻 Linux 运行环境（run_command）的单元测试（不依赖真实 Docker）。"""
+"""常驻 Linux 状态环境（run_command）的单元测试（不依赖真实 Docker）。"""
 from __future__ import annotations
 
 import asyncio

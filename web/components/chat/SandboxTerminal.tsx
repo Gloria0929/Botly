@@ -53,7 +53,7 @@ export default function SandboxTerminal({
         setError(state.reason || "交互式终端需要连接 Cube 后端");
         return;
       }
-      // 模块随聊天页打包，仅在浏览器打开终端时执行，避免运行中的页面请求已失效的独立分块。
+      // 模块随聊天页打包，仅在浏览器打开终端时执行，避免状态中的页面请求已失效的独立分块。
       const [{ Terminal }, { FitAddon }] = await Promise.all([
         import(/* webpackMode: "eager" */ "@xterm/xterm"),
         import(/* webpackMode: "eager" */ "@xterm/addon-fit"),

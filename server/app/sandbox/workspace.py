@@ -3,8 +3,7 @@ from app.sandbox import files
 
 
 def relative_workspace(run) -> str:
-    # 仅新任务显式设置目录，旧执行恢复时继续使用原来的共享工作区。
-    return (run.config_snapshot or {}).get("task_workspace") or ""
+    return output_directory((run.config_snapshot or {}).get("task_workspace") or "")
 
 
 def output_directory(workspace: str) -> str:

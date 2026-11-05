@@ -27,6 +27,7 @@ from app.tools import registry as toolmod
 from app.core.db import session_scope
 from app.core.events import emit
 from app.agent.execution_config import execution_bot, execution_provider, supervisor_id
+from app.agent.skill_usage import usage_prompt, usage_state
 from app.agent.free_chat import FreeChatMixin
 from app.core.redis_bus import enqueue
 from app.agent.llm import LLMError, estimate_tokens, stream_chat
@@ -298,7 +299,7 @@ class RunExecutor(
             # 工具调用还没执行：交给路由去 tool 节点，open call 会带着原来的
             # tool_call_id 继续，工具侧有自己的按 id 去重。
             return True, ""
-        # 插话在上一轮输出期间到达：在原线程补一轮处理，不能把旧结论重放成最终结果。
+        # 引导在上一轮输出期间到达：在原线程补一轮处理，不能把旧结论重放成最终结果。
         thread = db.get(Thread, thread_id)
         latest = max((m.seq for m in self._interjection_messages(db, run, thread)), default=0)
         if latest > (last.meta or {}).get("interjection_seq", 0):
@@ -359,7 +360,8 @@ class RunExecutor(
             can_delegate = self._can_delegate(db, run, thread_id, is_supervisor, task_id)
             # TOL-05 / 技能：Bot 自己的工具 + 已启用技能带来的工具，再与 MCP 工具合并
             allowed_tools = list(bot.tools or [])
-            for name in skillmod.effective_tool_names(skillmod.for_bot(db, run.user_id, bot)):
+            enabled_skills = skillmod.for_bot(db, run.user_id, bot)
+            for name in skillmod.effective_tool_names(enabled_skills):
                 if name not in allowed_tools:
                     allowed_tools.append(name)
             tool_list = toolmod.tools_for_bot(
@@ -370,10 +372,7 @@ class RunExecutor(
                 can_consult_supervisor=thread.type == "task" and task_id is not None,
             )
             if role == "peer":
-                if bot.id == (run.config_snapshot.get("supervisor") or {}).get("id"):
-                    tool_list.append(toolmod.PLAN_TOOL)
-                else:
-                    tool_list = [t for t in tool_list if t.name != "propose_plan"]
+                tool_list = [t for t in tool_list if t.name not in ("propose_plan", "ask_user")]
             selected = (run.config_snapshot.get("free") or {}).get("selected") or {}
             observer = bool(role == "peer" and run.config_snapshot.get("free", {}).get("direct_response")
                             and selected and not selected.get("required"))
@@ -391,6 +390,9 @@ class RunExecutor(
             messages = self._build_messages(
                 db, run, chat, thread, bot, is_supervisor, members, interjections=interjections,
             )
+            if enabled_skills and not observer:
+                state = usage_state(db, run.id, thread_id, bot_id, enabled_skills)
+                messages.append({"role": "system", "content": usage_prompt(enabled_skills, state)})
             # 只标记本轮实际读取的补充，模型调用期间到达的新消息仍留待下一轮。
             if is_supervisor and thread.type == "main":
                 self._mark_interjections_read(db, run, thread, seq=interjection_seq)
@@ -455,7 +457,9 @@ class RunExecutor(
         peer = prepared["peer_selected"]
         draft = await asyncio.to_thread(self._open_stream_message, thread_id, bot_id,
                                       meta={"free_turn": peer["turn"], "parent_run_id": peer.get("root_run_id"),
-                                            "trigger_message_id": prepared["trigger_message_id"]} if peer else None)
+                                            "trigger_message_id": prepared["trigger_message_id"],
+                                            "reply_to": peer.get("handoff_message_id") or prepared["trigger_message_id"],
+                                            "free_observer": prepared["observer"]} if peer else None)
         mirror = None
         if mirror_thread_id:
             mirror = await asyncio.to_thread(
@@ -483,6 +487,8 @@ class RunExecutor(
 
         async def flush_text():
             nonlocal publication_allowed
+            if prepared["observer"]:
+                return  # 简短补充先完整生成，确认没有复述前文后再发布。
             if peer and "[PASS]".startswith(buffer.strip()):
                 return
             if peer and publication_allowed is None:
@@ -572,10 +578,14 @@ class RunExecutor(
         if not calls:
             if peer and (not content.strip() or content.strip() == "[PASS]"):
                 if peer["required"]:
-                    content = "我在，收到你的消息。"
+                    await asyncio.to_thread(self._drop_message, draft["id"])
+                    raise LLMError("成员未返回有效回应")
                 else:
                     await asyncio.to_thread(self._mark_peer_pass, draft["id"])
                     return False, ""
+            if prepared["observer"] and await asyncio.to_thread(self._duplicate_free_reply, content):
+                await asyncio.to_thread(self._mark_peer_pass, draft["id"])
+                return False, ""
             if peer and publication_allowed is None:
                 publication_allowed = await asyncio.to_thread(self._claim_free_speaker)
             if peer and not publication_allowed:
@@ -647,7 +657,7 @@ class RunExecutor(
                     run.steps_used += 1
 
     async def _watch_model_stream(self, stream, on_idle=None):
-        """无 token 返回、限流等待期间也响应停止和运行时长限制。"""
+        """无 token 返回、限流等待期间也响应停止和状态时长限制。"""
         pending = None
         last_limits = 0.0
         try:
