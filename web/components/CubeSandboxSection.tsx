@@ -10,6 +10,7 @@ import {
   Loader2,
   Pencil,
   Plug,
+  RefreshCw,
   Save,
   Server,
   ShieldCheck,
@@ -18,39 +19,44 @@ import {
 import { api, errText } from "@/lib/api";
 import { toast } from "@/lib/ui";
 import { timeAgo } from "@/lib/fmt";
-import type { SandboxStatus } from "@/lib/types";
+import type { CubeTemplate, SandboxStatus } from "@/lib/types";
+import {
+  formatCubeProxy,
+  normalizeCubeAddresses,
+  parseCubeProxy,
+  withHttpScheme,
+} from "@/lib/cube-connection";
 import { useConfirm } from "@/components/ui/Confirm";
+import Select from "@/components/ui/Select";
 
 const emptyForm = {
   api_url: "",
   template_id: "",
   api_key: "",
-  proxy_node_ip: "",
-  proxy_port: "80",
+  proxy_address: "",
   sandbox_domain: "cube.app",
 };
 type Form = typeof emptyForm;
-const formFrom = (state?: SandboxStatus): Form => ({
-  api_url: state?.api_url || "",
-  template_id: state?.template_id || "",
-  api_key: "",
-  proxy_node_ip: state?.proxy_node_ip || "",
-  proxy_port: String(state?.proxy_port || 80),
-  sandbox_domain: state?.sandbox_domain || "cube.app",
-});
-const normalizeProxy = (raw: string) =>
-  raw
-    .trim()
-    .replace(/^https?:\/\/(\[[^\]]+\]|[^/:?#]+)\/?$/i, "$1")
-    .replace(/^\[([^\]]+)\]$/, "$1");
-const bodyFrom = (form: Form, clearKey = false) => ({
-  ...form,
-  api_url: form.api_url.trim(),
-  template_id: form.template_id.trim(),
-  proxy_node_ip: normalizeProxy(form.proxy_node_ip),
-  proxy_port: Number(form.proxy_port),
-  api_key: clearKey ? "" : form.api_key.trim() || undefined,
-});
+const formFrom = (state?: SandboxStatus): Form =>
+  normalizeCubeAddresses({
+    api_url: state?.api_url || "",
+    template_id: state?.template_id || "",
+    api_key: "",
+    proxy_address: formatCubeProxy(
+      state?.proxy_node_ip || "",
+      state?.proxy_port || 80,
+    ),
+    sandbox_domain: state?.sandbox_domain || "cube.app",
+  });
+const bodyFrom = (form: Form, clearKey = false) => {
+  const { proxy_address, ...normalized } = normalizeCubeAddresses(form);
+  return {
+    ...normalized,
+    template_id: normalized.template_id.trim(),
+    ...parseCubeProxy(proxy_address),
+    api_key: clearKey ? "" : normalized.api_key.trim() || undefined,
+  };
+};
 
 export default function CubeSandboxSection({
   state,
@@ -69,8 +75,15 @@ export default function CubeSandboxSection({
     ok: boolean;
   } | null>(null);
   const [clearKey, setClearKey] = useState(false);
+  const [templates, setTemplates] = useState<CubeTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [manualTemplate, setManualTemplate] = useState(false);
+  const [templateRefresh, setTemplateRefresh] = useState(0);
   const configured = connection?.provider === "cube";
   const showForm = !configured || editing;
+  const templateApiUrl = withHttpScheme(form.api_url);
+  const templateApiKey = clearKey ? "" : form.api_key.trim() || undefined;
 
   useEffect(() => {
     setConnection(state);
@@ -87,6 +100,46 @@ export default function CubeSandboxSection({
     connection?.proxy_port,
     connection?.sandbox_domain,
     editing,
+  ]);
+
+  useEffect(() => {
+    if (!showForm) return;
+    setTemplates([]);
+    setTemplatesError(null);
+    if (!templateApiUrl) {
+      setTemplatesLoading(false);
+      return;
+    }
+    let active = true;
+    const controller = new AbortController();
+    setTemplatesLoading(true);
+    const timer = setTimeout(() => {
+      api
+        .cubeTemplates(
+          { api_url: templateApiUrl, api_key: templateApiKey },
+          controller.signal,
+        )
+        .then((result) => {
+          if (active) setTemplates(result.templates);
+        })
+        .catch((error) => {
+          if (active) setTemplatesError(errText(error, "模板加载失败"));
+        })
+        .finally(() => {
+          if (active) setTemplatesLoading(false);
+        });
+    }, 700);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    showForm,
+    templateApiUrl,
+    templateApiKey,
+    connection?.api_key_configured,
+    templateRefresh,
   ]);
 
   useEffect(() => {
@@ -114,12 +167,15 @@ export default function CubeSandboxSection({
   const action = async (kind: "save" | "test") => {
     const values = showForm ? form : formFrom(connection);
     if (!values.api_url.trim() || !values.template_id.trim()) {
-      setFeedback({ text: "请填写 Cube 后端地址和模板 ID", ok: false });
+      setFeedback({
+        text: "请填写 Cube 后端地址，并选择或填写模板",
+        ok: false,
+      });
       return;
     }
     setBusy(kind);
     setFeedback(null);
-    setForm((f) => ({ ...f, proxy_node_ip: normalizeProxy(f.proxy_node_ip) }));
+    setForm(normalizeCubeAddresses);
     try {
       if (kind === "test") {
         const result = await api.testCube(
@@ -181,6 +237,7 @@ export default function CubeSandboxSection({
     setForm(formFrom(connection));
     setClearKey(false);
     setFeedback(null);
+    setManualTemplate(false);
     setEditing(true);
   };
   const verification =
@@ -224,16 +281,21 @@ export default function CubeSandboxSection({
         value={form[key]}
         placeholder={placeholder}
         disabled={!!busy}
-        onBlur={() =>
-          key === "proxy_node_ip" &&
+        onBlur={() => {
+          if (key === "api_url" || key === "proxy_address")
+            setForm(normalizeCubeAddresses);
+        }}
+        onChange={(event) => {
+          const value = event.target.value;
+          const backendChanged =
+            key === "api_url" && withHttpScheme(value) !== templateApiUrl;
+          if (backendChanged) setManualTemplate(false);
           setForm((f) => ({
             ...f,
-            proxy_node_ip: normalizeProxy(f.proxy_node_ip),
-          }))
-        }
-        onChange={(event) =>
-          setForm((f) => ({ ...f, [key]: event.target.value }))
-        }
+            [key]: value,
+            ...(backendChanged ? { template_id: "" } : {}),
+          }));
+        }}
       />
     </label>
   );
@@ -294,7 +356,10 @@ export default function CubeSandboxSection({
             {detail(
               "代理节点",
               connection.proxy_node_ip
-                ? `${connection.proxy_node_ip}:${connection.proxy_port || 80}`
+                ? formatCubeProxy(
+                    connection.proxy_node_ip,
+                    connection.proxy_port || 80,
+                  )
                 : "使用沙箱域名解析",
               true,
             )}
@@ -423,7 +488,6 @@ export default function CubeSandboxSection({
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             {field("api_url", "Cube 后端地址", "http://你的服务器:3000")}
-            {field("template_id", "模板 ID", "已部署的代码沙箱模板 ID")}
             {field(
               "api_key",
               "API Key（后端开启鉴权时填写）",
@@ -431,11 +495,110 @@ export default function CubeSandboxSection({
               "password",
             )}
             {field(
-              "proxy_node_ip",
-              "代理节点 IP（可选）",
-              "例如 39.99.154.47，可粘贴 http://IP",
+              "proxy_address",
+              "代理地址（可选）",
+              "例如 http://203.0.113.10:18080",
             )}
+            {field("sandbox_domain", "沙箱域名", "cube.app")}
+            <div className="sm:col-span-2">
+              <div className="mb-1.5 flex items-center justify-between gap-2 text-[11.5px] text-muted">
+                <label htmlFor={manualTemplate ? "cube-template" : undefined}>
+                  沙箱模板
+                </label>
+                <div className="flex items-center gap-3">
+                  <button
+                    className="inline-flex items-center gap-1 hover:text-ink"
+                    disabled={!!busy || templatesLoading || !templateApiUrl}
+                    onClick={() => setTemplateRefresh((value) => value + 1)}
+                  >
+                    <RefreshCw
+                      size={11}
+                      className={templatesLoading ? "animate-spin" : ""}
+                    />
+                    刷新模板
+                  </button>
+                  <button
+                    className="hover:text-ink"
+                    disabled={!!busy}
+                    onClick={() => setManualTemplate((value) => !value)}
+                  >
+                    {manualTemplate ? "从列表选择" : "手动填写 ID"}
+                  </button>
+                </div>
+              </div>
+              {manualTemplate ? (
+                <input
+                  id="cube-template"
+                  className="field"
+                  value={form.template_id}
+                  disabled={!!busy}
+                  placeholder="已部署的模板 ID 或别名"
+                  onChange={(event) =>
+                    setForm((f) => ({ ...f, template_id: event.target.value }))
+                  }
+                />
+              ) : (
+                <Select
+                  ariaLabel="沙箱模板"
+                  value={form.template_id}
+                  disabled={
+                    !!busy ||
+                    templatesLoading ||
+                    (!templates.length && !form.template_id)
+                  }
+                  onChange={(value) =>
+                    setForm((f) => ({ ...f, template_id: value }))
+                  }
+                  placeholder={
+                    templatesLoading ? "正在检测模板…" : "请选择沙箱模板"
+                  }
+                  searchable
+                  options={[
+                    ...(form.template_id &&
+                    !templates.some(
+                      (template) => template.id === form.template_id,
+                    )
+                      ? [
+                          {
+                            value: form.template_id,
+                            label: `当前模板：${form.template_id}`,
+                            description: "未在当前列表中找到",
+                          },
+                        ]
+                      : []),
+                    ...templates.map((template) => ({
+                      value: template.id,
+                      label: template.name || template.id,
+                      description: [
+                        template.name ? template.id : "",
+                        template.status,
+                      ]
+                        .filter(Boolean)
+                        .join(" · "),
+                    })),
+                  ]}
+                />
+              )}
+              <p
+                role="status"
+                className={`mt-1.5 text-[11px] leading-relaxed ${templatesError ? "text-danger" : "text-faint"}`}
+              >
+                {!templateApiUrl
+                  ? "填写后端地址后自动检测模板；后端开启鉴权时需填写密钥。"
+                  : templatesLoading
+                    ? "正在从 Cube 后端加载模板…"
+                    : templatesError
+                      ? `${templatesError}，可刷新重试或手动填写 ID。`
+                      : templates.length
+                        ? `检测到 ${templates.length} 个模板，选择后可测试连接。`
+                        : "后端暂无模板，请先部署模板，再刷新列表。"}
+              </p>
+            </div>
           </div>
+          <p className="text-[11px] leading-relaxed text-faint">
+            代理地址保留协议和端口；省略协议时补上 http://，省略端口时使用
+            80，留空使用沙箱域名解析。
+          </p>
           {connection.api_key_configured && (
             <label className="flex items-center gap-2 text-[11px] text-muted">
               <input
@@ -447,13 +610,6 @@ export default function CubeSandboxSection({
               移除已保存的 API Key
             </label>
           )}
-          <details className="text-[11.5px] text-muted">
-            <summary className="cursor-pointer">代理与域名设置</summary>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              {field("proxy_port", "代理 HTTP 端口", "80", "number")}
-              {field("sandbox_domain", "沙箱域名", "cube.app")}
-            </div>
-          </details>
           <div className="flex flex-wrap gap-2">
             <button
               className="btn-primary"

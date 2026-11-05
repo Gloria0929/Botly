@@ -239,6 +239,8 @@ export type TerminalHistory = {
   workspace: string; sandbox_id: string | null; agent_running: boolean; event_cursor: number;
 };
 
+export type CubeTemplate = { id: string; name: string; status: string };
+
 export type SandboxStatus = {
   provider: string;
   available: boolean;

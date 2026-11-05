@@ -1,7 +1,105 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Save } from "lucide-react";
+import { Loader2, Save, X } from "lucide-react";
+
+export function SearchKeyField({
+  configured,
+  disabled = false,
+  onSave,
+}: {
+  configured: boolean;
+  disabled?: boolean;
+  onSave: (key: string) => Promise<boolean>;
+}) {
+  const [key, setKey] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const locked = disabled || saving;
+  const showConfigured = configured && !editing;
+
+  const save = async () => {
+    const value = key.trim();
+    if (locked || showConfigured || !value) return;
+    setSaving(true);
+    try {
+      if (await onSave(value)) {
+        setKey("");
+        setEditing(false);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancel = () => {
+    if (locked) return;
+    setKey("");
+    setEditing(false);
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2">
+        <div className={`field flex min-w-0 flex-1 basis-full items-center sm:basis-0 ${locked ? "opacity-50" : ""}`}>
+          {showConfigured ? (
+            <span className="chip gap-1.5 border-ok/30 text-ok">
+              已配置
+              <button type="button" className="rounded p-0.5 hover:bg-panel2 disabled:opacity-40"
+                aria-label="重新配置搜索 Key" title="重新配置搜索 Key" disabled={locked}
+                onClick={() => { setKey(""); setEditing(true); }}>
+                <X size={12} />
+              </button>
+            </span>
+          ) : (
+            <input
+              className="min-w-0 w-full bg-transparent text-ink outline-none placeholder:text-faint"
+              type="password"
+              aria-label="搜索服务 API Key"
+              autoComplete="off"
+              autoFocus={configured}
+              spellCheck={false}
+              value={key}
+              disabled={locked}
+              placeholder={configured ? "输入新 Key，保存后替换原配置" : "搜索服务 API Key"}
+              onChange={(event) => setKey(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void save();
+                } else if (event.key === "Escape" && configured) {
+                  event.preventDefault();
+                  cancel();
+                }
+              }}
+            />
+          )}
+        </div>
+        {!showConfigured && (
+          <>
+            <button type="button" className="btn-primary shrink-0" disabled={locked || !key.trim()} onClick={save}>
+              {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              {saving ? "正在保存…" : "保存 Key"}
+            </button>
+            {configured && (
+              <button type="button" className="btn-ghost shrink-0" aria-label="取消重新配置搜索 Key" disabled={locked} onClick={cancel}>
+                取消
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      <p className="mt-1.5 text-[10.5px] text-faint">
+        {showConfigured
+          ? "支持 Tavily。点击 × 可重新配置。"
+          : configured
+            ? "新 Key 保存成功后才替换原配置；留空或取消保留原 Key。"
+            : "支持 Tavily。输入 Key 后点击「保存 Key」或按回车。"}
+      </p>
+    </div>
+  );
+}
 
 export function Section({
   title,

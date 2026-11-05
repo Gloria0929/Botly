@@ -17,6 +17,84 @@ from tests.conftest import register
 CONFIG = {"api_url": "http://127.0.0.1:3000", "template_id": "tpl-code", "api_key": "cube-secret-test", "proxy_node_ip": "127.0.0.1"}
 
 
+@pytest.mark.parametrize("api_url,expected", [
+    (" 127.0.0.1:3000/ ", "http://127.0.0.1:3000"),
+    ("localhost:3000", "http://localhost:3000"),
+    ("https://cube.test/api/", "https://cube.test/api"),
+])
+def test_cube_backend_address_accepts_omitted_protocol(client, invite, api_url, expected):
+    register(client, invite, "cube-url-" + str(abs(hash(api_url))) + "@test.dev")
+    response = client.put("/api/sandbox/cube", json={**CONFIG, "api_url": api_url})
+    assert response.status_code == 200, response.text
+    assert response.json()["api_url"] == expected
+
+
+def mock_template_backend(monkeypatch, handler):
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(cube.httpx, "AsyncClient", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(handler), **kwargs))
+
+
+@pytest.mark.parametrize("wrapper", [None, "templates", "items"])
+def test_cube_templates_detect_without_template_id_or_saving(client, invite, monkeypatch, wrapper):
+    register(client, invite, f"cube-discover-{wrapper}@test.dev")
+    def respond(request):
+        assert str(request.url) == "http://127.0.0.1:3000/api/templates"
+        assert request.headers["X-API-Key"] == CONFIG["api_key"]
+        assert request.extensions["timeout"]["read"] == 15
+        templates = [{"templateID": "tpl-code", "aliases": ["python"], "status": "ready"},
+            {"template_id": "tpl-node", "name": "Node", "status": "building"}]
+        return httpx.Response(200, json={wrapper: templates} if wrapper else templates)
+    mock_template_backend(monkeypatch, respond)
+    response = client.post("/api/sandbox/cube/templates", json={
+        "api_url": "127.0.0.1:3000/api", "api_key": CONFIG["api_key"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["templates"] == [
+        {"id": "tpl-code", "name": "python", "status": "ready"},
+        {"id": "tpl-node", "name": "Node", "status": "building"}]
+    assert CONFIG["api_key"] not in response.text
+    assert client.get("/api/sandbox").json()["provider"] != "cube"
+
+
+def test_cube_template_discovery_reuses_only_current_users_key_and_does_not_save(client, invite, monkeypatch):
+    register(client, invite, "cube-discover-key@test.dev")
+    client.put("/api/sandbox/cube", json=CONFIG)
+    captured = []
+    def respond(request):
+        captured.append(request.headers.get("X-API-Key"))
+        return httpx.Response(200, json=[])
+    mock_template_backend(monkeypatch, respond)
+    assert client.post("/api/sandbox/cube/templates", json={"api_url": "localhost:4000"}).json() == {"templates": []}
+    saved = client.get("/api/sandbox").json()
+    assert saved["api_url"] == CONFIG["api_url"] and saved["verification"] == "untested"
+    assert client.post("/api/sandbox/cube/templates", json={"api_url": CONFIG["api_url"], "api_key": ""}).status_code == 200
+    assert client.get("/api/sandbox").json()["api_key_configured"] is True
+    register(client, invite, "cube-discover-isolated@test.dev")
+    assert client.post("/api/sandbox/cube/templates", json={"api_url": CONFIG["api_url"]}).status_code == 200
+    assert captured == [CONFIG["api_key"], None, None]
+
+
+@pytest.mark.parametrize("failure", ["auth", "timeout", "invalid-json", "invalid-list", "secret"])
+def test_cube_template_discovery_errors_are_reported_and_redacted(client, invite, monkeypatch, failure):
+    register(client, invite, f"cube-discover-error-{failure}@test.dev")
+    def respond(request):
+        if failure == "auth":
+            return httpx.Response(401, json={"message": "unauthorized"})
+        if failure == "timeout":
+            raise httpx.ReadTimeout("timed out", request=request)
+        if failure == "secret":
+            raise RuntimeError("backend rejected " + CONFIG["api_key"])
+        if failure == "invalid-json":
+            return httpx.Response(200, text="not JSON")
+        return httpx.Response(200, json={"message": "not a template list"})
+    mock_template_backend(monkeypatch, respond)
+    response = client.post("/api/sandbox/cube/templates", json={
+        "api_url": CONFIG["api_url"], "api_key": CONFIG["api_key"]})
+    assert response.status_code == 400
+    assert "Cube 模板加载失败" in response.json()["detail"]
+    assert CONFIG["api_key"] not in response.text
+
+
 @pytest.mark.parametrize("proxy", ["http://203.0.113.10", "https://203.0.113.10/", " 203.0.113.10 "])
 def test_cube_proxy_url_normalizes_ip_and_keeps_separate_port(client, invite, proxy):
     register(client, invite, "cube-proxy-" + str(abs(hash(proxy))) + "@test.dev")
@@ -69,6 +147,7 @@ def test_cube_config_is_owned_and_key_is_encrypted(client, invite):
 
 
 @pytest.mark.parametrize("patch", [{"api_url": "file:///etc/passwd"}, {"api_url": "http://u:p@localhost:3000"},
+    {"api_url": "http://[invalid"}, {"api_url": "http://localhost:0"}, {"api_url": "http://bad host:3000"},
     {"proxy_node_ip": "127.0.0.1:80"}, {"sandbox_domain": "http://cube.app"}, {"template_id": " "}])
 def test_cube_invalid_configuration_is_rejected(client, invite, patch):
     register(client, invite, "cube-invalid-" + str(abs(hash(str(patch)))) + "@test.dev")

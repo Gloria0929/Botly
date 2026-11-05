@@ -70,7 +70,7 @@ async function readError(res: Response, fallback: string): Promise<string> {
 }
 
 /** JSON、上传和下载共用同一套错误解析与登录失效处理。 */
-async function request(path: string, init: RequestInit = {}, fallback?: string): Promise<Response> {
+async function request(path: string, init: RequestInit = {}, fallback?: string, silent = false): Promise<Response> {
   // FormData 由浏览器自己带 boundary，不能手动指定 Content-Type
   const isForm = typeof FormData !== "undefined" && init.body instanceof FormData;
   let res: Response;
@@ -86,7 +86,7 @@ async function request(path: string, init: RequestInit = {}, fallback?: string):
     });
   } catch {
     const message = "网络请求失败，请检查连接或稍后重试";
-    toast(message, "error");
+    if (!silent) toast(message, "error");
     throw new ApiError(0, message);
   }
   if (!res.ok) {
@@ -98,7 +98,7 @@ async function request(path: string, init: RequestInit = {}, fallback?: string):
         ? `服务暂时不可用（${res.status}），请确认后端已启动后重试`
         : `请求失败（${res.status}）`
     ));
-    toast(message, "error");
+    if (!silent) toast(message, "error");
     if (res.status === 401 && path !== "/auth/login" && typeof window !== "undefined") {
       const publicPages = ["/login", "/register", "/forgot-password", "/reset-password", "/verify-email"];
       if (!publicPages.some((page) => location.pathname === page || location.pathname.startsWith(`${page}/`))) {
@@ -110,8 +110,8 @@ async function request(path: string, init: RequestInit = {}, fallback?: string):
   return res;
 }
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await request(path, init);
+async function req<T>(path: string, init: RequestInit = {}, silent = false): Promise<T> {
+  const res = await request(path, init, undefined, silent);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -510,6 +510,8 @@ export const api = {
   settings: () => req<any>("/settings"),
   patchSettings: (body: any) => req<any>("/settings", { method: "PATCH", body: JSON.stringify(body) }),
   sandbox: () => req<import("./types").SandboxStatus>("/sandbox"),
+  cubeTemplates: (body: { api_url: string; api_key?: string }, signal?: AbortSignal) =>
+    req<{ templates: import("./types").CubeTemplate[] }>("/sandbox/cube/templates", { method: "POST", body: JSON.stringify(body), signal }, true),
   terminal: (chatId: string) => req<import("./types").TerminalHistory>(`/chats/${chatId}/terminal`),
   terminalCommand: (chatId: string, command: string) => req<import("./types").TerminalEntry>(`/chats/${chatId}/terminal`, { method: "POST", body: JSON.stringify({ command }) }),
   saveCube: (body: any) => req<import("./types").SandboxStatus>("/sandbox/cube", { method: "PUT", body: JSON.stringify(body) }),

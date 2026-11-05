@@ -16,7 +16,7 @@ import { capLabel, timeAgo } from "@/lib/fmt";
 import type { Bot, Me, Provider, Vendor } from "@/lib/types";
 import { toast } from "@/lib/ui";
 import { PriceDialog, ProviderEditDialog, VendorDialog } from "@/components/settings/ProviderDialogs";
-import { Section, NumField } from "@/components/settings/SettingFields";
+import { Section, NumField, SearchKeyField } from "@/components/settings/SettingFields";
 
 
 export default function SettingsPage() {
@@ -729,29 +729,14 @@ export default function SettingsPage() {
                     </>
                   )}
                 </div>
-                <input
-                  className="field"
-                  type="password"
-                  placeholder={
-                    settings?.search_configured
-                      ? "已配置，输入新 Key 可替换"
-                      : "搜索服务 API Key"
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      const input = e.target as HTMLInputElement;
-                      saveSettings(
-                        { search_api_key: input.value },
-                        input.value ? "已保存" : "已清除",
-                      );
-                      input.value = "";
-                    }
-                  }}
+                <SearchKeyField
+                  configured={!!settings?.search_configured}
+                  disabled={!settings || busy}
+                  onSave={(key) => saveSettings(
+                    { search_api_key: key },
+                    "搜索 Key 已保存",
+                  )}
                 />
-                <p className="mt-1.5 text-[10.5px] text-faint">
-                  回车保存；留空并回车可清除。目前支持 Tavily；未配置时自动回退
-                  DuckDuckGo。
-                </p>
               </Section>
 
               <Section
@@ -1014,20 +999,6 @@ export default function SettingsPage() {
                     }}
                   >
                     修改密码
-                  </button>
-                </div>
-                <div className="mt-3 flex items-center justify-between border-t border-line pt-3">
-                  <span className="text-[10.5px] text-faint">
-                    退出后需要重新登录才能继续使用
-                  </span>
-                  <button
-                    className="btn-ghost"
-                    onClick={async () => {
-                      await api.logout().catch(() => {});
-                      window.location.href = "/login";
-                    }}
-                  >
-                    退出登录
                   </button>
                 </div>
               </Section>

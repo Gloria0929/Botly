@@ -9,7 +9,8 @@ from pathlib import PurePosixPath
 import shlex
 from uuid import uuid4
 
-from cubesandbox import Config, Sandbox
+import httpx
+from cubesandbox import Config, Sandbox, TemplateInfo
 from cubesandbox._exceptions import FilesystemNotFoundError, SandboxNotFoundError
 from sqlalchemy import select
 
@@ -70,6 +71,30 @@ def safe_error(exc: Exception, connection: CubeConnection) -> str:
         if key:
             message = message.replace(key, "[密钥已隐藏]")
     return f"{type(exc).__name__}: {message[:250]}"
+
+
+async def list_templates(connection: CubeConnection) -> list[dict]:
+    headers = {}
+    if connection.api_key_encrypted:
+        key = decrypt_secret(connection.api_key_encrypted)
+        if key:
+            headers["X-API-Key"] = key
+    # SDK 0.7.3 的 Template.list 未设置超时，也未关闭 Session；使用同一 REST 接口。
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(f"{connection.api_url}/templates", headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    if isinstance(data, dict):
+        data = data.get("templates", data.get("items"))
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        raise ValueError("后端未返回有效的模板列表")
+    templates = []
+    for item in data:
+        info = TemplateInfo.from_dict(item)
+        if info.template_id:
+            templates.append({"id": info.template_id, "name": info.name or item.get("name") or "",
+                "status": info.status})
+    return templates
 
 
 def close_client(sandbox: Sandbox) -> None:

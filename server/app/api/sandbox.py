@@ -19,31 +19,46 @@ from app.sandbox import cube, runtime
 router = APIRouter(prefix="/sandbox", tags=["sandbox"])
 
 
-class CubeIn(BaseModel):
+class CubeEndpointIn(BaseModel):
     api_url: str = Field(min_length=1, max_length=500)
-    template_id: str = Field(min_length=1, max_length=200)
     api_key: str | None = Field(default=None, max_length=2000)
+
+
+class CubeIn(CubeEndpointIn):
+    template_id: str = Field(min_length=1, max_length=200)
     proxy_node_ip: str | None = Field(default=None, max_length=200)
     proxy_port: int = Field(default=80, ge=1, le=65535)
     sandbox_domain: str = Field(default="cube.app", min_length=1, max_length=200)
 
 
-def candidate(payload: CubeIn, user_id: str, existing: CubeConnection | None) -> CubeConnection:
+def endpoint_candidate(payload: CubeEndpointIn, user_id: str, existing: CubeConnection | None) -> CubeConnection:
     url = payload.api_url.strip().rstrip("/")
-    parsed = urlsplit(url)
+    if url and "://" not in url:
+        url = "http://" + url
     try:
+        parsed = urlsplit(url)
         parsed.port
     except ValueError:
-        raise HTTPException(400, "Cube 后端端口无效")
+        raise HTTPException(400, "Cube 后端地址或端口无效")
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise HTTPException(400, "Cube 后端地址应为 http/https URL，不能包含账号密码、查询参数或片段")
+    if any(c.isspace() for c in url) or parsed.port == 0:
+        raise HTTPException(400, "Cube 后端地址或端口无效")
     # 用户明确接入自己部署的后端，允许本机/内网地址，区别于网页读取工具。
+    encrypted = existing.api_key_encrypted if existing else None
+    if payload.api_key is not None:
+        encrypted = encrypt_secret(payload.api_key.strip())
+    return CubeConnection(user_id=user_id, api_url=url, api_key_encrypted=encrypted)
+
+
+def candidate(payload: CubeIn, user_id: str, existing: CubeConnection | None) -> CubeConnection:
+    connection = endpoint_candidate(payload, user_id, existing)
     proxy = (payload.proxy_node_ip or "").strip() or None
     proxy_port = payload.proxy_port
     if proxy:
         if "://" in proxy:
-            address = urlsplit(proxy)
             try:
+                address = urlsplit(proxy)
                 address_port = address.port
             except ValueError:
                 raise HTTPException(400, "代理节点端口无效")
@@ -68,16 +83,27 @@ def candidate(payload: CubeIn, user_id: str, existing: CubeConnection | None) ->
     template = payload.template_id.strip()
     if not template:
         raise HTTPException(400, "模板 ID 不能为空")
-    encrypted = existing.api_key_encrypted if existing else None
-    if payload.api_key is not None:
-        encrypted = encrypt_secret(payload.api_key.strip())
-    return CubeConnection(user_id=user_id, api_url=url, template_id=template, api_key_encrypted=encrypted,
-        proxy_node_ip=proxy, proxy_port=proxy_port, sandbox_domain=domain)
+    connection.template_id = template
+    connection.proxy_node_ip = proxy
+    connection.proxy_port = proxy_port
+    connection.sandbox_domain = domain
+    return connection
 
 
 @router.get("")
 def get_sandbox(user: User = Depends(current_user)):
     return runtime.status(user.id)
+
+
+@router.post("/cube/templates")
+async def list_cube_templates(payload: CubeEndpointIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    existing = db.scalar(select(CubeConnection).where(CubeConnection.user_id == user.id))
+    connection = endpoint_candidate(payload, user.id, existing)
+    db.commit()
+    try:
+        return {"templates": await cube.list_templates(connection)}
+    except Exception as exc:
+        raise HTTPException(400, "Cube 模板加载失败：" + cube.safe_error(exc, connection))
 
 
 @router.put("/cube")
