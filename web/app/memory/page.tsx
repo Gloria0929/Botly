@@ -244,10 +244,23 @@ export default function MemoryPage() {
                               ? `${bots.find((b) => b.id === c.bot_id)?.name || "Bot"} 的私有记忆`
                               : "共享记忆"}
                           </span>
+                          <span className="chip border-line text-faint">
+                            来自 {c.evidence_count ?? 3} 条用户消息
+                          </span>
                         </div>
                         <div className="mt-0.5 whitespace-pre-wrap text-[12.5px] leading-relaxed text-muted">
                           {c.content}
                         </div>
+                        {!!c.evidence?.length && (
+                          <details className="mt-2 text-[10.5px] text-faint">
+                            <summary className="cursor-pointer select-none hover:text-ink">
+                              查看 {c.evidence_count ?? c.evidence.length} 条用户原话
+                            </summary>
+                            <ul className="mt-1.5 list-disc space-y-1 pl-4 leading-relaxed">
+                              {c.evidence.slice(0, 5).map((quote, index) => <li key={index}>{quote}</li>)}
+                            </ul>
+                          </details>
+                        )}
                       </div>
                       <div className="flex shrink-0 gap-1.5">
                         <button

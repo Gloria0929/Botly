@@ -1,5 +1,8 @@
 """Cube 后端配置、账号隔离、官方 SDK 参数与文件同步。"""
 import asyncio
+from copy import copy
+import hashlib
+import shlex
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 
@@ -183,6 +186,11 @@ def install_fake_sdk(monkeypatch):
     class Commands:
         def __init__(self, box): self.box = box
         def run(self, command, **kwargs):
+            if command.startswith("sha256sum -z -- "):
+                state.setdefault("hash_commands", []).append(command)
+                paths = shlex.split(command)[3:]
+                output = "".join(hashlib.sha256(self.box.data[path]).hexdigest() + "  " + path + "\0" for path in paths)
+                return SimpleNamespace(exit_code=0, stdout=output, stderr="")
             state["commands"].append((self.box.sandbox_id, command, kwargs))
             if command == "printf BOTLY_CUBE_READY":
                 return SimpleNamespace(exit_code=0, stdout="BOTLY_CUBE_READY", stderr="")
@@ -218,8 +226,9 @@ def install_fake_sdk(monkeypatch):
             state["connected"].append(sandbox_id)
             box = state["sandboxes"].get(sandbox_id)
             if not box: raise cube.SandboxNotFoundError("gone", 404)
-            box._client = None
-            return box
+            handle = copy(box)
+            handle._client = None
+            return handle
     monkeypatch.setattr(cube, "Sandbox", SDK)
     return state
 
@@ -262,6 +271,74 @@ def test_cube_reuses_chat_sandbox_and_syncs_binary_files(client, invite, monkeyp
     assert client.delete("/api/sandbox/cube").status_code == 200
     assert state["killed"] == ["cube-1"]
     assert files.safe_path(account["id"], account["chat_id"], "input.txt").exists()
+
+
+def test_cube_pull_downloads_only_changed_missing_and_new_files(client, invite, monkeypatch):
+    account = register(client, invite, "cube-incremental@test.dev")
+    client.put("/api/sandbox/cube", json=CONFIG)
+    state = install_fake_sdk(monkeypatch)
+    backend = cube.CubeBackend(cube.connection_for(account["id"]))
+    box, _ = backend._open(account["id"], account["chat_id"])
+    initial = {}
+    for index in range(100):
+        path = f"output/asset-{index}.txt"
+        box.data["/workspace/" + path] = b"old-data"
+        files.write_bytes(account["id"], account["chat_id"], path, b"old-data")
+        initial[path] = hashlib.sha256(b"old-data").hexdigest()
+    downloaded = []
+    original = cube.read_bytes
+
+    def read(sandbox, path):
+        downloaded.append(path)
+        return original(sandbox, path)
+
+    monkeypatch.setattr(cube, "read_bytes", read)
+    first = backend._pull(box, account["id"], account["chat_id"], initial)
+    second = backend._pull(box, account["id"], account["chat_id"], first)
+    assert second == first == initial and downloaded == []
+    assert len(state["hash_commands"]) == 2
+
+    files.delete_file(account["id"], account["chat_id"], "output/asset-0.txt")
+    box.data["/workspace/output/asset-1.txt"] = b"new-data"  # 同长度改动也必须检测。
+    del box.data["/workspace/output/asset-2.txt"]
+    files.write_file(account["id"], account["chat_id"], "output/asset-3.txt", "local-drift")
+    box.data["/workspace/output/asset-100.txt"] = b"new-file"
+    latest = backend._pull(box, account["id"], account["chat_id"], second)
+    assert set(downloaded) == {f"/workspace/output/asset-{index}.txt" for index in (0, 1, 3, 100)}
+    assert files.read_file(account["id"], account["chat_id"], "output/asset-1.txt") == "new-data"
+    assert files.read_file(account["id"], account["chat_id"], "output/asset-3.txt") == "old-data"
+    assert "output/asset-2.txt" not in latest
+    assert not files.safe_path(account["id"], account["chat_id"], "output/asset-2.txt").exists()
+    with SessionLocal() as db:
+        row = db.scalar(select(CubeSession).where(CubeSession.chat_id == account["chat_id"]))
+        assert row.files_manifest == latest
+    cube.close_client(box)
+
+
+def test_cube_hash_protocol_handles_spaces_quotes_and_newlines(client, invite, monkeypatch):
+    account = register(client, invite, "cube-hash-paths@test.dev")
+    client.put("/api/sandbox/cube", json=CONFIG)
+    install_fake_sdk(monkeypatch)
+    backend = cube.CubeBackend(cube.connection_for(account["id"]))
+    box, _ = backend._open(account["id"], account["chat_id"])
+    paths = ["/workspace/output/a b.txt", "/workspace/output/it's.txt", "/workspace/output/line\nbreak.txt"]
+    box.data.update({path: b"content" for path in paths})
+    assert cube.remote_hashes(box, paths) == {path: hashlib.sha256(b"content").hexdigest() for path in paths}
+    cube.close_client(box)
+
+
+def test_cube_minimal_template_without_hash_tool_keeps_file_sync_working(client, invite, monkeypatch):
+    account = register(client, invite, "cube-hash-fallback@test.dev")
+    client.put("/api/sandbox/cube", json=CONFIG)
+    install_fake_sdk(monkeypatch)
+    backend = cube.CubeBackend(cube.connection_for(account["id"]))
+    box, _ = backend._open(account["id"], account["chat_id"])
+    box.data["/workspace/output/result.txt"] = b"result"
+    monkeypatch.setattr(box.commands, "run", lambda *a, **kw: SimpleNamespace(exit_code=127, stdout="", stderr="sha256sum: command not found"))
+    manifest = backend._pull(box, account["id"], account["chat_id"], {})
+    assert manifest == {"output/result.txt": hashlib.sha256(b"result").hexdigest()}
+    assert files.read_file(account["id"], account["chat_id"], "output/result.txt") == "result"
+    cube.close_client(box)
 
 
 def test_cube_probe_error_masks_api_key(client, invite, monkeypatch):

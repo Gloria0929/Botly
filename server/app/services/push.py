@@ -11,11 +11,16 @@ Service Worker 收到后弹出系统通知。
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import logging
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+import requests
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.core.config import DATA_DIR, PUSH_TTL, VAPID_PRIVATE_KEY, VAPID_SUBJECT
 from app.core.db import SessionLocal
 from app.core.models import PushSubscription, UserSettings, now
+from app.tools.registry import ToolError, _check_url, _pin_url
 
 logger = logging.getLogger("push")
 
@@ -134,6 +140,41 @@ def _vapid_instance():
 
 # ---- 发送 ----
 
+def validate_endpoint(endpoint: str) -> str:
+    """保存和投递均校验；返回可用于固定连接的公网 IP。"""
+    try:
+        parsed = urlsplit(endpoint)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.fragment or parsed.port == 0
+                or any(char.isspace() for char in endpoint)):
+            raise ValueError("推送端点必须是有效的公网 HTTPS 地址")
+        address = _check_url(endpoint)
+        if not ipaddress.ip_address(address).is_global:
+            raise ValueError("推送端点不能使用内网或本机地址")
+        return address
+    except ToolError as exc:
+        raise ValueError(str(exc)) from None
+
+
+class _PushSession:
+    """为 pywebpush 的 requests 接口提供固定 IP、保留 Host/SNI 的传输。"""
+    def __init__(self, client: httpx.Client):
+        self.client = client
+
+    def post(self, url, *, data, headers, timeout):
+        address = validate_endpoint(url)
+        parsed = urlsplit(url)
+        upstream = self.client.post(_pin_url(url, address), content=data,
+            headers={**headers, "Host": httpx.URL(url).netloc.decode("ascii")}, timeout=timeout,
+            extensions={"sni_hostname": parsed.hostname.encode("idna").decode("ascii")})
+        # pywebpush 的异常使用 requests.Response.reason，而 httpx 叫 reason_phrase。
+        response = requests.Response()
+        response.status_code, response.reason = upstream.status_code, upstream.reason_phrase
+        response.headers.update(upstream.headers)
+        response._content, response.encoding, response.url = upstream.content, upstream.encoding, url
+        return response
+
+
 def send_to_subscription(
     subscription: dict[str, Any], payload: str, ttl: int = PUSH_TTL
 ) -> None:
@@ -143,17 +184,19 @@ def send_to_subscription(
     """
     from pywebpush import webpush
 
-    webpush(
-        subscription_info={
-            "endpoint": subscription["endpoint"],
-            "keys": {"p256dh": subscription["p256dh"], "auth": subscription["auth"]},
-        },
-        data=payload,
-        vapid_private_key=_vapid_instance(),
-        vapid_claims={"sub": VAPID_SUBJECT if "@" in VAPID_SUBJECT else f"mailto:{VAPID_SUBJECT}"},
-        ttl=ttl,
-        timeout=10,
-    )
+    with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
+        webpush(
+            subscription_info={
+                "endpoint": subscription["endpoint"],
+                "keys": {"p256dh": subscription["p256dh"], "auth": subscription["auth"]},
+            },
+            data=payload,
+            vapid_private_key=_vapid_instance(),
+            vapid_claims={"sub": VAPID_SUBJECT if "@" in VAPID_SUBJECT else f"mailto:{VAPID_SUBJECT}"},
+            ttl=ttl,
+            timeout=10,
+            requests_session=_PushSession(client),
+        )
 
 
 def _deliver(user_id: str, payload: str, notif_type: str) -> None:

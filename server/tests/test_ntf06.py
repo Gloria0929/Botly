@@ -27,6 +27,12 @@ MAIL_SUFFIX = "@test.dev"
 ENDPOINT = "https://push.example.com/v1/ntf06"
 
 
+@pytest.fixture(autouse=True)
+def _public_push_dns(monkeypatch):
+    # 仅替代本文件的虚构推送域名解析；请求传输仍由各用例分别验证。
+    monkeypatch.setattr(push, "_check_url", lambda url: "93.184.216.34")
+
+
 class FakePushFailure(Exception):
     """带 response.status_code 的假推送异常，模拟 WebPushException。"""
 

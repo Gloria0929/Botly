@@ -36,6 +36,7 @@ export default function McpSection() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState<"manual" | "json">("manual");
   const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState<{
     created: any[];
@@ -77,10 +78,19 @@ export default function McpSection() {
   };
 
   const save = async () => {
-    if (!editing?.name?.trim()) return toast("请填写服务名称", "error");
+    if (!editing?.name?.trim()) {
+      setSaveError("请填写服务名称后再保存。");
+      return toast("请填写服务名称", "error");
+    }
     const isStdio = editing.transport === "stdio";
-    if (isStdio && !editing.command?.trim()) return toast("请填写启动命令", "error");
-    if (!isStdio && !editing.url?.trim()) return toast("请填写 MCP 地址", "error");
+    if (isStdio && !editing.command?.trim()) {
+      setSaveError("请填写 stdio 启动命令后再保存。");
+      return toast("请填写启动命令", "error");
+    }
+    if (!isStdio && !editing.url?.trim()) {
+      setSaveError("请填写 HTTP MCP 地址后再保存。");
+      return toast("请填写 MCP 地址", "error");
+    }
     const parseArgs = () =>
       (editing.args || "")
         .split(/\s+/)
@@ -126,13 +136,18 @@ export default function McpSection() {
   };
 
   const importJson = async () => {
-    if (!importText.trim()) return toast("请粘贴 JSON 配置", "error");
+    if (!importText.trim()) {
+      setImportError("请粘贴 MCP JSON 配置后再导入。");
+      return toast("请粘贴 JSON 配置", "error");
+    }
     let obj: any;
     try {
       obj = JSON.parse(importText);
     } catch {
+      setImportError("JSON 解析失败，请检查括号、引号和逗号后重试。");
       return toast("JSON 解析失败，请检查格式", "error");
     }
+    setImportError(null);
     setImportBusy(true);
     setImportResult(null);
     try {
@@ -145,6 +160,7 @@ export default function McpSection() {
       );
       load();
     } catch (e: any) {
+      setImportError(errText(e, "JSON 导入失败，请检查配置后重试。"));
       toastError(e);
     } finally {
       setImportBusy(false);
@@ -348,9 +364,12 @@ export default function McpSection() {
               className="field h-64 resize-none font-mono text-[11.5px] leading-relaxed"
               value={importText}
               disabled={importBusy}
-              onChange={(e) => setImportText(e.target.value)}
+              aria-invalid={!!importError}
+              aria-describedby={importError ? "mcp-import-json-error" : undefined}
+              onChange={(e) => { setImportText(e.target.value); setImportError(null); }}
               placeholder={'{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"],\n      "env": { "GITHUB_TOKEN": "..." }\n    },\n    "远程知识库": {\n      "url": "https://example.com/mcp",\n      "headers": { "Authorization": "Bearer ..." },\n      "level": "L3"\n    }\n  }\n}'}
             />
+            {importError && <p id="mcp-import-json-error" role="alert" className="text-[11px] text-danger">{importError}</p>}
             {importResult && (
               <div className="space-y-1 text-[11.5px] leading-relaxed" role="status">
                 {importResult.created.length > 0 && (

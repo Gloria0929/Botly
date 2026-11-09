@@ -19,6 +19,25 @@ from tests.test_cube import CONFIG, install_fake_sdk
 from tests.test_parallel import drain_run, run_worker
 
 
+@pytest.fixture(autouse=True)
+def _settle_synthetic_runs():
+    """本文件手工创建 running 子执行；用例结束后归还它们占用的并发名额。"""
+    with SessionLocal() as db:
+        existing = set(db.scalars(select(Run.id)))
+    yield
+    with SessionLocal() as db:
+        runs = list(db.scalars(select(Run).where(Run.id.not_in(existing),
+            Run.status.in_(("queued", "running", "waiting", "waiting_children")))))
+        ids = [run.id for run in runs]
+        for run in runs:
+            run.status, run.stop_requested = "stopped", True
+            run.lease_until, run.worker_id = None, None
+        for task in db.scalars(select(Task).where(Task.run_id.in_(ids),
+            Task.status.in_(("queued", "running", "waiting_approval", "waiting_reply")))):
+            task.status = "canceled"
+        db.commit()
+
+
 def parallel_workspace(client, invite, label):
     account = register(client, invite, f"workspace-{label}@test.dev")
     chat_id, bots = setup_workspace(client)
@@ -140,7 +159,10 @@ def test_cube_uses_task_directory_and_does_not_erase_another_tasks_new_file(clie
     backend = cube.CubeBackend(cube.connection_for(state["user_id"]))
     box, _ = backend._open(state["user_id"], state["chat_id"])
     seen = []
+    original_command = box.commands.run
     def execute(command, **kwargs):
+        if command.startswith("sha256sum -z -- "):
+            return original_command(command, **kwargs)
         seen.append(kwargs)
         box.data["/workspace/" + state["a"]["workspace"] + "/report.md"] = b"remote A"
         box.data["/workspace/" + state["b"]["workspace"] + "/remote.md"] = b"other task"
@@ -162,6 +184,85 @@ def test_cube_uses_task_directory_and_does_not_erase_another_tasks_new_file(clie
             state["b"]["workspace"] + "/later.md": state["b"]["run_id"],
         }
     assert fake["created"] == 1
+
+
+def test_cube_independent_task_commands_overlap_and_keep_both_results(client, invite, monkeypatch):
+    state = parallel_workspace(client, invite, "cube-real-parallel")
+    install_fake_sdk(monkeypatch)
+    client.put("/api/sandbox/cube", json=CONFIG)
+    backend = cube.CubeBackend(cube.connection_for(state["user_id"]))
+    box, _ = backend._open(state["user_id"], state["chat_id"])
+    original = box.commands.run
+    together = threading.Barrier(2, timeout=4)
+    entered = []
+
+    def command(command, **kwargs):
+        if command.startswith("sha256sum -z -- "):
+            return original(command, **kwargs)
+        cwd = kwargs["cwd"]
+        entered.append(cwd)
+        together.wait()  # 第一条命令必须在第二条进入后才能完成，计时假并行无法通过。
+        box.data[cwd + "/result.txt"] = cwd.encode()
+        return SimpleNamespace(exit_code=0, stdout="completed", stderr="")
+
+    box.commands.run = command
+
+    async def run():
+        return await asyncio.gather(*(backend.run_command(state["user_id"], state["chat_id"], "work",
+            bot_id=state[key]["bot_id"], run_id=state[key]["run_id"]) for key in ("a", "b")))
+
+    results = asyncio.run(run())
+    assert all("退出码 0" in result for result in results), results
+    assert len(entered) == 2
+    for key in ("a", "b"):
+        path = state[key]["workspace"] + "/result.txt"
+        assert files.read_file(state["user_id"], state["chat_id"], path) == "/workspace/" + state[key]["workspace"]
+    with SessionLocal() as db:
+        from app.core.models import CubeSession
+        session = db.scalar(select(CubeSession).where(CubeSession.chat_id == state["chat_id"]))
+        assert all(state[key]["workspace"] + "/result.txt" in session.files_manifest for key in ("a", "b"))
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_cube_same_task_and_shared_directory_commands_wait_for_active_task(client, invite, monkeypatch, shared):
+    state = parallel_workspace(client, invite, f"cube-command-lock-{shared}")
+    install_fake_sdk(monkeypatch)
+    client.put("/api/sandbox/cube", json=CONFIG)
+    backend = cube.CubeBackend(cube.connection_for(state["user_id"]))
+    box, _ = backend._open(state["user_id"], state["chat_id"])
+    original = box.commands.run
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def command(command, **kwargs):
+        if command.startswith("sha256sum -z -- "):
+            return original(command, **kwargs)
+        calls.append(kwargs["cwd"])
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(3)
+        return SimpleNamespace(exit_code=0, stdout="completed", stderr="")
+
+    box.commands.run = command
+
+    async def run():
+        first = asyncio.create_task(backend.run_command(state["user_id"], state["chat_id"], "first",
+            run_id=state["a"]["run_id"]))
+        second = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            second = asyncio.create_task(backend.run_command(state["user_id"], state["chat_id"], "second",
+                run_id=None if shared else state["a"]["run_id"]))
+            await asyncio.sleep(.1)
+            assert len(calls) == 1, "共享目录或同一任务的命令不能与当前命令重叠"
+        finally:
+            release.set()
+            results = await asyncio.gather(*(item for item in (first, second) if item is not None))
+        assert all("退出码 0" in result for result in results), results
+
+    asyncio.run(run())
+    assert len(calls) == 2
 
 
 def test_parallel_writes_cannot_exceed_account_quota(monkeypatch):

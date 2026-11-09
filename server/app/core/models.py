@@ -475,8 +475,9 @@ class MemoryCandidate(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(120), default="")
     content: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(30), default="")
-    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
-    # pending | accepted | rejected
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(12), default="observing", index=True)
+    # observing = 有真实原话支持但重复次数不足；pending | accepted | rejected
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 

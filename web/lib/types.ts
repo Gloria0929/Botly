@@ -4,6 +4,8 @@ export type Bot = {
   avatar: string;
   role: string;
   system_prompt: string;
+  template_id?: string | null;
+  template_update_available?: boolean;
   persona?: string;
   proactivity?: number;
   provider_id: string | null;
@@ -25,6 +27,7 @@ export type BotTemplate = {
   role: string;
   description: string;
   system_prompt: string;
+  persona: string;
   tools: string[];
   is_supervisor_template: boolean;
 };
@@ -366,6 +369,8 @@ export type MemoryCandidate = {
   title: string;
   content: string;
   category?: string;
+  evidence_count?: number;
+  evidence?: string[];
   status: "pending" | "accepted" | "rejected";
   created_at: string | null;
 };

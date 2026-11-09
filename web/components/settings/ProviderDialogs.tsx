@@ -177,8 +177,8 @@ export function ProviderEditDialog({
   const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
-    if (!name.trim()) return toast("名称不能为空", "error");
-    if (!baseUrl.trim()) return toast("base_url 不能为空", "error");
+    if (!name.trim()) { setError("请填写服务名称。"); return toast("名称不能为空", "error"); }
+    if (!baseUrl.trim()) { setError("请填写 base_url 地址。"); return toast("base_url 不能为空", "error"); }
     setSaving(true);
     setError(null);
     try {
@@ -286,6 +286,14 @@ export function VendorDialog({
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
+    if (!custom && !key.trim()) {
+      setError("请填写 API Key 后再添加此模型厂商。");
+      return toast("请填写 API Key", "error");
+    }
+    if (custom && advanced && !baseUrl.trim()) {
+      setError("请填写兼容 OpenAI 的 base_url。");
+      return toast("请填写 base_url", "error");
+    }
     setLoading(true);
     setError(null);
     try {

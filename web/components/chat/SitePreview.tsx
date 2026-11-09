@@ -57,17 +57,8 @@ export function SiteFrame({ file, revision = "" }: { file: ChatFile; revision?: 
   }, [file.id, file.updated_at, revision, refresh]);
 
   return <div ref={container} className="flex min-h-0 flex-1 flex-col bg-panel">
-    <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted" title={file.path}>{file.path}</span>
-      <button onClick={() => setRefresh((value) => value + 1)} title="刷新预览" aria-label="刷新预览" className="p-1 text-muted hover:text-ink"><RotateCw size={14} /></button>
-      <button onClick={() => container.current?.requestFullscreen().catch(() => setError("当前浏览器无法全屏显示"))}
-        title="全屏预览" aria-label="全屏预览" className="p-1 text-muted hover:text-ink"><Maximize2 size={14} /></button>
-    </div>
-    {backend && <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[11px] text-muted">
-      <span className={`h-1.5 w-1.5 rounded-full ${backend.ready ? "bg-ok" : "bg-warn"}`} />
-      <span className="flex-1">{starting ? "后端启动中" : backend.ready ? "后端已就绪" : backend.running ? "后端等待处理" : "后端未运行"} · {backend.port}
-        {starting && backend.elapsed_seconds !== undefined && ` · 已等待 ${backend.elapsed_seconds} 秒`}</span>
-      <button aria-label="停止预览后端" title="停止后端" disabled={stopping || (starting && !backend.running)} className="p-1 hover:text-ink disabled:opacity-50"
+    <div className="flex shrink-0 items-center justify-end gap-2 border-b border-line px-3 py-2">
+      {backend && <button aria-label="停止预览后端" title="停止后端" disabled={stopping || (starting && !backend.running)} className="p-1 text-muted hover:text-ink disabled:opacity-50"
         onClick={async () => {
           cancelStartup.current();
           setStarting(false);
@@ -76,15 +67,18 @@ export function SiteFrame({ file, revision = "" }: { file: ChatFile; revision?: 
           try { const state = await api.fileBackend(file.id, "stop"); setBackend(state); setError("后端已停止，点击刷新预览可重新启动。"); }
           catch (e) { setError(errText(e, "后端停止失败")); }
           finally { setStopping(false); }
-        }}><Square size={12} /></button>
-    </div>}
+        }}><Square size={12} /></button>}
+      <button onClick={() => setRefresh((value) => value + 1)} title="刷新预览" aria-label="刷新预览" className="p-1 text-muted hover:text-ink"><RotateCw size={14} /></button>
+      <button onClick={() => container.current?.requestFullscreen().catch(() => setError("当前浏览器无法全屏显示"))}
+        title="全屏预览" aria-label="全屏预览" className="p-1 text-muted hover:text-ink"><Maximize2 size={14} /></button>
+    </div>
     {backend && !backend.ready && <details open={!!error} className="shrink-0 border-b border-line px-3 py-2 text-[11px] text-muted">
       <summary className="cursor-pointer">启动日志</summary>
       {backend.log_path && <p className="mt-2 break-all font-mono text-[10px]">{backend.log_path}</p>}
       <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{backend.log || "启动进程暂未输出日志。"}</pre>
     </details>}
     {error ? <div role="alert" className="overflow-auto whitespace-pre-wrap break-words p-4 text-[12px] text-danger">{error}</div>
-      : !url ? <div role="status" className="flex items-center gap-2 p-4 text-[12px] text-muted"><Loader2 size={15} className="shrink-0 animate-spin" />{starting ? backend?.message || "正在启动项目后端，首次安装依赖可能需要较长时间…" : "正在加载页面…"}</div>
+      : !url ? <div role="status" className="flex items-center gap-2 p-4 text-[12px] text-muted"><Loader2 size={15} className="shrink-0 animate-spin" />{starting ? "正在准备预览，请稍候…" : "正在加载页面…"}</div>
       : <iframe key={`${url}:${revision}:${refresh}`} title={`前端页面预览：${file.path}`} src={url}
           sandbox="allow-scripts" referrerPolicy="no-referrer" className="min-h-0 w-full flex-1 border-0 bg-white" />}
   </div>;

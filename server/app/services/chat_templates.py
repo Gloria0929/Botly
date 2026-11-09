@@ -88,8 +88,9 @@ def assemble_members(db: Session, user_id: str, template: dict) -> tuple[list[Bo
     names = {b.name for b in all_bots}
     for key in template["members"]:
         spec = member_spec(key)
+        aliases = ROLE_ALIASES[key] | {BY_ID[key]["name"], BY_ID[key]["role"]}
         matches = [b for b in enabled if b not in members and (
-            b.role in ROLE_ALIASES[key] or b.name in ROLE_ALIASES[key]
+            b.role in aliases or b.name in aliases
             or (key == "supervisor" and b.is_supervisor_template)
         )]
         matches.sort(key=lambda b: (model_for(b) is None, b.name != spec["name"]))
@@ -105,7 +106,7 @@ def assemble_members(db: Session, user_id: str, template: dict) -> tuple[list[Bo
                 suffix += 1
             bot = Bot(
                 user_id=user_id, name=name, role=spec["role"], avatar=spec["avatar"],
-                system_prompt=spec["system_prompt"], tools=list(spec["tools"]),
+                system_prompt=spec["system_prompt"], persona=spec.get("persona", ""), tools=list(spec["tools"]),
                 provider_id=default_model[0] if default_model else None,
                 model=default_model[1] if default_model else None,
                 is_supervisor_template=key == "supervisor",

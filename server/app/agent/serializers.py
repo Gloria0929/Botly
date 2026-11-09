@@ -11,7 +11,9 @@ def iso(dt: datetime | None) -> str | None:
 
 
 def bot_out(bot: Bot, deleted_label: bool = False) -> dict:
+    from app.services.templates import template_status
     return {
+        **template_status(bot),
         "id": bot.id,
         "name": bot.name,
         "avatar": bot.avatar,

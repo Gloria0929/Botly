@@ -1,7 +1,8 @@
-"""自由群聊：先接话、再补充，明确的多人邀请可并行。"""
+"""自由群聊：轮换接话机会，首批并行，后续接着已发表的内容聊。"""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 
 from sqlalchemy import select
@@ -12,8 +13,24 @@ from app.core.db import IS_SQLITE, session_scope
 from app.core.events import emit
 from app.core.models import Bot, Chat, Message, Run, Task, uid
 from app.core.redis_bus import enqueue
+from app.core.similarity import normalize
 
 ACTIVE = ("queued", "running", "waiting", "waiting_children")
+
+
+def social_message(content: str) -> bool:
+    """识别短问候与收尾；面向大家的招呼仍给其他成员参与机会。"""
+    return normalize(content) in {
+        "你好", "你们好", "大家好", "嗨", "哈喽", "hello", "hi", "早", "早安", "早上好",
+        "下午好", "晚上好", "晚安", "谢谢", "谢谢大家", "多谢", "辛苦了", "好的", "好",
+        "嗯", "嗯嗯", "ok", "okay", "收到", "明白了", "知道了", "哈哈", "哈哈哈", "先这样", "再见",
+    }
+
+
+def conversation_body(content: str) -> str:
+    body = re.sub(r"```.*?```|~~~.*?~~~", "", content, flags=re.S)
+    body = re.sub(r"`[^`\n]*`", "", body)
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))
 
 
 def mentioned_members(content: str, members: list[Bot]) -> list[str]:
@@ -26,10 +43,20 @@ def mentioned_members(content: str, members: list[Bot]) -> list[str]:
 
 
 def handoff_members(content: str, members: list[Bot]) -> list[str]:
-    """只有正文行首直接 @ 才是接话邀请，引用、代码和普通提及不是派发。"""
-    body = re.sub(r"```.*?```|~~~.*?~~~", "", content, flags=re.S)
-    lines = [line.strip() for line in body.splitlines() if line.lstrip().startswith("@")]
-    return list(dict.fromkeys(bid for line in lines for bid in mentioned_members(line, members)))
+    """识别正文中的接话邀请；普通提及、引用和代码不会唤醒成员。"""
+    invited = []
+    for line in conversation_body(content).splitlines():
+        matches = []
+        for bot in members:
+            for match in re.finditer(rf"@{re.escape(bot.name)}(?=[\s，。！？、；：,.!?;:]|$)", line):
+                tail = line[match.end():].lstrip(" ，,:：")
+                if not line[:match.start()].strip() or re.match(
+                    r"(?:你(?:们)?|请|帮|来|能否|能不能|要不要|怎么看|觉得|有没有)|[？?]$", tail
+                ):
+                    matches.append((match.start(), bot.id))
+                    break
+        invited.extend(bid for _, bid in sorted(matches))
+    return list(dict.fromkeys(invited))
 
 
 def free_run_blocked(db, run: Run) -> bool:
@@ -76,13 +103,58 @@ class FreeChatMixin:
 
     def _free_ready(self, db, run: Run) -> bool:
         children = list(db.scalars(select(Run).where(Run.parent_run_id == run.id)))
+        if run.kind == "free" and not run.parent_run_id:
+            consumed = set(run.config_snapshot.get("free", {}).get("consumed_peers", []))
+            if any(child.kind == "free" and child.status not in ACTIVE and child.id not in consumed
+                   for child in children):
+                return True  # 一位成员返回就继续接话，不等最慢的那位。
         return not any(child.status in ACTIVE for child in children)
+
+    def _participation_order(self, db, run: Run, members: list[Bot]) -> list[str]:
+        """积极度影响参与频率，近期已获得机会的成员给其他人让出位置。"""
+        opportunities = {bot.id: 0 for bot in members}
+        last_chance = {bot.id: 0 for bot in members}
+        trigger = db.get(Message, run.trigger_message_id)
+        query = select(Run.config_snapshot, Message.seq).join(
+            Message, Message.id == Run.trigger_message_id,
+        ).where(Run.chat_id == run.chat_id, Run.kind == "free", Run.parent_run_id.is_(None),
+                Run.id != run.id)
+        if trigger:
+            query = query.where(Message.seq < trigger.seq)
+        previous = db.execute(query.order_by(Message.seq.desc()).limit(30))
+        for config, seq in previous:
+            free = config.get("free") or {}
+            if free.get("directed"):
+                continue
+            initial = free.get("initial_bot_ids", [free.get("primary_bot_id")])
+            for bid in set(initial):
+                if bid in opportunities:
+                    opportunities[bid] += 1
+                    last_chance[bid] = max(last_chance[bid], seq)
+        return [bot.id for bot in sorted(members, key=lambda bot: (
+            opportunities[bot.id] / max(0.2, bot.proactivity or 0),
+            last_chance[bot.id], -(bot.proactivity or 0),
+        ))]
 
     def _conversation_partner(self, db, run: Run, members: list[Bot]) -> str | None:
         available = {bot.id for bot in members}
         trigger = db.get(Message, run.trigger_message_id)
         if trigger:
-            # 延续用户的对话对象，而不是把最后引导的成员误当成新负责人。
+            # 用户可以直接叫名字接着聊，不必为了换对话对象先输入 @。
+            for bot in members:
+                if re.search(rf"(?:^|[，,。！？!?]\s*){re.escape(bot.name)}[，,:：\s]*(?:你|请|帮|怎么看|觉得)",
+                             conversation_body(trigger.content)):
+                    return bot.id
+            # 只有追问才延续对象；普通新话题不能永久绑定同一个成员。
+            followup = re.match(
+                r"(?:继续|接着|再(?:说|讲|聊|解释|展开|补充)|[你您](?:刚才|说|提|觉得|认为)|刚才|"
+                r"为什么(?:这么|这样)|怎么(?:说|做|办)|然后呢|那(?:个|这|你|要|怎么|为什么)|"
+                r"还有呢|展开|具体|详细|说下去)", trigger.content.strip(),
+            )
+            if not followup:
+                eligible = [bot for bot in members if bot.proactivity > 0]
+                return next(iter(self._participation_order(db, run, eligible or members)), None)
+            # 延续用户的对话对象，而不是把最后补充的成员误当成新负责人。
             previous = db.scalars(select(Run).join(Message, Message.id == Run.trigger_message_id).where(
                 Run.chat_id == run.chat_id, Run.kind == "free", Run.parent_run_id.is_(None),
                 Message.seq < trigger.seq,
@@ -128,11 +200,17 @@ class FreeChatMixin:
                 targets = state["targets"] if state["directed"] else [bot.id for bot in members
                     if bot.id == state["primary_bot_id"] or bot.proactivity > 0]
                 if not state["directed"]:
-                    targets.sort(key=lambda bid: bid != state["primary_bot_id"])
+                    trigger = db.get(Message, run.trigger_message_id)
+                    if trigger and social_message(trigger.content) and normalize(trigger.content) not in {"大家好", "你们好", "谢谢大家"}:
+                        targets = [state["primary_bot_id"]] if state["primary_bot_id"] else []
+                    order = self._participation_order(db, run, members)
+                    targets.sort(key=lambda bid: (bid != state["primary_bot_id"], order.index(bid)))
+                state["initial_bot_ids"] = targets[:min(2, state["max_speakers"])]
                 queue = [{"bot_id": bid, "required": state["directed"] or bid == state["primary_bot_id"],
-                          "primary": bid == state["primary_bot_id"], "round": run.round}
+                          "primary": bid == state["primary_bot_id"], "round": run.round,
+                          "initial": bid in state["initial_bot_ids"]}
                          for bid in targets if bid not in state["spoken"]]
-            children = list(db.scalars(select(Run).where(Run.parent_run_id == run.id)))
+            children = list(db.scalars(select(Run).where(Run.parent_run_id == run.id).order_by(Run.created_at, Run.id)))
             peers = [child for child in children if child.kind == "free"]
             consumed = set(state["consumed_peers"])
             for peer in peers:
@@ -142,10 +220,23 @@ class FreeChatMixin:
                 result = peer.config_snapshot.get("free") or {}
                 if result.get("spoken"):
                     state["spoken"] = list(dict.fromkeys([*state["spoken"], peer.target_bot_id]))
+                    source_id = result.get("response_message_id")
+                    source = db.get(Message, source_id) if source_id else None
+                    latest = db.get(Message, state["latest_message_id"]) if state.get("latest_message_id") else None
+                    if source and (not latest or source.seq > latest.seq):
+                        state["latest_message_id"] = source_id
                     if not state["everyone"]:
                         for bid in result.get("mentions", []):
                             queue.append({"bot_id": bid, "required": True, "round": peer.round + 1,
-                                          "handoff_message_id": result.get("response_message_id")})
+                                          "handoff_message_id": source_id})
+                        if (source and not result.get("mentions") and peer.round < state["max_rounds"]
+                                and re.search(r"[？?][”’\"']*\s*$", conversation_body(source.content))):
+                            # 群友问了一个开放问题，先前说过话的人也能接回来；仍由它自己决定是否发言。
+                            for bot in members:
+                                if (bot.id != peer.target_bot_id and bot.proactivity > 0
+                                        and (bot.id in state["spoken"] or not any(item["bot_id"] == bot.id for item in queue))):
+                                    queue.append({"bot_id": bot.id, "required": False, "followup": True,
+                                                  "round": peer.round + 1, "reply_to_message_id": source_id})
             state["consumed_peers"] = list(consumed)
             active_peers = [peer for peer in peers if peer.status in ACTIVE]
             scheduled = {(entry["bot_id"], entry["round"]) for entry in state["scheduled"]}
@@ -159,21 +250,29 @@ class FreeChatMixin:
             if not active_peers and not state["directed"] and not state["spoken"] and not chat.muted:
                 if not any(item["required"] and (item["bot_id"], item["round"]) not in scheduled for item in queue):
                     fallback = next((bot.id for bot in members if not any(bid == bot.id for bid, _ in scheduled)), None)
+                    if not fallback:
+                        tried = {peer.target_bot_id for peer in peers
+                                 if peer.config_snapshot.get("free", {}).get("selected", {}).get("required")}
+                        fallback = next((bot.id for bot in members if bot.id not in tried and any(
+                            peer.target_bot_id == bot.id and peer.status == "completed" for peer in peers)), None)
                     if fallback:
                         state["primary_bot_id"] = fallback
-                        queue.insert(0, {"bot_id": fallback, "required": True, "primary": True, "round": 1})
-            queue.sort(key=lambda item: not item["required"])
+                        queue.insert(0, {"bot_id": fallback, "required": True, "primary": True,
+                                         "round": 1, "fallback": True})
+            queue.sort(key=lambda item: (not item["required"], not item.get("followup", False)))
             ids = []
             pending_queue = []
-            scheduled_round = None
+            in_flight = {peer.target_bot_id for peer in active_peers if peer.kind == "free"}
             for candidate in queue:
                 bid = candidate["bot_id"]
                 key = bid, candidate["round"]
-                if bid not in available or candidate["round"] > state["max_rounds"] or key in scheduled:
+                if (bid not in available or candidate["round"] > state["max_rounds"]
+                        or (key in scheduled and not candidate.get("fallback"))):
                     continue
                 if chat.muted and not state["directed"] and not candidate["required"]:
                     continue
-                if not candidate["required"] and (newer_message or any(entry["bot_id"] == bid for entry in state["scheduled"])):
+                if not candidate["required"] and (newer_message or (not candidate.get("followup")
+                        and any(entry["bot_id"] == bid for entry in state["scheduled"]))):
                     continue
                 if state["everyone"] and any(entry["bot_id"] == bid for entry in state["scheduled"]):
                     continue
@@ -182,13 +281,20 @@ class FreeChatMixin:
                     continue
                 if len(state["speaker_turns"]) >= state["max_speakers"] * state["max_rounds"]:
                     continue
-                # 被明确点名的同轮成员可并行；普通补充每次只放行一个，读取前面完整回应。
-                if active_peers or (ids and (not state["directed"] or not candidate["required"]
-                                            or candidate["round"] != scheduled_round)):
+                # 普通消息最多同时生成两位成员的回复；一位完成即可补入下一位。
+                # 已在生成的成员预留人数位置，避免快模型抢完全部名额。
+                reserved = set(claims) | in_flight
+                if (bid in in_flight or (not state["directed"] and (
+                        len(in_flight) >= 2 or (bid not in reserved and len(reserved) >= state["max_speakers"])))):
                     pending_queue.append(candidate)
                     continue
-                scheduled_round = candidate["round"]
+                if (not state["directed"] and not candidate.get("initial") and in_flight
+                        and not consumed):
+                    pending_queue.append(candidate)
+                    continue
                 state["turn"] += 1
+                if not candidate["required"] and not candidate.get("reply_to_message_id"):
+                    candidate["reply_to_message_id"] = state.get("latest_message_id")
                 candidate.update(turn=state["turn"], root_run_id=run.id)
                 child_id = uid()
                 child = Run(id=child_id, user_id=run.user_id, chat_id=run.chat_id, kind="free",
@@ -203,6 +309,7 @@ class FreeChatMixin:
                 db.add(child)
                 db.flush()
                 ids.append(child.id)
+                in_flight.add(bid)
                 state["peer_ids"] = [*state["peer_ids"], child.id]
                 state["scheduled"] = [*state["scheduled"], {"bot_id": bid, "round": candidate["round"]}]
                 scheduled.add(key)
@@ -257,7 +364,7 @@ class FreeChatMixin:
         await self.finish_run("")
         return {"done": True, "cont": False}
 
-    def _claim_free_speaker(self) -> bool:
+    def _claim_free_speaker(self, content: str | None = None) -> bool:
         """并行成员实际输出时才占用配额，不能预先按名单凑人数。"""
         with session_scope() as db:
             if IS_SQLITE:
@@ -283,16 +390,28 @@ class FreeChatMixin:
             turns = list(state.get("speaker_turns", []))
             bid = selected["bot_id"]
             key = f"{bid}:{selected['round']}:{selected['turn']}"
+            # 完整回复在同一把配额锁内去重，避免并行成员都在对方提交前通过检查。
+            replies = dict(state.get("reply_claims", {}))
+            if content and not state["directed"] and (not selected["required"] or selected.get("primary")):
+                digest = hashlib.sha256((normalize(content) or content.strip()).encode()).hexdigest()
+                if any(value == digest for turn, value in replies.items() if turn != key):
+                    state["reply_claims"] = {turn: value for turn, value in replies.items() if turn != key}
+                    state["speaker_turns"] = [turn for turn in turns if turn != key]
+                    if not any(turn.startswith(f"{bid}:") for turn in state["speaker_turns"]):
+                        state["speaker_claims"] = [speaker for speaker in claims if speaker != bid]
+                    self._save_free_state(root, state)
+                    return False
+                replies[key] = digest
+                state["reply_claims"] = replies
             if key in turns:
+                self._save_free_state(root, state)
                 return True
             addressed = state["directed"] or (selected["required"] and not selected.get("primary"))
             if chat.muted and not addressed:
                 return False
-            primary = state.get("primary_bot_id")
-            reserve_primary = bool(primary and primary not in claims and bid != primary)
-            if bid not in claims and len(claims) >= state["max_speakers"] - int(reserve_primary):
+            if bid not in claims and len(claims) >= state["max_speakers"]:
                 return False
-            if len(turns) >= state["max_speakers"] * state["max_rounds"] - int(reserve_primary):
+            if len(turns) >= state["max_speakers"] * state["max_rounds"]:
                 return False
             state["speaker_claims"] = claims if bid in claims else [*claims, bid]
             state["speaker_turns"] = [*turns, key]
@@ -337,11 +456,19 @@ class FreeChatMixin:
             return bool(run.parent_run_id)
 
     def _duplicate_free_reply(self, content: str) -> bool:
-        normalized = re.sub(r"[\W_]+", "", content).casefold() or content.strip()
+        normalized = normalize(content) or content.strip()
         with session_scope() as db:
             run = db.get(Run, self.run_id)
+            trigger = db.get(Message, run.trigger_message_id)
+            voting = bool(trigger and re.search(r"同意|赞同|支持|投票|表态|举手", trigger.content))
+            if not voting and re.fullmatch(
+                r"(?:我也?|也|完全|基本)?(?:同意|赞同|认同|支持)(?:你们?|大家|以上|前面|上面|这个)?"
+                r"的?(?:说法|观点|建议|看法|方案|结论)?|没错|确实如此|说得对|有道理|没有(?:其他|更多)?补充",
+                normalized,
+            ):
+                return True
             peers = select(Run.id).where(Run.parent_run_id == run.parent_run_id, Run.id != run.id)
-            return any((re.sub(r"[\W_]+", "", message.content).casefold() or message.content.strip()) == normalized
+            return any((normalize(message.content) or message.content.strip()) == normalized
                        for message in db.scalars(select(Message).where(
                            Message.run_id.in_(peers), Message.type == "text", Message.status == "done",
                            Message.sender_type == "bot",

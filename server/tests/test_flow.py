@@ -36,6 +36,20 @@ def messages(client, chat_id: str) -> list[dict]:
     return client.get(f"/api/chats/{chat_id}/messages?limit=200").json()["messages"]
 
 
+def save_approved_legacy_plan(run_id: str, chat_id: str, titles: list[str], bot: str) -> None:
+    """历史已确认、未声明 batch/依赖的计划仍可按顺序恢复执行。"""
+    from sqlalchemy import select
+    from app.core.db import SessionLocal
+    from app.core.models import Thread
+    from app.agent.messages import add_message
+
+    with SessionLocal() as db:
+        main = db.scalar(select(Thread).where(Thread.chat_id == chat_id, Thread.type == "main"))
+        add_message(db, thread=main, run_id=run_id, sender_type="bot", type_="plan",
+                    meta={"status": "approved", "steps": [{"title": title, "bot": bot} for title in titles]})
+        db.commit()
+
+
 def build_main_history(run_id: str, chat_id: str) -> list[dict]:
     """重建总指挥这一轮真正发给模型的消息。"""
     from sqlalchemy import select
@@ -545,6 +559,7 @@ def test_multiple_delegates_keep_their_own_results(client, invite, monkeypatch):
     run_id = client.post(
         f"/api/chats/{chat_id}/messages", json={"content": "设计登录和退出需求"}
     ).json()["run"]["id"]
+    save_approved_legacy_plan(run_id, chat_id, ["登录规则", "退出规则"], researcher["name"])
     run_worker(run_id)
     wait_status(client, run_id, {"completed"})
     assert supervisor_turns == 2 and worker_instructions == ["登录规则", "退出规则"]
@@ -1066,6 +1081,7 @@ def test_long_delegation_loop_and_historical_task_status(client, invite, monkeyp
 
     monkeypatch.setattr(orchestrator, "stream_chat", fake_stream_chat)
     run_id = client.post(f"/api/chats/{chat_id}/messages", json={"content": "检查九项需求"}).json()["run"]["id"]
+    save_approved_legacy_plan(run_id, chat_id, [f"检查第 {i} 项" for i in range(9)], worker["name"])
     run_worker(run_id)
     wait_status(client, run_id, {"completed"})
     tasks = client.get(f"/api/chats/{chat_id}").json()["tasks"]

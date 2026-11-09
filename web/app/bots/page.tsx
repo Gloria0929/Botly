@@ -112,6 +112,7 @@ export default function BotsPage() {
       avatar: t.avatar,
       role: t.role,
       system_prompt: t.system_prompt,
+      persona: t.persona,
       tools: onlyAvailable(t.tools),
     });
   };
@@ -417,13 +418,26 @@ export default function BotsPage() {
             </div>
 
             <div>
-              <label className="label">角色提示词</label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="label">角色提示词</label>
+                {editing.id && editing.template_update_available
+                  && templates.some((item) => item.id === editing.template_id)
+                  && editing.system_prompt === bots.find((item) => item.id === editing.id)?.system_prompt && <button type="button"
+                  className="text-[11px] text-accent hover:underline" onClick={() => {
+                    const template = templates.find((item) => item.id === editing.template_id);
+                    if (!template) return;
+                    setEditing({ ...editing, system_prompt: template.system_prompt,
+                      persona: editing.persona?.trim() ? editing.persona : template.persona,
+                      template_update_available: false });
+                  }}>同步最新模板</button>}
+              </div>
               <textarea
                 className="field h-28 resize-none leading-relaxed"
                 value={editing.system_prompt || ""}
                 onChange={(e) => setEditing({ ...editing, system_prompt: e.target.value })}
                 placeholder="描述这个 Bot 的职责、方法与边界。"
               />
+              <p className="mt-1 text-[10.5px] text-faint">描述专长和职责即可，系统按当前模式补充协作规则。同步先填入编辑草稿，保存后更新成员配置；保留已填写的性格、名字、模型和工具。</p>
             </div>
 
             <div>

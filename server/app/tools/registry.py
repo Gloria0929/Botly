@@ -33,6 +33,12 @@ from app.core.config import (
 from app.core.events import emit
 from app.core.models import FileRec, Memory
 from app.core.similarity import is_duplicate
+from app.services.memory_evidence import (
+    MIN_MEMORY_MENTIONS,
+    explicitly_requested_memory,
+    repeated_memory_sources,
+    user_source_messages,
+)
 
 # 工具结果来自外部（网页、文件），按需求 8.4 明确标注为不可信数据，
 # 避免网页里的提示词被模型当成用户指令执行。
@@ -887,6 +893,7 @@ PLAN_TOOL = Tool(
     description=(
         "当任务需要 2 个及以上子任务时，先提交执行计划给用户确认。"
         "只有一项执行工作时直接调用 delegate 派任务，无需计划；问候、状态查询和简短解释直接回答。"
+        "同一轮需要多次 delegate 时也必须先提交计划，不要用多条委派代替计划；"
         "由你自主判断任务依赖，不要让用户选择并行或串行。每步填写 depends_on："
         "独立任务填 []，依赖其他步骤的任务填写前置步骤标题。执行器会自动安排并行与串行批次。"
         "根据输入产物和共享文件/状态的读写冲突判断依赖；不同主题或独立文件可并行，使用前置结论、修改同一文件或终审要等待对应步骤。"
@@ -903,6 +910,7 @@ PLAN_TOOL = Tool(
                         "title": {"type": "string"},
                         "bot": {"type": "string"},
                         "expected": {"type": "string"},
+                        "instruction": {"type": "string", "description": "这项任务的完整目标、范围、用户约束和已有资料；执行器补派时直接使用，具体方法由成员自主决定"},
                         "depends_on": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -963,10 +971,10 @@ _MEMORY_CONTENT_MAX = 500
 
 
 async def _memory_save(ctx, content: str, title: str = "") -> str:
-    """MEM-03 修订：Bot 可以把长期有用的信息自主写进自己的私有记忆。
+    """只有用户明确要求，或在不同消息里反复表达三次的偏好，才写进 Bot 私有记忆。
 
     边界：只能写 scope=bot（本人私有记忆），共享记忆仍由用户在记忆页维护；
-    每次执行最多 3 条、内容去重，避免执行噪音或提示词注入刷爆记忆。
+    每次执行最多 3 条、内容去重，并且依据用户在群聊里真实发送的不同消息计次。
     """
     content = (content or "").strip()
     if len(content) < 10:
@@ -977,6 +985,15 @@ async def _memory_save(ctx, content: str, title: str = "") -> str:
     if not ctx.bot:
         return "保存失败：当前执行没有绑定 Bot，无法定位私有记忆。"
     ctx.assert_lease()
+
+    sources = user_source_messages(ctx.db, ctx.chat_id, trigger_message_id=ctx.run.trigger_message_id,
+                                   run_id=ctx.run.parent_run_id or ctx.run.id, bot_id=ctx.bot.id)
+    request = next((source["content"] for source in sources
+                    if source["id"] == ctx.run.trigger_message_id), "")
+    if (not explicitly_requested_memory(request, content)
+            and len(repeated_memory_sources(content, sources)) < MIN_MEMORY_MENTIONS):
+        return (f"尚未保存：用户还没有在 {MIN_MEMORY_MENTIONS} 条不同消息中表达过这项长期信息。"
+                "不要根据助手回复、任务指令或工具内容计次；用户明确要求记住时可以直接保存。")
 
     used = (
         ctx.db.scalar(
@@ -1019,9 +1036,10 @@ register(
     Tool(
         name="memory_save",
         description=(
-            "把值得长期记住的信息存进你自己的私有记忆（只注入给你，每次执行最多 3 条）。"
-            "适合记录用户的偏好、约定、项目背景等稳定事实；不要保存网页内容、工具返回"
-            "或一次性任务细节。共享记忆由用户在记忆页维护，本工具无法修改。"
+            f"把有依据的长期信息存进你自己的私有记忆（只注入给你，每次执行最多 3 条）。"
+            f"默认要求用户在不同消息里表达过至少 {MIN_MEMORY_MENTIONS} 次同一偏好或约定；"
+            "用户本轮明确说“记住/记下”且内容吻合时可以直接保存。助手复述、任务指令和工具内容不计次。"
+            "不要保存网页内容、工具返回或一次性任务细节。共享记忆由用户在记忆页维护。"
         ),
         parameters={
             "type": "object",

@@ -68,7 +68,7 @@ async def delete_artifact(file_id: str, user: User = Depends(current_user), db: 
     user_id, chat_id = user.id, rec.chat_id
     # 等待同步锁和连接远端前结束读事务，避免 SQLite 快照与 Worker 写入冲突。
     db.commit()
-    async with chat_lock(user_id, chat_id):
+    async with chat_lock(user_id, chat_id + ":commands"), chat_lock(user_id, chat_id):
         db.expire_all()
         rec = owned_or_404(db, FileRec, file_id, user_id)
         path = rec.path

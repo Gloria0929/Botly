@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
-from app.core.models import Bot, Run, User
+from app.core.models import Bot, Memory, Run, User
 from app.core.similarity import duplicates_in, is_duplicate, normalize, similarity
 from app.agent.orchestrator import RunExecutor
 from app.tools.registry import _memory_save
-from tests.conftest import register, setup_workspace
+from tests.conftest import register, seed_user_messages, setup_workspace
 
 
 # ---- 纯函数：相似度 ----
@@ -93,18 +94,23 @@ def test_memory_duplicates_endpoint(client, invite):
 
 def test_memory_save_dedup(client, invite):
     register(client, invite, "msave@test.dev")
+    chat_id, _ = setup_workspace(client)
+    seed_user_messages(chat_id, ["我喜欢简洁的中文表达", "回复时请保持中文简洁风格"])
+    run_id = client.post(f"/api/chats/{chat_id}/messages", json={
+        "content": "记住，以后回答都用简洁的中文表达",
+    }).json()["run"]["id"]
     with SessionLocal() as db:
         user = db.scalars(select(User).where(User.email == "msave@test.dev")).one()
         bot = db.scalars(select(Bot).where(Bot.user_id == user.id)).first()
         assert bot is not None
         ctx = SimpleNamespace(
-            bot=bot, db=db, run=SimpleNamespace(id="run-msave-1"), user_id=user.id,
+            bot=bot, db=db, run=db.get(Run, run_id), user_id=user.id, chat_id=chat_id,
             assert_lease=lambda: None,
         )
-        r1 = asyncio.run(_memory_save(ctx, "用户偏好简洁的中文表达"))
+        r1 = asyncio.run(_memory_save(ctx, "记住，以后回答都用简洁的中文表达"))
         assert "已保存" in r1, r1
         # 加字/近义表述（高度相似）应被去重拦截
-        r2 = asyncio.run(_memory_save(ctx, "用户偏好简洁的中文表达风格"))
+        r2 = asyncio.run(_memory_save(ctx, "记住，以后回答都用简洁的中文表达风格"))
         assert "无需重复" in r2, r2
         db.rollback()
 
@@ -114,14 +120,18 @@ def test_memory_save_dedup(client, invite):
 def test_candidate_dedup_similar(client, invite, monkeypatch):
     register(client, invite, "cand-dup@test.dev")
     chat_id, _ = setup_workspace(client)
-    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": "以后回答尽量简洁"})
+    source_text = "以后回答尽量简洁"
+    source_ids = seed_user_messages(chat_id, [source_text, source_text])
+    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": source_text})
     run_id = r.json()["run"]["id"]
+    source_ids.append(r.json()["message"]["id"])
 
     async def fake_complete(self, **kwargs):
-        return (
-            '[{"title":"偏好","content":"用户偏好简洁的中文表达"},'
-            '{"title":"偏好2","content":"用户偏好简洁的中文表达风格"}]'
-        )
+        evidence = [{"message_id": source_id, "quote": source_text} for source_id in source_ids]
+        return json.dumps([
+            {"title": "偏好", "content": "用户偏好简洁的中文表达", "evidence": evidence},
+            {"title": "偏好2", "content": "用户偏好简洁的中文表达风格", "evidence": evidence},
+        ])
 
     monkeypatch.setattr(RunExecutor, "_complete_text", fake_complete)
     with SessionLocal() as db:
@@ -140,11 +150,16 @@ def test_candidate_dedup_existing(client, invite, monkeypatch):
     register(client, invite, "cand-exist@test.dev")
     chat_id, _ = setup_workspace(client)
     client.post("/api/memories", json={"scope": "shared", "content": "用户偏好简洁的中文表达"})
-    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": "记住我喜欢简洁"})
+    source_text = "记住我喜欢简洁的中文表达"
+    source_ids = seed_user_messages(chat_id, [source_text, source_text])
+    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": source_text})
     run_id = r.json()["run"]["id"]
+    source_ids.append(r.json()["message"]["id"])
 
     async def fake_complete(self, **kwargs):
-        return '[{"title":"偏好","content":"用户偏好简洁的中文表达风格"}]'
+        evidence = [{"message_id": source_id, "quote": source_text} for source_id in source_ids]
+        return json.dumps([{"title": "偏好", "content": "用户偏好简洁的中文表达风格",
+                            "evidence": evidence}])
 
     monkeypatch.setattr(RunExecutor, "_complete_text", fake_complete)
     with SessionLocal() as db:
@@ -155,3 +170,23 @@ def test_candidate_dedup_existing(client, invite, monkeypatch):
     body = client.get("/api/memories/candidates").json()
     # 与现有记忆高度相似，不应再生成候选
     assert body["candidates"] == [], body
+
+
+def test_automatic_memory_save_needs_three_distinct_matching_messages(client, invite):
+    register(client, invite, "msave-repeat@test.dev")
+    chat_id, _ = setup_workspace(client)
+    preference = "以后回答请保持简洁的中文表达。"
+    seed_user_messages(chat_id, [preference, preference])
+    run_id = client.post(f"/api/chats/{chat_id}/messages", json={"content": preference}).json()["run"]["id"]
+    with SessionLocal() as db:
+        user = db.scalars(select(User).where(User.email == "msave-repeat@test.dev")).one()
+        bot = db.scalar(select(Bot).where(Bot.user_id == user.id))
+        run = db.get(Run, run_id)
+        ctx = SimpleNamespace(bot=bot, db=db, run=run, user_id=user.id, chat_id=chat_id,
+                              assert_lease=lambda: None)
+        accepted = asyncio.run(_memory_save(ctx, "用户偏好简洁的中文表达。"))
+        assert "已保存" in accepted
+        changed_topic = asyncio.run(_memory_save(ctx, "用户偏好使用 Postgres 数据库。"))
+        assert "3 条不同消息" in changed_topic
+        assert db.scalar(select(func.count(Bot.id)).where(Bot.id == bot.id)) == 1
+        assert db.scalar(select(func.count(Memory.id)).where(Memory.run_id == run_id)) == 1

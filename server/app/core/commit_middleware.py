@@ -11,8 +11,8 @@
 会话仍由 get_db 在流结束后的清理里关闭；且 SessionLocal 用的是
 expire_on_commit=False，提交不会使已加载属性过期。端点抛异常时，
 get_db 的回滚已在异常处理中先行执行，此处提交是空操作，不会把失败
-的写入扶正；提交本身失败时回滚并记日志，不阻断响应（与今天提交失败
-时的客户端可见行为一致）。
+的写入扶正；提交本身失败时回滚并记日志，再抛出异常，由外层错误处理
+返回 500，不能让客户端把已回滚的操作当成成功。
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ class CommitBeforeResponseMiddleware:
                     except Exception:
                         db.rollback()
                         log.exception("响应前提交失败，已回滚")
+                        raise
             await send(message)
 
         await self.app(scope, receive, send_with_commit)

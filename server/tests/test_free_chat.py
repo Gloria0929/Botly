@@ -71,7 +71,7 @@ def answers(client, cid):
 def test_direct_response_has_no_judgement_runs_or_fixed_three_speakers(client, room, monkeypatch):
     cid, bots = room
     calls = model(monkeypatch)
-    result = send(client, cid, "你好")
+    result = send(client, cid, "聊聊这个方案")
     assert len(answers(client, cid)) == 1
     assert len(calls) == len(bots)
     assert all(c["ctx"]["role"] == "peer" for c in calls)
@@ -153,7 +153,7 @@ def test_silent_primary_falls_back_without_publishing_a_fake_reply(client, room,
     cid, bots = room
     calls = model(monkeypatch, {bots[0]["name"]: "[PASS]"})
     send(client, cid, "你好")
-    assert len(calls) == len(bots)
+    assert len(calls) == 2
     assert len(answers(client, cid)) == 1
     assert answers(client, cid)[0]["sender_bot_id"] == bots[1]["id"]
     assert answers(client, cid)[0]["content"] != "我在，收到你的消息。"
@@ -236,7 +236,7 @@ def test_restart_after_saved_output_does_not_publish_twice(client, room, monkeyp
             crashed.append(self.run_id)
             raise LeaseLost()
     monkeypatch.setattr(orchestrator.RunExecutor, "_finalize_message", finalize)
-    result = client.post(f"/api/chats/{cid}/messages", json={"content": "你好"}).json()
+    result = client.post(f"/api/chats/{cid}/messages", json={"content": "聊聊这个方案"}).json()
     rid = result["run"]["id"]
     asyncio.run(process_one(rid))
     with SessionLocal() as db:
@@ -335,9 +335,12 @@ def test_supplements_read_primary_and_previous_supplements(client, room, monkeyp
     model(monkeypatch, {b["name"]: reply for b in bots})
     send(client, cid, "谈谈这个方案")
     assert len(seen) == len(bots)
-    assert all(seen[0] in blob for blob in contexts[1:])
+    assert seen[0] not in contexts[1], "首批成员不等待主回复完整生成"
+    assert seen[0] in contexts[2]
     assert seen[1] in contexts[2]
-    assert [m["content"] for m in answers(client, cid)] == seen
+    rows = answers(client, cid)
+    assert {m["content"] for m in rows[:2]} == set(seen[:2])
+    assert rows[2]["content"] == seen[2]
 
 
 def test_supplement_does_not_steal_conversation_partner(client, room, monkeypatch):
@@ -392,8 +395,11 @@ def test_new_message_skips_stale_optional_replies(client, room, monkeypatch):
     asyncio.run(process_one(rid))
     with SessionLocal() as db:
         children = list(db.scalars(select(Run.id).where(Run.parent_run_id == rid)))
-    assert len(children) == 1, "普通消息先安排接话对象"
-    asyncio.run(process_one(children[0]))
+    assert len(children) == 2, "普通消息首批安排两位成员并行接话"
+    with SessionLocal() as db:
+        primary = next(child_id for child_id in children
+                       if db.get(Run, child_id).config_snapshot["free"]["selected"]["required"])
+    asyncio.run(process_one(primary))
     newer = client.post(f"/api/chats/{cid}/messages", json={"content": f"@{bots[1]['name']} 换个话题"}).json()
     assert asyncio.run(drain(rid)) == "completed"
     assert len(calls) == 1, "用户已经发了新消息，不再补发旧话题的旁观发言"
@@ -503,3 +509,359 @@ def test_free_chat_rejects_unadvertised_task_cards_and_continues(client, room, m
     with SessionLocal() as db:
         assert not db.scalar(select(Message.id).where(Message.thread_id == answers(client, cid)[0]["thread_id"],
                                                        Message.type.in_(("plan", "question"))))
+
+
+@pytest.mark.parametrize("content", ["你好 👋", "好的", "晚安", "哈哈"])
+def test_social_messages_do_not_poll_the_whole_room(client, room, monkeypatch, content):
+    cid, bots = room
+    calls = model(monkeypatch)
+    result = send(client, cid, content)
+    assert len(calls) == 1 and calls[0]["ctx"]["bot_name"] == bots[0]["name"]
+    assert len(answers(client, cid)) == 1
+    with SessionLocal() as db:
+        assert len(list(db.scalars(select(Run.id).where(Run.parent_run_id == result["run"]["id"])))) == 1
+
+
+def test_greeting_with_a_real_question_still_invites_other_perspectives(client, room, monkeypatch):
+    cid, bots = room
+    calls = model(monkeypatch, {bots[1]["name"]: "要把维护成本也算进去。"})
+    send(client, cid, "你好，这个方案还有什么风险？")
+    assert len(calls) == len(bots)
+    assert len(answers(client, cid)) == 2
+
+
+def test_free_prompt_preserves_persona_without_builtin_task_rituals(client, room, monkeypatch):
+    cid, bots = room
+    client.patch(f"/api/bots/{bots[1]['id']}", json={"persona": "直率、有点幽默，喜欢用生活例子解释"})
+    calls = model(monkeypatch)
+    send(client, cid, f"@{bots[1]['name']} 你觉得这个想法怎么样")
+    system = calls[0]["messages"][0]["content"]
+    assert "直率、有点幽默" in system
+    assert "收到任务后先用 web_search" not in system
+    assert "本次执行的 token 预算" not in system
+    assert "不同看法就直接讲理由" in system
+    assert "闲聊不必先搜索或读取文件" in system
+
+
+def test_free_prompt_keeps_custom_role_instructions(client, room, monkeypatch):
+    cid, bots = room
+    client.patch(f"/api/bots/{bots[1]['id']}", json={"system_prompt": "你擅长海洋生态，用生动的类比解释科学。"})
+    calls = model(monkeypatch)
+    send(client, cid, f"@{bots[1]['name']} 珊瑚为什么会白化")
+    assert "你擅长海洋生态，用生动的类比解释科学。" in calls[0]["messages"][0]["content"]
+
+
+def test_supplements_reply_to_the_latest_member_instead_of_starting_over(client, room, monkeypatch):
+    cid, bots = room
+    calls = model(monkeypatch, {
+        bots[0]["name"]: "可以先用小范围试点验证。",
+        bots[1]["name"]: "试点也得把维护成本算进去。",
+        bots[2]["name"]: "维护可以先由现有团队轮值。",
+    })
+    result = send(client, cid, "聊聊这个方案怎么落地")
+    rows = answers(client, cid)
+    assert rows[0]["meta"]["reply_to"] == result["message"]["id"]
+    assert rows[1]["meta"]["reply_to"] == result["message"]["id"]
+    assert rows[2]["meta"]["reply_to"] == rows[1]["id"]
+    previous, current = rows[1], calls[2]
+    context = json.dumps(current["messages"], ensure_ascii=False)
+    assert previous["content"] in context
+    assert "现在接「" in context and "无需重新回答原问题" in context
+    # 群友原话只能作为对话资料，不能被提升为系统指令。
+    assert all(previous["content"] not in item["content"] for item in current["messages"] if item["role"] == "system")
+
+
+def test_open_question_can_return_to_an_earlier_speaker_without_at_mentions(client, room, monkeypatch):
+    cid, bots = room
+    def first(kw):
+        return "可以从十位活跃用户开始。" if kw["ctx"]["observer"] else "我倾向于先做小范围试点。"
+    model(monkeypatch, {bots[0]["name"]: first, bots[1]["name"]: "试点该怎么选人？"})
+    result = send(client, cid, "我们聊聊怎么开始")
+    rows = answers(client, cid)
+    assert len(rows) == 3
+    assert {m["sender_bot_id"] for m in rows[:2]} == {bots[0]["id"], bots[1]["id"]}
+    assert rows[2]["sender_bot_id"] == bots[0]["id"]
+    question = next(m for m in rows[:2] if m["sender_bot_id"] == bots[1]["id"])
+    assert rows[2]["meta"]["reply_to"] == question["id"]
+    with SessionLocal() as db:
+        children = list(db.scalars(select(Run).where(Run.parent_run_id == result["run"]["id"])))
+        assert max(child.round for child in children) <= 2
+        assert len(children) <= len(bots) * 2
+
+
+def test_inline_invitation_can_hand_the_conversation_to_a_peer(client, room, monkeypatch):
+    cid, bots = room
+    model(monkeypatch, {bots[1]["name"]: f"这个成本我拿不准，@{bots[2]['name']} 你觉得该怎么定？",
+                        bots[2]["name"]: "先按现有团队的人力成本估算。"})
+    send(client, cid, f"@{bots[1]['name']} 聊聊报价")
+    rows = answers(client, cid)
+    assert [m["sender_bot_id"] for m in rows] == [bots[1]["id"], bots[2]["id"]]
+    assert rows[1]["meta"]["reply_to"] == rows[0]["id"]
+
+
+def test_natural_name_address_changes_the_conversation_partner(client, room, monkeypatch):
+    cid, bots = room
+    calls = model(monkeypatch)
+    send(client, cid, f"@{bots[1]['name']} 先说说背景")
+    calls.clear()
+    send(client, cid, f"{bots[2]['name']}，你怎么看这个想法？")
+    assert next(call for call in calls if not call["ctx"]["observer"])["ctx"]["bot_name"] == bots[2]["name"]
+
+
+def test_proactivity_affects_initial_opportunity_without_a_fixed_leader(client, room, monkeypatch):
+    cid, bots = room
+    client.patch(f"/api/bots/{bots[1]['id']}", json={"proactivity": 0.1})
+    client.patch(f"/api/bots/{bots[2]['id']}", json={"proactivity": 0.9})
+    calls = model(monkeypatch)
+    result = send(client, cid, "我们聊聊这个方案")
+    assert {call["ctx"]["bot_name"] for call in calls[:2]} == {bots[0]["name"], bots[2]["name"]}
+    assert calls[-1]["ctx"]["bot_name"] == bots[1]["name"]
+    with SessionLocal() as db:
+        assert db.get(Run, result["run"]["id"]).config_snapshot["free"]["primary_bot_id"] == bots[2]["id"]
+
+
+def test_empty_agreement_is_silent_but_a_substantive_objection_is_published(client, room, monkeypatch):
+    cid, bots = room
+    model(monkeypatch, {bots[0]["name"]: "可以先做试点。", bots[1]["name"]: "我同意上面的观点。",
+                        bots[2]["name"]: "但这个预算没有覆盖维护成本。"})
+    send(client, cid, "你们怎么看这个方案")
+    assert [m["sender_bot_id"] for m in answers(client, cid)] == [bots[0]["id"], bots[2]["id"]]
+
+
+def test_simple_votes_are_preserved_when_the_user_asks_for_them(client, room, monkeypatch):
+    cid, bots = room
+    model(monkeypatch, {bots[0]["name"]: "可以先试点。", bots[1]["name"]: "支持。"})
+    send(client, cid, "你们支持先做试点吗？")
+    rows = answers(client, cid)
+    assert len(rows) == 2
+    assert {m["content"] for m in rows} == {"可以先试点。", "支持。"}
+
+
+def test_questions_in_quotes_and_code_do_not_reopen_the_discussion(client, room, monkeypatch):
+    cid, bots = room
+    calls = model(monkeypatch, {bots[1]["name"]: f"只记录一下例子。\n> 大家怎么看？\n`@{bots[2]['name']} 请你回答？`"})
+    send(client, cid, f"@{bots[1]['name']} 记录个例子")
+    assert len(calls) == 1
+
+
+def test_an_invitation_does_not_dispatch_every_member_mentioned_on_the_line(client, room):
+    from app.agent.free_chat import handoff_members
+    from app.core.models import Bot
+    cid, bots = room
+    with SessionLocal() as db:
+        members = list(db.scalars(select(Bot).where(Bot.id.in_([bot["id"] for bot in bots]))))
+        text = f"@{bots[1]['name']} 请核实一下，沿用 @{bots[2]['name']} 的观点。"
+        assert handoff_members(text, members) == [bots[1]["id"]]
+        text = f"先沿用 @{bots[2]['name']} 的观点，另外 @{bots[2]['name']} 请核对一下成本。"
+        assert handoff_members(text, members) == [bots[2]["id"]]
+
+
+def test_slow_primary_does_not_block_other_members_or_the_next_reply(client, room, monkeypatch):
+    cid, bots = room
+
+    async def verify():
+        primary_started = asyncio.Event()
+        release_primary = asyncio.Event()
+        contexts = {}
+
+        async def stream(**kw):
+            name = kw["ctx"]["bot_name"]
+            contexts[name] = json.dumps(kw["messages"], ensure_ascii=False)
+            if name == bots[0]["name"]:
+                primary_started.set()
+                await release_primary.wait()
+            else:
+                await asyncio.wait_for(primary_started.wait(), 2)
+            yield {"type": "done", "content": name + "独立的观点", "tool_calls": []}
+
+        monkeypatch.setattr(orchestrator, "stream_chat", stream)
+        rid = client.post(f"/api/chats/{cid}/messages", json={"content": "聊聊这个想法"}).json()["run"]["id"]
+        await process_one(rid)
+        with SessionLocal() as db:
+            children = list(db.scalars(select(Run).where(Run.parent_run_id == rid)))
+            primary = next(c.id for c in children if c.target_bot_id == bots[0]["id"])
+            other = next(c.id for c in children if c.target_bot_id == bots[1]["id"])
+        slow = asyncio.create_task(process_one(primary))
+        try:
+            await asyncio.wait_for(process_one(other), 3)
+            assert not slow.done()
+            assert [m["sender_bot_id"] for m in answers(client, cid) if m["content"]] == [bots[1]["id"]]
+            assert rid in _wake_waiting_parents() or _root_status(rid) == "queued"
+            await process_one(rid)
+            with SessionLocal() as db:
+                third = db.scalar(select(Run.id).where(Run.parent_run_id == rid, Run.target_bot_id == bots[2]["id"]))
+            assert third, "已有成员回复时应继续接话，不能等慢成员收尾"
+            await asyncio.wait_for(process_one(third), 3)
+            assert not slow.done()
+            assert bots[1]["name"] + "独立的观点" in contexts[bots[2]["name"]]
+            assert {m["sender_bot_id"] for m in answers(client, cid) if m["content"]} == {bots[1]["id"], bots[2]["id"]}
+        finally:
+            release_primary.set()
+            await slow
+        assert await drain(rid) == "completed"
+        assert len(answers(client, cid)) == 3
+
+    asyncio.run(verify())
+
+
+def test_latest_reply_is_not_chosen_by_child_run_creation_order(client, room, monkeypatch):
+    from datetime import timedelta
+
+    cid, bots = room
+    model(monkeypatch, {b["name"]: b["name"] + "补充一条独立事实。" for b in bots})
+
+    async def verify():
+        rid = client.post(f"/api/chats/{cid}/messages", json={"content": "聊聊方案"}).json()["run"]["id"]
+        await process_one(rid)
+        with SessionLocal() as db:
+            children = list(db.scalars(select(Run).where(Run.parent_run_id == rid)))
+            primary = next(c.id for c in children if c.target_bot_id == bots[0]["id"])
+            other = next(c.id for c in children if c.target_bot_id == bots[1]["id"])
+        await process_one(primary)
+        await process_one(other)
+        with SessionLocal() as db:
+            db.get(Run, primary).created_at = db.get(Run, other).created_at + timedelta(seconds=1)
+            db.commit()
+        assert await drain(rid) == "completed"
+
+    asyncio.run(verify())
+    rows = answers(client, cid)
+    latest_initial = next(m for m in rows if m["sender_bot_id"] == bots[1]["id"])
+    supplement = next(m for m in rows if m["sender_bot_id"] == bots[2]["id"])
+    assert supplement["meta"]["reply_to"] == latest_initial["id"]
+
+
+def _root_status(rid):
+    with SessionLocal() as db:
+        return db.get(Run, rid).status
+
+
+def test_six_members_get_initial_opportunities_instead_of_a_fixed_two(client, room, monkeypatch):
+    from collections import Counter
+
+    cid, bots = room
+    provider = client.get(f"/api/bots/{bots[0]['id']}").json()["provider_id"]
+    for number in range(3):
+        bot = client.post("/api/bots", json={"name": f"群友{number}", "provider_id": provider, "model": "botly-mock"}).json()
+        assert client.post(f"/api/chats/{cid}/members", json={"bot_ids": [bot["id"]]}).status_code == 200
+        bots.append(bot)
+    client.patch(f"/api/chats/{cid}", json={"max_speakers": 2})
+    calls = model(monkeypatch, {b["name"]: b["name"] + "有个想法" for b in bots})
+    for index in range(6):
+        send(client, cid, f"聊聊话题{index}")
+    participation = Counter(m["sender_bot_id"] for m in answers(client, cid))
+    assert len(calls) == 12
+    assert participation == Counter({bot["id"]: 2 for bot in bots})
+
+
+def test_less_proactive_members_are_not_starved(client, room, monkeypatch):
+    from collections import Counter
+
+    cid, bots = room
+    client.patch(f"/api/chats/{cid}", json={"max_speakers": 1})
+    client.patch(f"/api/bots/{bots[1]['id']}", json={"proactivity": 0.1})
+    client.patch(f"/api/bots/{bots[2]['id']}", json={"proactivity": 0.9})
+    model(monkeypatch)
+    for index in range(12):
+        send(client, cid, f"聊聊不同的话题{index}")
+    counts = Counter(m["sender_bot_id"] for m in answers(client, cid))
+    assert counts[bots[1]["id"]] > 0
+    assert counts[bots[2]["id"]] > counts[bots[1]["id"]]
+
+
+def test_group_greeting_invites_more_than_the_usual_interlocutor(client, room, monkeypatch):
+    cid, bots = room
+    calls = model(monkeypatch, {bots[1]["name"]: "嗨，我今天刚试了个有意思的东西。"})
+    send(client, cid, "大家好！")
+    assert len(answers(client, cid)) == 2
+    initial = next(c for c in calls if c["ctx"]["observer"])
+    system = initial["messages"][0]["content"]
+    assert "不用等其他人说完" in system
+    assert "只接最近一句" not in system
+
+
+def test_silent_model_times_out_and_releases_the_only_speaker_slot(client, room, monkeypatch):
+    cid, bots = room
+    client.patch(f"/api/chats/{cid}", json={"max_speakers": 1})
+    monkeypatch.setattr(orchestrator, "FREE_CHAT_FIRST_RESPONSE_TIMEOUT", 0.05)
+    closed = []
+    calls = []
+
+    async def stream(**kw):
+        name = kw["ctx"]["bot_name"]
+        calls.append(kw)
+        if name == bots[0]["name"]:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.append(name)
+        yield {"type": "done", "content": "换我来说说我的看法。", "tool_calls": []}
+
+    monkeypatch.setattr(orchestrator, "stream_chat", stream)
+    result = send(client, cid, "你好")
+    assert closed == [bots[0]["name"]]
+    assert len(calls) == 2 and all(c["max_retries"] == 0 for c in calls)
+    assert [m["sender_bot_id"] for m in answers(client, cid)] == [bots[1]["id"]]
+    with SessionLocal() as db:
+        slow = db.scalar(select(Run).where(Run.parent_run_id == result["run"]["id"], Run.target_bot_id == bots[0]["id"]))
+        assert slow.status == "failed" and "超时" in slow.end_reason
+
+
+def test_optional_slow_stream_has_a_total_time_limit(client, room, monkeypatch):
+    cid, bots = room
+    monkeypatch.setattr(orchestrator, "FREE_CHAT_REPLY_TIMEOUT", 0.05)
+    closed = []
+
+    async def stream(**kw):
+        name = kw["ctx"]["bot_name"]
+        if kw["ctx"]["observer"]:
+            try:
+                while True:
+                    yield {"type": "delta", "text": "还在生成"}
+                    await asyncio.sleep(0.01)
+            finally:
+                closed.append(name)
+        else:
+            yield {"type": "done", "content": "我先给一个具体的看法。", "tool_calls": []}
+
+    monkeypatch.setattr(orchestrator, "stream_chat", stream)
+    send(client, cid, "聊聊这个点子")
+    assert set(closed) == {b["name"] for b in bots[1:]}
+    assert len(answers(client, cid)) == 1
+
+
+def test_silent_observer_can_take_over_after_the_primary_fails(client, room, monkeypatch):
+    from app.agent.llm import LLMError
+
+    cid, bots = room
+    attempts = []
+
+    async def stream(**kw):
+        name = kw["ctx"]["bot_name"]
+        attempts.append((name, kw["ctx"]["observer"]))
+        if name == bots[0]["name"]:
+            raise LLMError("这个成员的服务暂时不可用")
+        text = "[PASS]" if kw["ctx"]["observer"] else "我来接一下这个问题。"
+        yield {"type": "done", "content": text, "tool_calls": []}
+
+    monkeypatch.setattr(orchestrator, "stream_chat", stream)
+
+    async def verify():
+        rid = client.post(f"/api/chats/{cid}/messages", json={"content": "聊聊这个点子"}).json()["run"]["id"]
+        await process_one(rid)
+        with SessionLocal() as db:
+            children = list(db.scalars(select(Run).where(Run.parent_run_id == rid)))
+            primary = next(c.id for c in children if c.target_bot_id == bots[0]["id"])
+            other = next(c.id for c in children if c.target_bot_id == bots[1]["id"])
+        await process_one(other)
+        await process_one(rid)
+        with SessionLocal() as db:
+            third = db.scalar(select(Run.id).where(Run.parent_run_id == rid, Run.target_bot_id == bots[2]["id"]))
+        await process_one(third)
+        await process_one(primary)
+        assert await drain(rid) == "completed"
+
+    asyncio.run(verify())
+    assert [m["sender_bot_id"] for m in answers(client, cid)] == [bots[1]["id"]]
+    assert (bots[1]["name"], False) in attempts
+    assert len(attempts) <= 4, "兜底只重试尚未承担主回复的成员，不能循环轮询"

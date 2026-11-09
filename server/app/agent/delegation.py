@@ -165,7 +165,7 @@ class DelegationMixin:
             for s in batch_steps
             if (s.get("title") or "").strip() and s is not step
         )
-        parts = [title]
+        parts = [(step.get("instruction") or "").strip() or title]
         if others:
             parts.append(f"同批其他步骤「{others}」由各自任务负责，只完成本步骤，不要重复其他步骤的工作。")
         expected = (step.get("expected") or "").strip()
@@ -469,6 +469,27 @@ class DelegationMixin:
             main = self._main_thread(db, chat)
             if not nested and run.kind != "free":
                 plan = self._approved_plan_steps(db, run.id)
+                pending_delegates = [message for message in self._open_tool_calls(db, thread_id, run.id)
+                    if (((message.meta or {}).get("tool_calls") or [{}])[0].get("function") or {}).get("name") == "delegate"]
+                pending_steps = set()
+                for pending in pending_delegates:
+                    pending_args = _parse_json(pending.meta["tool_calls"][0]["function"].get("arguments") or "{}")
+                    identity = pending_args.get("step") or pending_args.get("instruction")
+                    if isinstance(identity, str):
+                        pending_steps.add(_step_key(identity))
+                # 已经开工的旧调用先按检查点恢复，不能因补计划而丢掉在途任务。
+                recovering = not plan and len(pending_steps) > 1 and any(
+                    self._task_for_call(db, run.id, main.id, pending.meta["tool_calls"][0].get("id"), thread_id)
+                    for pending in pending_delegates)
+                if not plan and len(pending_steps) > 1 and not recovering:
+                    for pending in pending_delegates:
+                        pending_call = pending.meta["tool_calls"][0]
+                        self._answer_open_calls(db, call_thread or main, run.id,
+                            "本轮包含多项委派，请先调用 propose_plan 明确每项任务的目标、执行者和 depends_on。"
+                            "独立任务填写 []，只有真实需要前置结果或存在共享写入冲突时才添加依赖；"
+                            "用户确认后，执行器会自动并行派发同批独立项。不要把本轮多项工作直接逐个串行派发。",
+                            call_id=pending_call.get("id"))
+                    return {}
                 matched = self._match_plan_step(plan, step_key)
                 if plan and not matched and any("depends_on" in step for step in plan):
                     self.write_tool_result(thread_id, call,

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Loader2, MessageSquare, MessageSquarePlus, Plus, Search, X } from "lucide-react";
-import { api, toastError } from "@/lib/api";
+import { api, errText, toastError } from "@/lib/api";
 import Avatar from "@/components/ui/Avatar";
 import Select from "@/components/ui/Select";
 import Modal from "@/components/ui/Modal";
@@ -154,6 +154,10 @@ export function NewChatDialog({
   const [sup, setSup] = useState<string>("");
   const [chatMode, setChatMode] = useState<"task" | "free">("task");
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [errorField, setErrorField] = useState<"name" | "members" | null>(null);
+  const nameInput = useRef<HTMLInputElement>(null);
+  const membersField = useRef<HTMLDivElement>(null);
   const submitting = useRef(false);
 
   const loadTemplates = () => {
@@ -194,9 +198,26 @@ export function NewChatDialog({
 
   const submit = async () => {
     if (submitting.current) return;
-    if (!name.trim()) return toast("请填写群聊名称", "error");
-    if (!picked.length) return toast("至少选择一个成员", "error");
-    if (chatMode === "free" && (picked.length < 2 || picked.length > 6)) return toast("自由群聊需要 2–6 位成员", "error");
+    if (!name.trim()) {
+      setFormError("请填写群聊名称后再创建。");
+      setErrorField("name");
+      nameInput.current?.focus();
+      return;
+    }
+    if (!picked.length) {
+      setFormError("请至少选择一位成员。");
+      setErrorField("members");
+      membersField.current?.focus();
+      return;
+    }
+    if (chatMode === "free" && (picked.length < 2 || picked.length > 6)) {
+      setFormError("自由群聊需要选择 2–6 位成员。");
+      setErrorField("members");
+      membersField.current?.focus();
+      return;
+    }
+    setFormError("");
+    setErrorField(null);
     submitting.current = true;
     setLoading(true);
     try {
@@ -208,6 +229,8 @@ export function NewChatDialog({
       });
       onCreated(c.id);
     } catch (e: any) {
+      setFormError(errText(e, "创建失败，请检查群聊信息后重试。"));
+      setErrorField(null);
       toastError(e);
     } finally {
       submitting.current = false;
@@ -217,9 +240,11 @@ export function NewChatDialog({
 
   return (
     <Modal open onClose={() => { if (!loading) onClose(); }} title="新建会话" subtitle="选一个模板，一键组建团队；也可以自己选择成员。" width="max-w-2xl"
-      footer={<><button className="btn-ghost" onClick={onClose} disabled={loading}>取消</button>{mode === "custom" && <button className="btn-primary" onClick={submit} disabled={loading || !picked.length}>{loading && <Loader2 size={13} className="animate-spin" />}创建会话</button>}</>}>
+      footer={<><button type="button" className="btn-ghost" onClick={onClose} disabled={loading}>取消</button>{mode === "custom" && <button type="submit" form="new-chat-form" className="btn-primary" disabled={loading}>{loading && <Loader2 size={13} className="animate-spin" />}创建会话</button>}</>}>
       <div className="mb-4"><span className="label">群聊模式</span>
         <Select ariaLabel="群聊模式" value={chatMode} disabled={loading} onChange={(value) => {
+          setFormError("");
+          setErrorField(null);
           const next = value as "task" | "free"; setChatMode(next);
           if (next === "free") { setPicked((p) => p.slice(0, 6)); setSup(""); }
           else if (!sup) setSup(picked[0] || "");
@@ -259,35 +284,48 @@ export function NewChatDialog({
           <p className="mt-4 text-[11px] leading-relaxed text-faint">优先复用已启用的成员，缺少的角色自动补齐。创建后可随时调整成员与模型。</p>
         </div>
       ) : (
-        <div className="space-y-5">
+        <form id="new-chat-form" noValidate onSubmit={(event) => { event.preventDefault(); void submit(); }} className="space-y-5">
+          {formError && !errorField && <p role="alert" className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{formError}</p>}
           <div>
             <label htmlFor="new-chat-name" className="label">会话名称</label>
             <input
               autoFocus
+              ref={nameInput}
               id="new-chat-name"
+              aria-invalid={errorField === "name"}
+              aria-describedby={errorField === "name" ? "new-chat-name-error" : undefined}
               className="field"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (errorField === "name") { setFormError(""); setErrorField(null); }
+              }}
               placeholder="例如：市场调研"
             />
+            {errorField === "name" && <p id="new-chat-name-error" role="alert" className="mt-1.5 text-[11px] text-danger">{formError}</p>}
           </div>
 
           <div>
             <label className="label">成员</label>
             {!bots.length && <p className="rounded-lg bg-panel2 p-3 text-[12px] text-muted">还没有可选成员，请先到智能体页面创建团队。</p>}
-            <div className="max-h-56 space-y-1 overflow-y-auto">
+            {errorField === "members" && <p role="alert" className="mb-2 text-[11px] text-danger">{formError}</p>}
+            {chatMode === "free" && <p className="mb-2 text-[10.5px] text-faint">已选 {picked.length} 位，自由群聊需要 2–6 位成员。</p>}
+            <div ref={membersField} tabIndex={errorField === "members" ? -1 : undefined}
+              className="max-h-56 space-y-1 overflow-y-auto">
               {bots.map((b) => (
                 <label
                   key={b.id}
                   className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-panel2"
                 >
                   <input
+                    aria-label={`选择${b.name}`}
                     type="checkbox"
                     checked={picked.includes(b.id)}
                     disabled={chatMode === "free" && picked.length >= 6 && !picked.includes(b.id)}
                     onChange={(e) => {
                       const next = e.target.checked ? [...picked, b.id] : picked.filter((i) => i !== b.id);
                       setPicked(next);
+                      if (errorField === "members") { setFormError(""); setErrorField(null); }
                       if (!next.includes(sup)) setSup(chatMode === "free" ? "" : next[0] || "");
                     }}
                     className="accent-[var(--accent)]"
@@ -318,7 +356,7 @@ export function NewChatDialog({
               {chatMode === "free" ? "没有明确对话对象时由负责人先接话，其他成员看完后按需补充；成员可以互相交接。" : "总指挥负责拆解任务与派任务，额外拥有 delegate 与计划工具。"}
             </p>
           </div>
-        </div>
+        </form>
       )}
     </Modal>
   );

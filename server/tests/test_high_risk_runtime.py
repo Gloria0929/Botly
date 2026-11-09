@@ -162,4 +162,4 @@ def test_legacy_columns_are_migrated_without_stamping_head(migration_engine):
     assert "reasoning_content" in {c["name"] for c in inspector.get_columns("messages")}
     assert "seq_counter" in {c["name"] for c in inspector.get_columns("threads")}
     with migration_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0012"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0013"

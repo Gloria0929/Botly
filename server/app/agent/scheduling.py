@@ -12,6 +12,8 @@ def _step_key(value: str) -> str:
 def schedule_plan(steps: list[dict]) -> list[dict]:
     if any(not isinstance(step, dict) or not isinstance(step.get("title"), str) for step in steps):
         raise ValueError("计划步骤必须是对象，且 title 必须是字符串")
+    if any("instruction" in step and not isinstance(step["instruction"], str) for step in steps):
+        raise ValueError("计划步骤的 instruction 必须是字符串")
     if not any("depends_on" in step for step in steps):
         # 兼容已保存的旧计划；大批次分成多个并行批次，不再整体退回串行。
         groups: dict[int, list[dict]] = {}

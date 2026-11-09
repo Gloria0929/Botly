@@ -114,3 +114,18 @@ def test_failed_template_creation_rolls_back_added_members(client, invite, monke
     assert len(client.get("/api/bots").json()) == before
     with SessionLocal() as db:
         assert db.scalar(select(Chat).where(Chat.user_id == registered["id"], Chat.name == "数据分析")) is None
+
+
+def test_template_reuses_current_writer_name_and_saved_persona(client, invite, monkeypatch):
+    from app.services.templates import BY_ID
+    register(client, invite, "template-current-writer@test.dev")
+    _, bots = setup_workspace(client)
+    writer = next(bot for bot in bots if bot["role"] == "架构师")
+    monkeypatch.setitem(BY_ID["writer"], "name", "撰稿人")
+    monkeypatch.setitem(BY_ID["writer"], "role", "撰稿人")
+    updated = client.patch(f"/api/bots/{writer['id']}", json={"name": "撰稿人", "role": "撰稿人",
+        "persona": "保留我自己写的说话方式"}).json()
+    response = client.post("/api/chats/from-template", json={"template_id": "content-writing"})
+    assert response.status_code == 201, response.text
+    assert writer["id"] in {bot["id"] for bot in response.json()["members"]}
+    assert client.get(f"/api/bots/{writer['id']}").json() == updated

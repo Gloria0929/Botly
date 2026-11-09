@@ -114,7 +114,7 @@ def _wake_waiting_parents(free_only: bool = False) -> list[str]:
             active = db.scalar(
                 select(func.count(Run.id)).where(
                     Run.parent_run_id == parent.id,
-                    Run.status.in_(("queued", "running", "waiting")),
+                    Run.status.in_(("queued", "running", "waiting", "waiting_children")),
                 )
             )
             if active and not (parent.kind == "free" and RunExecutor(parent.id)._free_ready(db, parent)):
@@ -128,7 +128,6 @@ def _wake_waiting_parents(free_only: bool = False) -> list[str]:
 
 def _recover_and_collect() -> list[str]:
     """恢复僵尸执行 + 收集可入队的 queued 执行。"""
-    picked: list[str] = []
     with session_scope() as db:
         expire_overdue(db)
         db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < now() - timedelta(hours=1)))
@@ -165,28 +164,36 @@ def _recover_and_collect() -> list[str]:
                 if healed.rowcount:
                     log.info("自愈卡住的审批执行 run=%s approval=%s", r.id, ap.id)
 
-        active_user_run = aliased(Run)
-        user_running = select(func.count(active_user_run.id)).where(
-            active_user_run.user_id == Run.user_id,
-            active_user_run.status == "running",
-            active_user_run.parent_run_id.is_(None),
-            active_user_run.kind.not_in(("chime", "free")),
-        ).correlate(Run).scalar_subquery()
-        queued = db.scalars(
-            select(Run).where(
-                Run.status == "queued",
-                (Run.kind.in_(("chime", "free"))) | (Run.parent_run_id.isnot(None)) | (
-                    user_running < MAX_CONCURRENT_RUNS_PER_USER
-                ),
-            ).order_by(Run.kind != "chime", Run.created_at).limit(50)
-        ).all()
-        for r in queued:
-            if r.parent_run_id:
-                # 子执行不受「每用户并发数」限制：一次并行派任务本来就会有多个
-                # 子任务同时跑，按顶层执行的上限卡住会让批次永远起不来。
-                picked.append(r.id)
-                continue
-            picked.append(r.id)
+        return _collect_queued(db)
+
+
+def _collect_queued(db, *, free_only: bool = False, limit: int = 50) -> list[str]:
+    """先跳过暂不可执行的记录，再取一批，防止队首等待中的成员挡住整条队列。"""
+    from app.agent.free_chat import free_run_blocked
+
+    active_user_run = aliased(Run)
+    user_running = select(func.count(active_user_run.id)).where(
+        active_user_run.user_id == Run.user_id, active_user_run.status == "running",
+        active_user_run.parent_run_id.is_(None), active_user_run.kind.not_in(("chime", "free")),
+    ).correlate(Run).scalar_subquery()
+    query = select(Run).where(Run.status == "queued")
+    if free_only:
+        query = query.where(Run.kind.in_(("free", "chime")))
+    else:
+        query = query.where((Run.kind.in_(("chime", "free"))) | Run.parent_run_id.isnot(None)
+                            | (user_running < MAX_CONCURRENT_RUNS_PER_USER))
+    query = query.order_by(Run.kind != "chime", Run.created_at, Run.id)
+    picked, offset = [], 0
+    while len(picked) < limit:
+        rows = list(db.scalars(query.offset(offset).limit(50)))
+        if not rows:
+            break
+        for run in rows:
+            if not free_run_blocked(db, run):
+                picked.append(run.id)
+                if len(picked) == limit:
+                    break
+        offset += len(rows)
     return picked
 
 
@@ -247,8 +254,15 @@ def _extend_lease(run_id: str, worker_id: str, lease_token: int) -> bool:
 
 def _pending_free_runs() -> list[str]:
     with session_scope() as db:
-        return list(db.scalars(select(Run.id).where(Run.status == "queued", Run.kind.in_(("free", "chime")))
-                               .order_by(Run.created_at).limit(50)))
+        return _collect_queued(db, free_only=True)
+
+
+def _pending_task_runs() -> list[str]:
+    """新派发的并行子任务及时占用空闲槽位，不等待五秒维护扫描。"""
+    with session_scope() as db:
+        return list(db.scalars(select(Run.id).where(
+            Run.status == "queued", Run.kind == "task", Run.parent_run_id.isnot(None),
+        ).order_by(Run.created_at, Run.id).limit(50)))
 
 
 async def _heartbeat(run_id: str, worker_id: str, lease_token: int, lost: asyncio.Event) -> None:
@@ -358,6 +372,7 @@ async def main(once: bool = False) -> None:
                 for rid in await asyncio.to_thread(_wake_waiting_parents, True):
                     await asyncio.to_thread(redis_bus.enqueue, rid)
                 await schedule_pending(await asyncio.to_thread(_pending_free_runs))
+                await schedule_pending(await asyncio.to_thread(_pending_task_runs))
             if time.time() - last_reconcile > RECONCILE_INTERVAL:
                 last_reconcile = time.time()
                 # 兼容旧版本遗留的 queued 手动命令；新命令由 API 直接执行。

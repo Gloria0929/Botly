@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Download, Github, Link2, Loader2, Plus, Save, Sparkles, Trash2, Upload, Search, Blocks, CircleCheck, AlertTriangle } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Modal from "@/components/ui/Modal";
@@ -38,6 +38,7 @@ export default function SkillsPage() {
   const [editing, setEditing] = useState<Partial<Skill> | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const skillNameInput = useRef<HTMLInputElement>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importUrl, setImportUrl] = useState("");
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -45,6 +46,9 @@ export default function SkillsPage() {
   const [githubRepo, setGithubRepo] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const clawhubInput = useRef<HTMLInputElement>(null);
+  const githubInput = useRef<HTMLInputElement>(null);
+  const urlInput = useRef<HTMLInputElement>(null);
   const confirm = useConfirm();
 
   const load = () => {
@@ -86,7 +90,11 @@ export default function SkillsPage() {
   };
 
   const save = async () => {
-    if (!editing?.name?.trim()) return toast("请填写技能名称", "error");
+    if (!editing?.name?.trim()) {
+      setSaveError("请填写技能名称后再保存。");
+      skillNameInput.current?.focus();
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -120,7 +128,11 @@ export default function SkillsPage() {
   };
 
   const importFromGithub = async () => {
-    if (!githubRepo.trim()) return toast("请填写 GitHub 仓库（owner/repo）", "error");
+    if (!githubRepo.trim()) {
+      setImportError("请填写 GitHub 仓库地址（owner/repo）后再导入。");
+      githubInput.current?.focus();
+      return;
+    }
     setImportBusy(true);
     setImportError(null);
     try {
@@ -134,7 +146,11 @@ export default function SkillsPage() {
   };
 
   const importFromUrl = async () => {
-    if (!importUrl.trim()) return toast("请填写技能包地址", "error");
+    if (!importUrl.trim()) {
+      setImportError("请填写技能包 URL 后再导入。");
+      urlInput.current?.focus();
+      return;
+    }
     setImportBusy(true);
     setImportError(null);
     try {
@@ -148,7 +164,11 @@ export default function SkillsPage() {
   };
 
   const importFromClawhub = async () => {
-    if (!clawhubSlug.trim()) return toast("请填写技能名称（slug）", "error");
+    if (!clawhubSlug.trim()) {
+      setImportError("请填写 ClawHub 技能名称（slug）后再下载。");
+      clawhubInput.current?.focus();
+      return;
+    }
     setImportBusy(true);
     setImportError(null);
     try {
@@ -237,7 +257,7 @@ export default function SkillsPage() {
                 >
                   <Download size={14} /> 导入技能
                 </button>
-                <button className="btn-primary" onClick={() => setEditing({ ...EMPTY })}>
+                <button className="btn-primary" onClick={() => { setSaveError(null); setEditing({ ...EMPTY }); }}>
                   <Plus size={14} /> 新建技能
                 </button>
               </>
@@ -370,9 +390,10 @@ export default function SkillsPage() {
             </div>
             <div className="flex gap-2">
               <input
+                ref={clawhubInput}
                 className="field min-w-0 flex-1 font-mono text-[12px]"
                 value={clawhubSlug}
-                onChange={(e) => setClawhubSlug(e.target.value)}
+                onChange={(e) => { setClawhubSlug(e.target.value); setImportError(null); }}
                 placeholder="owner/slug 或技能名，如 fangkelvin/find-skills-skill"
                 onKeyDown={(e) => e.key === "Enter" && importFromClawhub()}
               />
@@ -396,9 +417,10 @@ export default function SkillsPage() {
             </div>
             <div className="flex gap-2">
               <input
+                ref={githubInput}
                 className="field min-w-0 flex-1 font-mono text-[12px]"
                 value={githubRepo}
-                onChange={(e) => setGithubRepo(e.target.value)}
+                onChange={(e) => { setGithubRepo(e.target.value); setImportError(null); }}
                 placeholder="owner/repo，如 zhaoxinghua09-cell/coding-agent"
                 onKeyDown={(e) => e.key === "Enter" && importFromGithub()}
               />
@@ -422,9 +444,10 @@ export default function SkillsPage() {
             </div>
             <div className="flex gap-2">
               <input
+                ref={urlInput}
                 className="field min-w-0 flex-1 font-mono text-[12px]"
                 value={importUrl}
-                onChange={(e) => setImportUrl(e.target.value)}
+                onChange={(e) => { setImportUrl(e.target.value); setImportError(null); }}
                 placeholder="https://github.com/owner/repo 或 https://.../SKILL.md"
               />
               <button className="btn-primary shrink-0" onClick={importFromUrl} disabled={importBusy}>
@@ -499,11 +522,17 @@ export default function SkillsPage() {
             )}
             <div className="grid grid-cols-[1fr_1fr] gap-3">
               <div>
-                <label className="label">名称（同一账号下唯一）</label>
+                <label htmlFor="skill-name" className="label">名称（同一账号下唯一）</label>
                 <input
+                  id="skill-name"
+                  ref={skillNameInput}
                   className="field"
+                  aria-invalid={!!saveError && !editing.name?.trim()}
                   value={editing.name || ""}
-                  onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                  onChange={(e) => {
+                    setEditing({ ...editing, name: e.target.value });
+                    if (saveError && !editing.name?.trim()) setSaveError(null);
+                  }}
                   placeholder="例如：调研规范"
                 />
               </div>

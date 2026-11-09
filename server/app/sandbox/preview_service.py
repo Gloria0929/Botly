@@ -83,7 +83,7 @@ async def invoke(user_id: str, chat_id: str, config: dict, action: str, **kwargs
     if connection:
         # 生命周期操作与文件同步共用群聊锁，请求本身并发转发。
         if action in {"start", "stop"}:
-            async with cube.chat_lock(user_id, chat_id):
+            async with cube.chat_lock(user_id, chat_id + ":commands"), cube.chat_lock(user_id, chat_id):
                 raw = await asyncio.to_thread(_cube_call, connection, user_id, chat_id, request_path, payload, action == "start")
         else:
             raw = await asyncio.to_thread(_cube_call, connection, user_id, chat_id, request_path, payload, False)

@@ -209,6 +209,7 @@ def _default_workspace(db: Session, user: User) -> Chat:
             avatar=spec["avatar"],
             role=spec["role"],
             system_prompt=spec["system_prompt"],
+            persona=spec.get("persona", ""),
             tools=spec["tools"],
             is_supervisor_template=spec.get("is_supervisor_template", False),
         )
@@ -496,7 +497,10 @@ async def oauth_callback(
     bind_user_id = checked["bind"]
     if bind_user_id:
         session = read_session(request.cookies.get(SESSION_COOKIE))
-        if not session or session[0] != bind_user_id:
+        binding_user = db.get(User, bind_user_id, populate_existing=True)
+        if (not session or session[0] != bind_user_id or not binding_user
+                or binding_user.status != "active" or binding_user.deleted_at is not None
+                or session[1] != (binding_user.session_epoch or 0)):
             return _oauth_fail("登录状态已变化，请重新登录后再绑定", "/settings")
         holder = db.scalar(
             select(OAuthAccount).where(

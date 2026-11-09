@@ -385,3 +385,84 @@ def test_parallel_start_does_not_consume_explicit_sibling_revision(client, invit
     with SessionLocal() as db:
         assert not db.scalar(select(Message.id).where(Message.run_id == ctx["run_id"],
             Message.type == "tool_result", Message.meta["tool_call_id"].as_string() == "revision"))
+
+
+def test_unplanned_multiple_delegates_replan_then_really_overlap(client, invite, monkeypatch):
+    from app.worker import process_one
+
+    register(client, invite, "parallel-no-plan-recovery@test.dev")
+    chat_id, _ = setup_workspace(client)
+    turns = 0
+    workers = []
+    together = None
+
+    def call(name, arguments, call_id):
+        return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    async def stream(**kw):
+        nonlocal turns
+        if kw["ctx"]["role"] == "worker":
+            workers.append(kw["ctx"]["bot_name"])
+            if len(workers) == 2:
+                together.set()
+            await asyncio.wait_for(together.wait(), 3)
+            yield {"type": "done", "content": kw["ctx"]["bot_name"] + "的独立结果", "tool_calls": []}
+            return
+        turns += 1
+        if turns == 1:
+            calls = [call("delegate", {"bot": bot, "instruction": title, "step": title}, f"missing-plan-{i}")
+                     for i, (bot, title) in enumerate((("研究员", "调查价格"), ("架构师", "评估现有方案")))]
+        elif turns == 2:
+            assert "先调用 propose_plan" in json.dumps(kw["messages"], ensure_ascii=False)
+            with SessionLocal() as db:
+                assert not db.scalar(select(Task.id).where(Task.run_id == run_id))
+            calls = [call("propose_plan", {"steps": [step("调查价格"), {
+                **step("评估现有方案", bot="架构师"), "instruction": "仅评估现有方案，不重复调查价格，保留已有文件。",
+            }]}, "recovered-plan")]
+        elif turns == 3:
+            calls = [call("delegate", {"bot": "研究员", "instruction": "调查价格", "step": "调查价格"}, "dispatch-price")]
+        else:
+            blob = json.dumps(kw["messages"], ensure_ascii=False)
+            assert "研究员的独立结果" in blob and "架构师的独立结果" in blob
+            yield {"type": "done", "content": "两项结果已汇总。", "tool_calls": []}
+            return
+        yield {"type": "done", "content": "", "tool_calls": calls}
+
+    monkeypatch.setattr(orchestrator, "stream_chat", stream)
+    run_id = client.post(f"/api/chats/{chat_id}/messages", json={"content": "调查价格，同时独立评估我们现有的方案。"}).json()["run"]["id"]
+    run_worker(run_id)
+    assert client.get(f"/api/runs/{run_id}").json()["resume"]["kind"] == "plan"
+    assert client.post(f"/api/runs/{run_id}/plan/approve", json={}).status_code == 200
+    run_worker(run_id)
+    with SessionLocal() as db:
+        children = list(db.scalars(select(Run.id).where(Run.parent_run_id == run_id)))
+        tasks = list(db.scalars(select(Task).where(Task.run_id == run_id)))
+        assert len(children) == len(tasks) == 2
+        assert all(task.batch == 1 for task in tasks)
+        assert next(task for task in tasks if task.step_key == "评估现有方案").instruction.startswith("仅评估现有方案")
+
+    async def execute():
+        nonlocal together
+        together = asyncio.Event()
+        await asyncio.gather(*(process_one(child) for child in children))
+
+    asyncio.run(execute())
+    assert len(workers) == 2
+    run_worker(run_id)
+    assert client.get(f"/api/runs/{run_id}").json()["status"] == "completed"
+
+
+def test_legacy_inflight_delegate_resumes_before_replanning_pending_work(client, invite):
+    ctx = _new_run(client, invite, "parallel-inflight-recovery@test.dev")
+    first = dispatch(ctx, "第一项", call_id="inflight-first")
+    dispatch(ctx, "第二项", call_id="inflight-second", execute=False)
+    call = {"id": "inflight-first", "type": "function", "function": {"name": "delegate", "arguments": json.dumps({
+        "bot": "研究员", "instruction": "第一项", "step": "第一项",
+    }, ensure_ascii=False)}}
+    resumed = asyncio.run(RunExecutor(ctx["run_id"]).start_delegate(
+        thread_id=ctx["main_id"], bot_id=ctx["supervisor_id"], task_id=None, call=call))
+    assert resumed["task_id"] == first["task_id"]
+    with SessionLocal() as db:
+        assert len(list(db.scalars(select(Task).where(Task.run_id == ctx["run_id"])))) == 1
+        assert not db.scalar(select(Message.id).where(Message.run_id == ctx["run_id"], Message.type == "tool_result"))
+    client.post(f"/api/runs/{ctx['run_id']}/stop")

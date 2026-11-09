@@ -56,6 +56,9 @@ from app.agent.run_finish import RunFinishMixin
 from app.agent.streaming import StreamingMixin
 from app.agent.summary_memory import SummaryMemoryMixin
 
+FREE_CHAT_FIRST_RESPONSE_TIMEOUT = 20.0
+FREE_CHAT_REPLY_TIMEOUT = 30.0
+
 
 class RunExecutor(
     DelegationMixin, TaskCompletionMixin, ToolExecutionMixin, ContextBuilderMixin,
@@ -116,7 +119,7 @@ class RunExecutor(
             if not run or run.status in ("completed", "failed", "stopped") or not self._owns_lease(run):
                 return
             run.status = "waiting_children"
-            if run.kind == "free" and self._free_ready(db, run):
+            if self._free_ready(db, run):
                 run.status = "queued"
                 ready = True
             run.resume_payload = None
@@ -458,7 +461,7 @@ class RunExecutor(
         draft = await asyncio.to_thread(self._open_stream_message, thread_id, bot_id,
                                       meta={"free_turn": peer["turn"], "parent_run_id": peer.get("root_run_id"),
                                             "trigger_message_id": prepared["trigger_message_id"],
-                                            "reply_to": peer.get("handoff_message_id") or prepared["trigger_message_id"],
+                                            "reply_to": peer.get("handoff_message_id") or peer.get("reply_to_message_id") or prepared["trigger_message_id"],
                                             "free_observer": prepared["observer"]} if peer else None)
         mirror = None
         if mirror_thread_id:
@@ -499,8 +502,12 @@ class RunExecutor(
         watched = self._watch_model_stream(stream_chat(
             kind=kind, base_url=base_url, api_key=api_key, model=model, messages=messages,
             tools=toolmod.schema_list(tool_list), temperature=temperature, ctx=ctx,
-            **({"max_output_tokens": 256, "max_retries": 0} if prepared["observer"] else {}),
-        ), on_idle=flush_text)
+            **({"max_output_tokens": 256, "max_retries": 0} if prepared["observer"] else
+               {"max_retries": 0} if peer and peer.get("primary") else {}),
+        ), on_idle=flush_text,
+            first_response_timeout=FREE_CHAT_FIRST_RESPONSE_TIMEOUT if peer and (
+                prepared["observer"] or peer.get("primary")) else None,
+            total_timeout=FREE_CHAT_REPLY_TIMEOUT if prepared["observer"] else None)
         try:
             async for chunk in watched:
                 if chunk["type"] == "delta":
@@ -586,8 +593,8 @@ class RunExecutor(
             if prepared["observer"] and await asyncio.to_thread(self._duplicate_free_reply, content):
                 await asyncio.to_thread(self._mark_peer_pass, draft["id"])
                 return False, ""
-            if peer and publication_allowed is None:
-                publication_allowed = await asyncio.to_thread(self._claim_free_speaker)
+            if peer:
+                publication_allowed = await asyncio.to_thread(self._claim_free_speaker, content)
             if peer and not publication_allowed:
                 await asyncio.to_thread(self._mark_peer_pass, draft["id"])
                 return False, ""
@@ -656,15 +663,21 @@ class RunExecutor(
                     run.last_turn_message_id = msg.id
                     run.steps_used += 1
 
-    async def _watch_model_stream(self, stream, on_idle=None):
+    async def _watch_model_stream(self, stream, on_idle=None, *, first_response_timeout=None, total_timeout=None):
         """无 token 返回、限流等待期间也响应停止和状态时长限制。"""
         pending = None
         last_limits = 0.0
+        started = time.monotonic()
+        received_text = False
         try:
             while True:
                 pending = asyncio.create_task(anext(stream))
                 while not pending.done():
                     await asyncio.wait({pending}, timeout=0.25)
+                    elapsed = time.monotonic() - started
+                    if ((first_response_timeout is not None and not received_text and elapsed >= first_response_timeout)
+                            or (total_timeout is not None and elapsed >= total_timeout)):
+                        raise LLMError("自由聊天回应等待超时，已让其他成员继续接话", retryable=False)
                     if on_idle:
                         await on_idle()
                     await self._check_stop_throttled()
@@ -675,6 +688,8 @@ class RunExecutor(
                     chunk = pending.result()
                 except StopAsyncIteration:
                     return
+                if chunk.get("type") == "delta" and chunk.get("text", "").strip():
+                    received_text = True
                 yield chunk
         finally:
             if pending:

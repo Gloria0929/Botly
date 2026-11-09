@@ -13,7 +13,7 @@ from app.core.models import Bot, Chat, Memory, MemoryCandidate, Run
 from app.agent.orchestrator import RunExecutor, ToolCtx
 from app.agent.summary_memory import _memory_scope_for
 from app.tools.registry import MEMORY_TOOL, _memory_save, tools_for_bot
-from tests.conftest import register, setup_workspace
+from tests.conftest import register, seed_user_messages, setup_workspace
 
 
 def _ctx_for(run_id: str) -> ToolCtx:
@@ -36,11 +36,18 @@ def _bot_rows(user_id: str, bot_id: str) -> list[Memory]:
 def test_memory_save_writes_private_memory(client, invite):
     register(client, invite, "membot@test.dev")
     chat_id, _bots = setup_workspace(client)
-    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": "记住我用 pytest"})
+    trigger = "记住我偏好简洁的中文表达，不要使用感叹号。"
+    long_content = "长期测试内容：" + "长" * 500
+    seed_user_messages(chat_id, [trigger, trigger, long_content, long_content, long_content])
+    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": trigger})
     run_id = r.json()["run"]["id"]
 
     ctx = _ctx_for(run_id)
+    # 只有声明“记住”且内容与用户本轮表达相符，才豁免三消息门槛。
     content = "用户偏好简洁的中文表达，不要使用感叹号。"
+    unrelated = asyncio.run(_memory_save(ctx, "这个 Postgres 服务运行在哪个位置？"))
+    assert "3 条不同消息" in unrelated
+    assert not _bot_rows(ctx.user_id, ctx.bot.id)
     out = asyncio.run(_memory_save(ctx, content=content))
     ctx.db.commit()
     assert out.startswith("已保存到你的私有记忆")
@@ -59,8 +66,8 @@ def test_memory_save_writes_private_memory(client, invite):
     # 内容太短直接拒绝
     assert "太短" in asyncio.run(_memory_save(ctx, content="太短了"))
 
-    # 超长截断到 500
-    long_out = asyncio.run(_memory_save(ctx, content="长" * 600))
+    # 长内容只有用户在三条不同消息中反复表达后，才能保存并截断到 500。
+    long_out = asyncio.run(_memory_save(ctx, content=long_content))
     ctx.db.commit()
     assert "已保存" in long_out
     saved = (
@@ -76,6 +83,13 @@ def test_memory_save_writes_private_memory(client, invite):
 def test_memory_save_run_limit(client, invite):
     register(client, invite, "membot-limit@test.dev")
     chat_id, _bots = setup_workspace(client)
+    repeated = [
+        "用户偏好交付前状态全部回归测试。",
+        "项目部署使用 Postgres 数据库。",
+        "每周五需要发送项目进度报告。",
+        "用户约定第四条：文档放 docs 目录。",
+    ]
+    seed_user_messages(chat_id, [content for content in repeated for _ in range(3)])
     r = client.post(f"/api/chats/{chat_id}/messages", json={"content": "开始干活"})
     run_id = r.json()["run"]["id"]
 
@@ -84,7 +98,7 @@ def test_memory_save_run_limit(client, invite):
         for content in ("用户偏好交付前状态全部回归测试。", "项目部署使用 Postgres 数据库。", "每周五需要发送项目进度报告。"):
             out = asyncio.run(_memory_save(ctx, content=content))
             assert out.startswith("已保存")
-        out4 = asyncio.run(_memory_save(ctx, content="用户约定第 4 条：文档放 docs 目录。"))
+        out4 = asyncio.run(_memory_save(ctx, content=repeated[3]))
         ctx.db.commit()
         assert "最多自动保存 3 条" in out4
     finally:
@@ -131,15 +145,21 @@ def test_direct_run_candidates_use_bot_scope(client, invite, monkeypatch):
     register(client, invite, "membot-cand@test.dev")
     chat_id, bots = setup_workspace(client)
     member = bots[-1]["id"]
+    sources = ["以后这类任务都输出 Markdown 表格"] * 3
+    source_ids = seed_user_messages(chat_id, sources[:2])
     r = client.post(
         f"/api/chats/{chat_id}/messages",
-        json={"content": "以后这类任务都输出 Markdown 表格", "mention_bot_id": member},
+        json={"content": sources[2], "mention_bot_id": member},
     )
     assert r.status_code == 201, r.text
     run_id = r.json()["run"]["id"]
+    source_ids.append(r.json()["message"]["id"])
 
     async def fake_complete(self, **kwargs):
-        return '[{"title":"输出格式","content":"这类任务用户要求输出 Markdown 表格"}]'
+        import json
+        evidence = [{"message_id": source_id, "quote": sources[0]} for source_id in source_ids]
+        return json.dumps([{"title": "输出格式", "content": "这类任务用户要求输出 Markdown 表格",
+                            "evidence": evidence}])
 
     monkeypatch.setattr(RunExecutor, "_complete_text", fake_complete)
     with SessionLocal() as db:
@@ -162,11 +182,21 @@ def test_supervisor_run_candidates_stay_shared(client, invite, monkeypatch):
     """总指挥执行的候选仍是共享记忆（原有 MEM-04 行为不回退）。"""
     register(client, invite, "membot-sup@test.dev")
     chat_id, _bots = setup_workspace(client)
-    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": "以后回答尽量简洁"})
+    sources = ["以后回答尽量简洁", "回复时尽量使用简短表达", "请继续简明扼要地回答"]
+    source_ids = seed_user_messages(chat_id, sources[:2])
+    r = client.post(f"/api/chats/{chat_id}/messages", json={"content": sources[2]})
     run_id = r.json()["run"]["id"]
+    source_ids.append(r.json()["message"]["id"])
 
     async def fake_complete(self, **kwargs):
-        return '[{"title":"表达偏好","content":"用户偏好简洁的中文表达"}]'
+        import json
+        evidence = [
+            {"message_id": source_ids[0], "quote": sources[0]},
+            {"message_id": source_ids[1], "quote": sources[1]},
+            {"message_id": source_ids[2], "quote": sources[2]},
+        ]
+        return json.dumps([{"title": "表达偏好", "content": "用户偏好简洁的中文表达",
+                            "evidence": evidence}])
 
     monkeypatch.setattr(RunExecutor, "_complete_text", fake_complete)
     with SessionLocal() as db:

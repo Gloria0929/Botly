@@ -100,6 +100,7 @@ export default function ChatSettings({
     if (budget) {
       const value = Number(budget);
       if (!Number.isInteger(value) || (value !== 0 && value < 1000)) {
+        setError("token 预算应为 0（无限制）或至少 1000。");
         return toast("token 预算应为 0（无限制）或至少 1000", "error");
       }
       next.token_budget = value;
@@ -108,6 +109,7 @@ export default function ChatSettings({
     if (depth) {
       const value = Number(depth);
       if (!Number.isInteger(value) || value < 1 || value > 5) {
+        setError("委派深度应为 1–5 层。");
         return toast("委派深度应为 1–5 层", "error");
       }
       next.delegation_depth = value;
@@ -154,7 +156,7 @@ export default function ChatSettings({
         <div>
           <label className="label">群聊模式</label>
           <div className="grid grid-cols-2 gap-2">
-            {([['task', '任务模式', '总指挥拆解、成员执行'], ['free', '自由群聊', '成员自己判断、互相接话']] as const).map(([value, label, desc]) => (
+            {([['task', '任务模式', '总指挥拆解、成员执行'], ['free', '自由群聊', '聊观点、提问题、自然接话']] as const).map(([value, label, desc]) => (
               <button key={value} disabled={!!busy} onClick={() => patch({ mode: value }, "chatMode", "已更新群聊模式")}
                 className={`rounded-lg border px-3 py-2 text-left ${value === (chat.mode || 'task') ? 'border-accent/50 bg-accent/[0.08]' : 'border-line'}`}>
                 <span className="block text-[12.5px] font-medium">{label}</span>
@@ -181,7 +183,7 @@ export default function ChatSettings({
               onChange={(e) => patch({ muted: e.target.checked }, "muted", e.target.checked ? "已静音，@ 仍可唤醒成员" : "已恢复主动发言")}
               className="accent-[var(--accent)]" />静音：成员不主动发言，@ 和定向回复仍生效
           </label>
-          <p className="text-[10.5px] leading-relaxed text-faint">人数只是上限，不按名额预先挑一组成员，也不要求每条消息凑满。@全员 通知全体成员，每人最多一次；轮次限制成员间的接话。</p>
+          <p className="text-[10.5px] leading-relaxed text-faint">成员会顺着彼此的发言讨论，也可以追问或提出不同意见；近期较少参与的成员也有接话机会。人数和轮次只是上限，不要求逐个发言。@全员 时每人最多回应一次。</p>
         </div>}
         {error && (
           <div className="break-words rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">

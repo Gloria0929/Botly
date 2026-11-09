@@ -328,51 +328,71 @@ function ChatContent() {
   /** CHT-07：从某条消息拉出分支线程 */
   const branchFrom = async (msg: Message) => {
     if (!chatId || branchRef.current) return;
+    const version = ++navigationVersion.current;
+    focusRef.current = null;
     try {
       const b = await api.createBranch(chatId, msg.id);
+      if (chatIdRef.current !== chatId || version !== navigationVersion.current) return;
       branchRef.current = b;
       setBranch(b);
       const d = await api.messages(chatId, { limit: 80, thread_id: b.id });
+      if (chatIdRef.current !== chatId || version !== navigationVersion.current) return;
       setMessages(d.messages);
       setHasEarlier(false);
       setFocusMessage(null);
       toast(`已拉出分支「${b.title}」`, "ok");
     } catch (e: any) {
-      toastError(e);
+      if (chatIdRef.current === chatId && version === navigationVersion.current) toastError(e);
     }
   };
 
   /** 从分支返回主线程 */
   const backToMain = async () => {
     if (!chatId) return;
+    const version = ++navigationVersion.current;
+    focusRef.current = null;
     branchRef.current = null;
     setBranch(null);
-    const d = await api.messages(chatId, { limit: 80 });
-    setMessages(d.messages);
-    setHasEarlier(false);
-    setFocusMessage(null);
+    try {
+      const d = await api.messages(chatId, { limit: 80 });
+      if (chatIdRef.current !== chatId || version !== navigationVersion.current) return;
+      setMessages(d.messages);
+      setHasEarlier(false);
+      setFocusMessage(null);
+    } catch (e: any) {
+      if (chatIdRef.current === chatId && version === navigationVersion.current) toastError(e);
+    }
   };
 
   const openBranches = async () => {
     if (!chatId) return;
+    const version = navigationVersion.current;
     try {
       const list = await api.branches(chatId);
+      if (chatIdRef.current !== chatId || version !== navigationVersion.current) return;
       setBranches(list);
       setBranchesOpen(true);
     } catch (e: any) {
-      toastError(e);
+      if (chatIdRef.current === chatId && version === navigationVersion.current) toastError(e);
     }
   };
 
   const enterBranch = async (b: Branch) => {
     if (!chatId) return;
+    const version = ++navigationVersion.current;
+    focusRef.current = null;
     branchRef.current = b;
     setBranch(b);
     setBranchesOpen(false);
-    const d = await api.messages(chatId, { limit: 80, thread_id: b.id });
-    setMessages(d.messages);
-    setHasEarlier(false);
-    setFocusMessage(null);
+    try {
+      const d = await api.messages(chatId, { limit: 80, thread_id: b.id });
+      if (chatIdRef.current !== chatId || version !== navigationVersion.current) return;
+      setMessages(d.messages);
+      setHasEarlier(false);
+      setFocusMessage(null);
+    } catch (e: any) {
+      if (chatIdRef.current === chatId && version === navigationVersion.current) toastError(e);
+    }
   };
 
   /** 删除分支（消息与执行一起删，主线程不受影响） */
@@ -387,18 +407,14 @@ function ChatContent() {
     if (!ok) return;
     try {
       await api.deleteBranch(chatId, b.id);
+      if (chatIdRef.current !== chatId) return;
       setBranches((list) => list.filter((x) => x.id !== b.id));
       if (branchRef.current?.id === b.id) {
-        branchRef.current = null;
-        setBranch(null);
-        const d = await api.messages(chatId, { limit: 80 });
-        setMessages(d.messages);
-        setHasEarlier(false);
-        setFocusMessage(null);
+        await backToMain();
       }
       toast("分支已删除", "ok");
     } catch (e: any) {
-      toastError(e);
+      if (chatIdRef.current === chatId) toastError(e);
     }
   };
 

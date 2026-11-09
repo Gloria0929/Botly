@@ -290,7 +290,7 @@ def _mock_decide(messages: list[dict], tools: list[dict], ctx: dict) -> tuple[st
 
     # 子 Bot
     if role == "worker":
-        writer = any(label in (ctx.get("bot_name") or "") for label in ("写", "架构师"))
+        writer = any(label in (ctx.get("bot_name") or "") for label in ("写", "稿", "架构师"))
         if writer:
             # 架构师：先读资料，再直接成稿，不重复写 research.md
             if "file_read" in names and _called(messages, "file_read") == 0:
@@ -363,13 +363,15 @@ async def _stream_mock(
     if role == "peer":
         text = "[PASS]" if ctx.get("observer") else f"我是{ctx.get('bot_name', '成员')}，我在。大家把这次想讨论的事情说说，我从自己的职责出发补充。"
     elif role == "supervisor":
+        members = ctx.get("members") or ["研究员", "架构师"]
+        author = next((name for name in members if any(label in name for label in ("写", "稿", "架构师"))), members[-1])
         text = (
             "已完成本轮拆解与汇总。\n\n"
-            "研究员产出了资料要点（research.md），架构师据此完成了成稿（report.md）。"
+            f"{members[0]}产出了资料要点（research.md），{author}据此完成了成稿（report.md）。"
             "两份文件都在右侧文件面板，可直接预览或下载。\n\n"
             "结论：该方向已进入工程化竞争阶段，建议先验证接入成本，再评估长期总拥有成本。"
         )
-    elif any(label in (ctx.get("bot_name") or "") for label in ("写", "架构师")):
+    elif any(label in (ctx.get("bot_name") or "") for label in ("写", "稿", "架构师")):
         text = (
             "稿件已完成并写入 report.md。整体按「总体判断—关键发现—建议」三段组织，"
             "篇幅控制在 800 字左右，可直接交付。"

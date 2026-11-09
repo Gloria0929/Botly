@@ -63,6 +63,7 @@ function frame({ backend = async () => ready, configured = true } = {}) {
     return { text: strings.join(" "), iframe: nodes.find(n => n.type === "iframe"),
       alert: nodes.find(n => n.props?.role === "alert"),
       stop: nodes.find(n => n.props?.["aria-label"] === "停止预览后端")?.props,
+      fullscreen: nodes.find(n => n.props?.["aria-label"] === "全屏预览")?.props,
       refresh: nodes.find(n => n.props?.["aria-label"] === "刷新预览")?.props };
   }
   const flush = () => new Promise(setImmediate);
@@ -84,15 +85,17 @@ test("running=true、ready=false、空日志继续轮询，延迟就绪后自动
   await f.flush();
   assert.equal(f.render().alert, undefined);
   assert.equal(f.render().iframe, undefined);
-  assert.match(f.render().text, /后端启动中/);
+  assert.match(f.render().text, /正在准备预览/);
   assert.match(f.render().text, /暂未输出日志/);
   assert.ok(f.render().stop);
   await f.advance();
-  assert.match(f.render().text, /25 秒/);
   assert.match(f.render().text, /installing dependencies/);
   await f.advance();
   assert.equal(f.render().iframe.props.src, "/preview/first");
   assert.equal(f.render().alert, undefined);
+  assert.doesNotMatch(f.render().text, /output\/dist\/index\.html|后端已就绪|3000/);
+  assert.ok(f.render().refresh);
+  assert.ok(f.render().fullscreen);
   assert.deepEqual(f.calls.map(c => c.action), ["start", "status", "status"]);
   assert.equal(f.timers.size, 0);
 });

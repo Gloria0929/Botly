@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.deps import current_user
 from app.core.models import PushSubscription, User, now
-from app.services.push import keys, push_notification
+from app.services.push import keys, validate_endpoint
 
 router = APIRouter(prefix="/push", tags=["push"])
 
@@ -58,8 +58,10 @@ def subscribe(
     auth = (payload.keys or {}).get("auth", "").strip()
     if not p256dh or not auth:
         raise HTTPException(422, "缺少 p256dh / auth 密钥")
-    if not (payload.endpoint.startswith("https://") or payload.endpoint.startswith("http://localhost")):
-        raise HTTPException(422, "推送端点必须是 https")
+    try:
+        validate_endpoint(payload.endpoint)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
     row = db.scalar(
         select(PushSubscription).where(PushSubscription.endpoint == payload.endpoint)
     )

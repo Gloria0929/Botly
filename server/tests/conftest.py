@@ -24,7 +24,31 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.core.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
-from app.core.models import InviteCode  # noqa: E402
+from app.core.models import InviteCode, Thread  # noqa: E402
+
+
+def seed_user_messages(chat_id: str, contents: list[str]) -> list[str]:
+    """候选/自动记忆回归：写入已完成的独立用户消息，不启动后台模型执行。"""
+    from sqlalchemy import select
+    from app.agent.messages import add_message
+    from app.core.models import Message
+
+    with SessionLocal() as db:
+        thread = db.scalar(select(Thread).where(Thread.chat_id == chat_id, Thread.type == "main"))
+        assert thread is not None
+        ids = [add_message(db, thread=thread, run_id=None, sender_type="user", type_="text",
+                           content=content).id for content in contents]
+        db.commit()
+        return ids
+
+
+@pytest.fixture(autouse=True)
+def _stable_bot_catalog(monkeypatch):
+    """历史回归使用固定角色名；产品模板的命名和文案可独立调整。"""
+    from app.services.templates import BY_ID
+
+    monkeypatch.setitem(BY_ID["writer"], "name", "架构师")
+    monkeypatch.setitem(BY_ID["writer"], "role", "架构师")
 
 
 @pytest.fixture(autouse=True)

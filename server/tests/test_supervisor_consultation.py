@@ -102,7 +102,7 @@ def test_worker_consults_then_chooses_own_method_and_continues(client, invite, m
     artifact_path = client.get(f"/api/chats/{chat_id}/files").json()[0]["path"]
     with SessionLocal() as db:
         task = db.scalar(select(Task).where(Task.run_id == run_id, Task.assigned_bot_id == worker["id"]))
-        assert artifact_path == (f"tasks/{task.id}/brief.md" if parallel else "brief.md")
+        assert artifact_path == (f"output/tasks/{task.id}/brief.md" if parallel else "output/brief.md")
         logs = db.scalars(select(UsageLog).where(UsageLog.run_id == run_id, UsageLog.bot_id == supervisor["id"], UsageLog.output_tokens == 3)).all()
         assert len(logs) == 1 and logs[0].task_id is None, "澄清用量计入主 Agent"
         tool_msg = db.scalar(select(Message).where(Message.thread_id == task.thread_id, Message.type == "tool_call",

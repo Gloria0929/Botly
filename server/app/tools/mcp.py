@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.config import ADMIN_EMAILS, MCP_ALLOW_LOCAL, MCP_MAX_RESULT_CHARS, MCP_MAX_TOOLS, MCP_TIMEOUT, MCP_STDIO_ENABLED, MCP_STDIO_ALLOWED_COMMANDS
 from app.core.db import SessionLocal
 from app.core.models import McpServer, User
-from app.tools.registry import Tool, ToolError, UNTRUSTED_PREFIX, _check_url
+from app.tools.registry import Tool, ToolError, UNTRUSTED_PREFIX, _check_url, _pin_url
 
 PROTOCOL_VERSION = "2024-11-05"
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -63,14 +63,19 @@ def exposed_name(slug: str, remote: str) -> str:
 # --------------------------------------------------------------------------- #
 # HTTP / JSON-RPC
 # --------------------------------------------------------------------------- #
-def _guard_url(url: str) -> None:
+def _guard_url(url: str) -> str:
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.hostname:
         raise McpError("MCP 地址必须是完整的 http/https URL")
-    if MCP_ALLOW_LOCAL and (p.hostname or "").lower() in _LOCAL_HOSTS:
-        return
     try:
-        _check_url(url)
+        if p.username or p.password or p.port == 0 or p.fragment:
+            raise ValueError()
+    except ValueError:
+        raise McpError("MCP 地址不能包含账号密码、无效端口或片段") from None
+    if MCP_ALLOW_LOCAL and (p.hostname or "").lower() in _LOCAL_HOSTS:
+        return "::1" if p.hostname == "::1" else "127.0.0.1"
+    try:
+        return _check_url(url)
     except ToolError as exc:
         raise McpError(str(exc)) from exc
 
@@ -107,24 +112,29 @@ def _parse_body(text: str, content_type: str) -> dict:
 async def _post(
         url: str, payload: dict, token: str | None, session_id: str | None = None
 ) -> tuple[dict, str | None]:
-    await asyncio.to_thread(_guard_url, url)
+    address = await asyncio.to_thread(_guard_url, url)
+    parsed = urlparse(url)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": PROTOCOL_VERSION,
         "User-Agent": "Botly/1.0 MCP-Client",
+        "Host": httpx.URL(url).netloc.decode("ascii"),
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if session_id:
         headers["Mcp-Session-Id"] = session_id
     try:
-        async with httpx.AsyncClient(timeout=MCP_TIMEOUT, follow_redirects=False) as client:
-            r = await client.post(url, headers=headers, json=payload)
+        extensions = {"sni_hostname": parsed.hostname.encode("idna").decode("ascii")} if parsed.scheme == "https" else {}
+        async with httpx.AsyncClient(timeout=MCP_TIMEOUT, follow_redirects=False, trust_env=False) as client:
+            r = await client.post(_pin_url(url, address), headers=headers, json=payload, extensions=extensions)
     except httpx.HTTPError as exc:
         raise McpError(f"连接 MCP 服务失败：{type(exc).__name__}: {exc}") from exc
     if r.status_code in (401, 403):
         raise McpError(f"MCP 服务拒绝了访问（HTTP {r.status_code}），请检查访问令牌")
+    if 300 <= r.status_code < 400:
+        raise McpError("MCP 地址返回了重定向，请直接填写最终服务地址")
     if r.status_code >= 400:
         raise McpError(f"MCP 服务返回 HTTP {r.status_code}：{r.text[:200]}")
     body = _parse_body(r.text, r.headers.get("content-type") or "")

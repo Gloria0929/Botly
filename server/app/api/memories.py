@@ -55,6 +55,8 @@ def _candidate_out(c: MemoryCandidate) -> dict:
         "title": c.title,
         "content": c.content,
         "category": getattr(c, "category", "") or "",
+        "evidence_count": len(c.evidence or []),
+        "evidence": [item.get("quote", "") for item in c.evidence or [] if item.get("quote")],
         "status": c.status,
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
@@ -67,6 +69,8 @@ def list_candidates(
     db: Session = Depends(get_db),
 ):
     """MEM-04：执行结束后生成的记忆候选，默认只看待确认的。"""
+    if status not in ("pending", "accepted", "rejected"):
+        raise HTTPException(400, "只能查询待确认或已处理的记忆候选")
     q = select(MemoryCandidate).where(MemoryCandidate.user_id == user.id)
     if status:
         q = q.where(MemoryCandidate.status == status)

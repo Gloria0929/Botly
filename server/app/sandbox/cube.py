@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from collections import deque
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -137,6 +138,38 @@ def read_bytes(sandbox: Sandbox, path: str) -> bytes:
         return b"".join(chunks)
 
 
+def remote_hashes(sandbox: Sandbox, paths: list[str]) -> dict[str, str] | None:
+    """在沙箱中批量计算摘要，避免为检查变化而逐个下载完整文件。"""
+    hashes = {}
+    pending = deque(paths)
+    while pending:
+        batch, length = [], 0
+        while pending and len(batch) < 128 and (not batch or length + len(shlex.quote(pending[0]).encode()) < 24000):
+            path = pending.popleft()
+            batch.append(path)
+            length += len(shlex.quote(path).encode()) + 1
+        command = "sha256sum -z -- " + " ".join(shlex.quote(path) for path in batch)
+        result = sandbox.commands.run(command, timeout=LINUX_SANDBOX_TIMEOUT, cwd=WORKSPACE)
+        if int(result.exit_code) == 127:
+            return None  # 精简模板缺少摘要工具时沿用完整同步，不阻断原有命令。
+        if int(result.exit_code) != 0:
+            raise ValueError("Cube 文件摘要计算失败，请确认沙箱提供 sha256sum 且文件未被同时删除")
+        current = {}
+        expected = set(batch)
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            digest, separator, path = record.partition("  ")
+            if (not separator or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)
+                    or path not in expected or path in current):
+                raise ValueError("Cube 返回了无效的文件摘要")
+            current[path] = digest
+        if set(current) != expected:
+            raise ValueError("Cube 返回的文件摘要不完整")
+        hashes.update(current)
+    return hashes
+
+
 def ensure_directory(sandbox: Sandbox, path: str) -> None:
     # Cube 的 MakeDir 对已存在目录返回 already_exists；模板通常自带 /workspace。
     if sandbox.files.exists(path):
@@ -193,8 +226,8 @@ def probe(connection: CubeConnection) -> dict:
 
 
 @asynccontextmanager
-async def chat_lock(user_id: str, chat_id: str):
-    """同群命令与文件同步串行；跨 Worker 复用数据库锁或 SQLite 文件锁。"""
+async def chat_lock(user_id: str, chat_id: str, *, shared: bool = False):
+    """跨 Worker 资源锁：同步互斥，独立任务可共享执行锁。"""
     key = user_id + ":" + chat_id
     if not IS_SQLITE:
         from psycopg import AsyncConnection
@@ -202,14 +235,16 @@ async def chat_lock(user_id: str, chat_id: str):
             acquired = False
             try:
                 while not acquired:
-                    cur = await conn.execute("SELECT pg_try_advisory_lock(782341995, hashtext(%s))", (key,))
+                    lock_fn = "pg_try_advisory_lock_shared" if shared else "pg_try_advisory_lock"
+                    cur = await conn.execute(f"SELECT {lock_fn}(782341995, hashtext(%s))", (key,))
                     acquired = bool((await cur.fetchone())[0])
                     if not acquired:
                         await asyncio.sleep(.05)
                 yield
             finally:
                 if acquired:
-                    await conn.execute("SELECT pg_advisory_unlock(782341995, hashtext(%s))", (key,))
+                    unlock_fn = "pg_advisory_unlock_shared" if shared else "pg_advisory_unlock"
+                    await conn.execute(f"SELECT {unlock_fn}(782341995, hashtext(%s))", (key,))
     else:
         import fcntl
         directory = DATA_DIR / "sandbox-locks"
@@ -217,7 +252,7 @@ async def chat_lock(user_id: str, chat_id: str):
         with (directory / (hashlib.sha256(key.encode()).hexdigest() + ".lock")).open("a") as lock:
             while True:
                 try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
                     await asyncio.sleep(.05)
@@ -349,10 +384,14 @@ class CubeBackend:
         finally:
             close_client(sandbox)
 
-    def _push(self, sandbox, user_id, chat_id, manifest):
-        current = {}
+    def _push(self, sandbox, user_id, chat_id, manifest, workspace=""):
+        from app.sandbox.artifacts import in_execution_scope
+        current = {rel: digest for rel, digest in manifest.items()
+                   if workspace and not in_execution_scope(rel, workspace)}
         for item in files.list_files(user_id, chat_id):
             rel = item["path"]
+            if workspace and not in_execution_scope(rel, workspace):
+                continue
             if not is_artifact_file(user_id, chat_id, rel):
                 continue
             local = files.safe_path(user_id, chat_id, rel)
@@ -377,6 +416,7 @@ class CubeBackend:
                     if is_task_path(rel) and not any(rel.startswith(scope + "/") for scope in scopes)} if workspace else {}
         directories = [WORKSPACE]
         count = 0
+        candidates = []
         while directories:
             directory = directories.pop()
             entries = sandbox.files.list(directory)
@@ -403,12 +443,20 @@ class CubeBackend:
                     # envd 的 protobuf int64 在 JSON 中是字符串。
                     if int(entry.get("size", 0) or 0) > 10 * 1024 * 1024:
                         raise ValueError(f"产物 {rel} 超过单文件 10 MB 限制")
-                    data = read_bytes(sandbox, str(remote))
-                    files.write_bytes(user_id, chat_id, rel, data)
-                    manifest[rel] = hashlib.sha256(data).hexdigest()
+                    candidates.append((rel, str(remote)))
                 elif kind not in ("symlink", "symbolic_link"):
                     raise ValueError(f"Cube 返回了未知文件类型：{kind}")
                 # 不下载远端符号链接，避免沙箱外文件被同步到本地。
+        hashes = remote_hashes(sandbox, [remote for _, remote in candidates])
+        for rel, remote in candidates:
+            digest = hashes.get(remote) if hashes is not None else None
+            local = files.safe_path(user_id, chat_id, rel)
+            if digest and local.is_file() and hashlib.sha256(local.read_bytes()).hexdigest() == digest:
+                manifest[rel] = digest
+                continue
+            data = read_bytes(sandbox, remote)
+            files.write_bytes(user_id, chat_id, rel, data)
+            manifest[rel] = hashlib.sha256(data).hexdigest()
         for rel in old_manifest.keys() - manifest.keys():
             if is_artifact_path(rel) and (not workspace or any(rel.startswith(scope + "/") for scope in scopes)):
                 files.delete_file(user_id, chat_id, rel)
@@ -472,8 +520,7 @@ class CubeBackend:
         return None
 
     async def run_command(self, user_id, chat_id, command, *, bot_id=None, run_id=None):
-        async with chat_lock(user_id, chat_id):
-            return await self._run_locked(user_id, chat_id, command, LINUX_SANDBOX_TIMEOUT, bot_id, run_id)
+        return await self._run_locked(user_id, chat_id, command, LINUX_SANDBOX_TIMEOUT, bot_id, run_id)
 
     async def run_code(self, user_id, chat_id, code, language, *, bot_id=None, run_id=None):
         runner = {"python": "python3", "node": "node", "bash": "bash", "sh": "sh"}.get(language)
@@ -483,11 +530,64 @@ class CubeBackend:
         import base64
         payload = base64.b64encode(code.encode()).decode()
         command = f"printf %s {shlex.quote(payload)} | base64 -d | {runner}"
+        return await self._run_locked(user_id, chat_id, command, CODE_SANDBOX_TIMEOUT, bot_id, run_id)
+
+    def _prepare_isolated_command(self, user_id, chat_id, workspace, run_id):
+        sandbox, session = self._open(user_id, chat_id)
+        try:
+            ensure_directory(sandbox, f"{WORKSPACE}/{workspace}")
+            pushed = self._push(sandbox, user_id, chat_id, session.files_manifest or {}, workspace)
+            baseline = self._pull(sandbox, user_id, chat_id, pushed, run_id=run_id)
+            return sandbox, baseline
+        except BaseException:
+            close_client(sandbox)
+            raise
+
+    def _finish_isolated_command(self, sandbox, user_id, chat_id, workspace, baseline, result, bot_id, run_id):
+        from app.sandbox.artifacts import in_execution_scope
+        with session_scope() as db:
+            session = db.scalar(select(CubeSession).where(CubeSession.user_id == user_id, CubeSession.chat_id == chat_id))
+            latest = dict(session.files_manifest or {})
+            if result is not None:
+                session.last_executed_at, session.last_exit_code = now(), int(result.exit_code)
+        # 当前任务沿用开工前的基线；其他任务保留它们刚提交的最新清单。
+        latest.update({rel: digest for rel, digest in baseline.items() if in_execution_scope(rel, workspace)})
+        self._pull(sandbox, user_id, chat_id, latest, bot_id, run_id)
+
+    async def _execute_isolated(self, user_id, chat_id, workspace, command, timeout, bot_id, run_id):
         async with chat_lock(user_id, chat_id):
-            return await self._run_locked(user_id, chat_id, command, CODE_SANDBOX_TIMEOUT, bot_id, run_id)
+            sandbox, baseline = await asyncio.to_thread(self._prepare_isolated_command, user_id, chat_id, workspace, run_id)
+        result = None
+        try:
+            wrapped = f"timeout -s KILL {timeout} bash -lc {shlex.quote(command)}"
+            try:
+                result = await asyncio.to_thread(sandbox.commands.run, wrapped, cwd=f"{WORKSPACE}/{workspace}",
+                                                timeout=timeout + 15, envs=TERMINAL_ENV)
+            finally:
+                async with chat_lock(user_id, chat_id):
+                    await asyncio.to_thread(self._finish_isolated_command, sandbox, user_id, chat_id, workspace,
+                                            baseline, result, bot_id, run_id)
+            combined = "\n".join(value.strip() for value in (result.stdout, result.stderr) if value.strip())
+            return (UNTRUSTED_PREFIX + f"状态环境：Cube · 沙箱 {sandbox.sandbox_id}\n退出码 {int(result.exit_code)}\n"
+                    + (combined[:20000] or "（无输出）"))
+        finally:
+            close_client(sandbox)
 
     async def _run_locked(self, user_id, chat_id, command, timeout, bot_id=None, run_id=None):
-        task = asyncio.create_task(asyncio.to_thread(self._execute, user_id, chat_id, command, timeout, bot_id, run_id))
+        from app.sandbox.workspace import workspace_for_run
+
+        async def execute():
+            workspace = await asyncio.to_thread(workspace_for_run, user_id, chat_id, run_id)
+            isolated = workspace.startswith("output/tasks/")
+            # 独立任务共享执行锁；共享目录命令独占，避免与独立任务混跑。
+            async with chat_lock(user_id, chat_id + ":commands", shared=isolated):
+                if isolated:
+                    async with chat_lock(user_id, chat_id + ":" + workspace):
+                        return await self._execute_isolated(user_id, chat_id, workspace, command, timeout, bot_id, run_id)
+                async with chat_lock(user_id, chat_id):
+                    return await asyncio.to_thread(self._execute, user_id, chat_id, command, timeout, bot_id, run_id)
+
+        task = asyncio.create_task(execute())
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -498,7 +598,7 @@ class CubeBackend:
             return "Cube 沙箱执行失败：" + safe_error(exc, self.connection)
 
     async def release(self, user_id, chat_id):
-        async with chat_lock(user_id, chat_id):
+        async with chat_lock(user_id, chat_id + ":commands"), chat_lock(user_id, chat_id):
             await asyncio.to_thread(self._release, user_id, chat_id)
 
     def _release(self, user_id, chat_id, delete_record=True):
