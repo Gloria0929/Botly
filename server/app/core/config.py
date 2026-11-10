@@ -75,6 +75,12 @@ MAX_REASSIGN = 1
 # RUN-12：一个计划批次最多并行几个子任务。超过上限的批次会被拆成多轮，
 # 避免一次把 Worker 的并发名额占满。
 MAX_PARALLEL_SUBTASKS = max(2, int(os.getenv("BOTLY_MAX_PARALLEL_SUBTASKS", "4")))
+
+# 自由群聊路由：一次轻量的托管模型调用，按内容挑选该接话的成员；超时或失败自动回退到轮换规则。
+FREE_CHAT_ROUTER_ENABLED = os.getenv("BOTLY_FREE_ROUTER", "1").strip().lower() not in ("0", "false", "no", "off")
+FREE_CHAT_ROUTER_TIMEOUT = max(1.0, float(os.getenv("BOTLY_FREE_ROUTER_TIMEOUT", "4")))
+# 留空则使用参与路由的成员自己的模型；建议填同一接入里更快更便宜的小模型。
+FREE_CHAT_ROUTER_MODEL = os.getenv("BOTLY_FREE_ROUTER_MODEL", "").strip()
 APPROVAL_TTL_HOURS = 24
 MEMORY_INJECT_LIMIT = 4000
 # MEM-05：主线程历史超过该 token 估算值时，用总指挥模型生成摘要替换更早的历史。

@@ -7,15 +7,24 @@ import re
 
 from sqlalchemy import select
 
+from app.agent.execution_config import execution_provider
 from app.agent.llm import LLMError
+from app.agent.router import route_members
 from app.agent.signals import AwaitChildren
+from app.core.config import FREE_CHAT_ROUTER_ENABLED, FREE_CHAT_ROUTER_MODEL, FREE_CHAT_ROUTER_TIMEOUT
 from app.core.db import IS_SQLITE, session_scope
 from app.core.events import emit
+from app.core.logging_setup import get_logger
 from app.core.models import Bot, Chat, Message, Run, Task, uid
 from app.core.redis_bus import enqueue
+from app.core.security import decrypt_secret
 from app.core.similarity import normalize
 
+log = get_logger(__name__)
+
 ACTIVE = ("queued", "running", "waiting", "waiting_children")
+GROUP_GREETINGS = {"大家好", "你们好", "谢谢大家"}
+ROUTER_MAX_PICK = 3
 
 
 def social_message(content: str) -> bool:
@@ -136,15 +145,121 @@ class FreeChatMixin:
             last_chance[bot.id], -(bot.proactivity or 0),
         ))]
 
+    def _named_partner(self, db, run: Run, members: list[Bot]) -> str | None:
+        """用户直接叫名字提问时，对话对象切换到被叫的成员，不必为了换人先输入 @。"""
+        trigger = db.get(Message, run.trigger_message_id)
+        if not trigger:
+            return None
+        for bot in members:
+            if re.search(rf"(?:^|[，,。！？!?]\s*){re.escape(bot.name)}[，,:：\s]*(?:你|请|帮|怎么看|觉得)",
+                         conversation_body(trigger.content)):
+                return bot.id
+        return None
+
+    def _route_inputs(self) -> dict | None:
+        """首次分发前读取路由所需的上下文；已路由、定向、静音、一对一问候或候选不足时返回 None。"""
+        with session_scope() as db:
+            run = db.get(Run, self.run_id)
+            if not run or run.kind != "free" or run.parent_run_id or not run.trigger_message_id:
+                return None
+            state = (run.config_snapshot or {}).get("free") or {}
+            if state.get("direct_started") or state.get("route_done") or state.get("directed"):
+                return None
+            chat = db.get(Chat, run.chat_id)
+            trigger = db.get(Message, run.trigger_message_id)
+            if not chat or not trigger or chat.muted:
+                return None
+            if social_message(trigger.content) and normalize(trigger.content) not in GROUP_GREETINGS:
+                return None
+            configs = run.config_snapshot.get("bot_configs", {})
+            members = [bot for bot in self._member_bots(db, chat, run)
+                       if bot.enabled is not False and bot.provider_id and bot.id in configs]
+            # 积极度为 0 的成员不参与可选发言，路由也不能把他选出来。
+            candidates = [bot for bot in members if bot.proactivity > 0]
+            if len(candidates) < 2:
+                return None
+            leader_id = (run.config_snapshot.get("supervisor") or {}).get("id")
+            ordered = sorted(candidates, key=lambda bot: bot.id != leader_id)
+            host = provider = None
+            for bot in ordered:
+                provider = execution_provider(db, run, bot)
+                if provider:
+                    host = bot
+                    break
+            if not provider:
+                return None
+            model = FREE_CHAT_ROUTER_MODEL or host.model or (provider.models[0]["name"] if provider.models else "")
+            names = {bot.id: bot.name for bot in members}
+            recent = {bot.id: 0 for bot in candidates}
+            rows = db.scalars(select(Message).where(
+                Message.thread_id == trigger.thread_id, Message.seq < trigger.seq,
+                Message.type == "text", Message.status == "done",
+            ).order_by(Message.seq.desc()).limit(24))
+            history = []
+            for message in reversed(list(rows)):
+                meta = message.meta or {}
+                if meta.get("delegation") or meta.get("subtask_live") or not (message.content or "").strip():
+                    continue
+                if message.sender_type == "bot":
+                    who = names.get(message.sender_bot_id) or "成员"
+                    if message.sender_bot_id in recent:
+                        recent[message.sender_bot_id] += 1
+                else:
+                    who = "用户"
+                history.append({"who": who, "text": message.content})
+            return {
+                "kind": provider.kind, "base_url": provider.base_url,
+                "api_key": decrypt_secret(provider.api_key_encrypted), "model": model,
+                "content": trigger.content, "history": history[-12:],
+                "members": [{"id": bot.id, "name": bot.name, "role": bot.role, "persona": bot.persona or "",
+                             "proactivity": bot.proactivity, "recent": recent[bot.id]} for bot in candidates],
+                "max_pick": max(1, min(int(state.get("max_speakers") or ROUTER_MAX_PICK), ROUTER_MAX_PICK)),
+            }
+
+    def _save_route(self, picks: list[dict] | None) -> None:
+        with session_scope() as db:
+            if IS_SQLITE:
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            run = db.scalar(select(Run).where(Run.id == self.run_id).with_for_update())
+            self._assert_lease(db, run)
+            state = dict(run.config_snapshot["free"])
+            if state.get("direct_started"):
+                return
+            state["route_done"] = True
+            state["route"] = list(picks or [])
+            self._save_free_state(run, state)
+
+    async def _route_free_message(self) -> None:
+        """首次分发前让路由模型按内容挑选接话成员；任何失败都回到原有的轮换规则，不影响回复。"""
+        if not FREE_CHAT_ROUTER_ENABLED:
+            return
+        data = await asyncio.to_thread(self._route_inputs)
+        if not data:
+            return
+        try:
+            picks = await route_members(**data, timeout=FREE_CHAT_ROUTER_TIMEOUT)
+        except Exception as exc:
+            log.warning("自由群聊路由异常，回退到轮换规则：%s", type(exc).__name__)
+            picks = None
+        await asyncio.to_thread(self._save_route, picks)
+
+    @staticmethod
+    def _routed_order(state: dict, eligible: set[str], available: set[str], named: str | None) -> tuple[list[str], dict]:
+        """路由建议转成接话顺序。只采纳积极度大于 0 的成员；被用户直接叫到名字的成员排第一。"""
+        picks = [item for item in state.get("route") or [] if item.get("bot_id") in eligible]
+        order = list(dict.fromkeys(item["bot_id"] for item in picks))
+        if order and named in available and order[0] != named:
+            order = [named, *[bid for bid in order if bid != named]]
+        reasons = {item["bot_id"]: item.get("reason") or "" for item in picks}
+        return order[:state["max_speakers"]], reasons
+
     def _conversation_partner(self, db, run: Run, members: list[Bot]) -> str | None:
         available = {bot.id for bot in members}
         trigger = db.get(Message, run.trigger_message_id)
         if trigger:
-            # 用户可以直接叫名字接着聊，不必为了换对话对象先输入 @。
-            for bot in members:
-                if re.search(rf"(?:^|[，,。！？!?]\s*){re.escape(bot.name)}[，,:：\s]*(?:你|请|帮|怎么看|觉得)",
-                             conversation_body(trigger.content)):
-                    return bot.id
+            named = self._named_partner(db, run, members)
+            if named:
+                return named
             # 只有追问才延续对象；普通新话题不能永久绑定同一个成员。
             followup = re.match(
                 r"(?:继续|接着|再(?:说|讲|聊|解释|展开|补充)|[你您](?:刚才|说|提|觉得|认为)|刚才|"
@@ -194,6 +309,14 @@ class FreeChatMixin:
                 state.setdefault("scheduled", [])
                 state.setdefault("peer_ids", [])
                 state["primary_bot_id"] = None if state["directed"] else self._conversation_partner(db, run, members)
+                routed, reasons = [], {}
+                if not state["directed"]:
+                    routed, reasons = self._routed_order(
+                        state, {bot.id for bot in members if bot.proactivity > 0}, available,
+                        self._named_partner(db, run, members))
+                    if routed:
+                        state["primary_bot_id"] = routed[0]
+                        state["route_reasons"] = reasons
                 state.setdefault("speaker_claims", list(dict.fromkeys(state["spoken"])))
                 state.setdefault("speaker_turns", [])
                 run.round = max(1, run.round)
@@ -201,14 +324,19 @@ class FreeChatMixin:
                     if bot.id == state["primary_bot_id"] or bot.proactivity > 0]
                 if not state["directed"]:
                     trigger = db.get(Message, run.trigger_message_id)
-                    if trigger and social_message(trigger.content) and normalize(trigger.content) not in {"大家好", "你们好", "谢谢大家"}:
+                    if trigger and social_message(trigger.content) and normalize(trigger.content) not in GROUP_GREETINGS:
                         targets = [state["primary_bot_id"]] if state["primary_bot_id"] else []
-                    order = self._participation_order(db, run, members)
-                    targets.sort(key=lambda bid: (bid != state["primary_bot_id"], order.index(bid)))
+                    if routed:
+                        # 路由按内容挑出的人就是本条消息的参与者；没被选中的成员不再凑数。
+                        targets = list(routed)
+                    else:
+                        order = self._participation_order(db, run, members)
+                        targets.sort(key=lambda bid: (bid != state["primary_bot_id"], order.index(bid)))
                 state["initial_bot_ids"] = targets[:min(2, state["max_speakers"])]
                 queue = [{"bot_id": bid, "required": state["directed"] or bid == state["primary_bot_id"],
                           "primary": bid == state["primary_bot_id"], "round": run.round,
-                          "initial": bid in state["initial_bot_ids"]}
+                          "initial": bid in state["initial_bot_ids"],
+                          **({"route_reason": reasons[bid]} if reasons.get(bid) else {})}
                          for bid in targets if bid not in state["spoken"]]
             children = list(db.scalars(select(Run).where(Run.parent_run_id == run.id).order_by(Run.created_at, Run.id)))
             peers = [child for child in children if child.kind == "free"]
@@ -324,6 +452,7 @@ class FreeChatMixin:
 
     async def choose_free_peers(self) -> dict:
         await asyncio.to_thread(self._check_limits)
+        await self._route_free_message()
         ids, waiting, error = await asyncio.to_thread(self._parallel_free_batch)
         for child_id in ids:
             await asyncio.to_thread(enqueue, child_id)

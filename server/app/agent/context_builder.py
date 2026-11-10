@@ -321,6 +321,8 @@ class ContextBuilderMixin:
                 parts.append("根据已经看到的群聊接话，可以补充经验、接一个问题或提出不同想法。"
                              "没有可说的内容、只想同义复述或单纯附和时，直接输出 [PASS]。")
             parts.append("本次不调用工具，也不重复认领别人正在做的工作。")
+        if selected.get("route_reason"):
+            parts.append(f"选你来接这条消息的原因（仅供参考，不必提到）：{selected['route_reason']}。")
         if not observer:
             parts.extend([
                 skillmod.prompt_block(skillmod.for_bot(db, run.user_id, bot)),
